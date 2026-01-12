@@ -1,0 +1,3 @@
+[submodule "DELILA2"]
+	path = DELILA2
+	url = https://github.com/aogaki/DELILA2
