@@ -1,0 +1,82 @@
+# DELILA DAQ Configuration Example
+# Copy this file to config.toml and modify as needed
+
+# =============================================================================
+# Network Topology
+# =============================================================================
+
+[network]
+cluster_name = "daq-cluster-1"
+
+# Data sources (emulators or real digitizers)
+# id = module number (0-indexed)
+[[network.sources]]
+id = 0
+name = "digitizer-0"
+bind = "tcp://*:5555"
+command = "tcp://*:5560"  # Command port for Start/Stop control
+
+[[network.sources]]
+id = 1
+name = "digitizer-1"
+bind = "tcp://*:5556"
+command = "tcp://*:5561"  # Each source needs unique command port
+
+# Merger: receives from all sources, publishes merged stream
+[network.merger]
+subscribe = ["tcp://localhost:5555", "tcp://localhost:5556"]
+publish = "tcp://*:5557"
+command = "tcp://*:5570"  # Command port for Start/Stop control
+channel_capacity = 1000   # internal buffer size
+
+# Recorder: writes data to disk
+[network.recorder]
+subscribe = "tcp://localhost:5557"
+command = "tcp://*:5580"  # Command port for Start/Stop control
+output_dir = "./data"
+
+# Monitor: web interface for live monitoring
+[network.monitor]
+subscribe = "tcp://localhost:5557"
+http_port = 8080
+
+# =============================================================================
+# Control System
+# =============================================================================
+#
+# Each component listens on its command port for JSON commands:
+#   - Start: {"Start":null}      - Begin data acquisition
+#   - Stop:  {"Stop":null}       - Stop data acquisition
+#   - GetStatus: {"GetStatus":null} - Query current state and statistics
+#
+# Use the controller CLI to send commands:
+#   cargo run --bin controller -- start tcp://localhost:5560
+#   cargo run --bin controller -- status tcp://localhost:5570
+#   cargo run --bin controller -- stop tcp://localhost:5580
+#
+# Port allocation convention:
+#   - 5555-5559: Data ports (PUB/SUB)
+#   - 5560-5569: Source command ports (REQ/REP)
+#   - 5570-5579: Merger command ports (REQ/REP)
+#   - 5580-5589: Recorder/Sink command ports (REQ/REP)
+
+# =============================================================================
+# Operational Settings
+# =============================================================================
+
+[settings]
+# Source of settings: "file" or "mongodb"
+source = "file"
+
+# File-based settings (used when source = "file")
+[settings.file]
+events_per_batch = 100
+batch_interval_ms = 100
+num_modules = 2
+channels_per_module = 16
+
+# MongoDB settings (used when source = "mongodb")
+# [settings.mongodb]
+# uri = "mongodb://localhost:27017"
+# database = "delila"
+# collection = "run_config"

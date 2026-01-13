@@ -1,0 +1,54 @@
+# DELILA DAQ Configuration
+# Multi-emulator test configuration
+
+# =============================================================================
+# Network Topology
+# =============================================================================
+
+[network]
+cluster_name = "daq-cluster-1"
+
+# Data sources (emulators or real digitizers)
+# id = module number (0-indexed)
+[[network.sources]]
+id = 0
+name = "digitizer-0"
+bind = "tcp://*:5555"
+command = "tcp://*:5560"
+
+[[network.sources]]
+id = 1
+name = "digitizer-1"
+bind = "tcp://*:5556"
+command = "tcp://*:5561"
+
+# Merger: receives from all sources, publishes merged stream
+[network.merger]
+subscribe = ["tcp://localhost:5555", "tcp://localhost:5556"]
+publish = "tcp://*:5557"
+command = "tcp://*:5570"
+channel_capacity = 1000
+
+# Recorder: writes data to disk
+[network.recorder]
+subscribe = "tcp://localhost:5557"
+command = "tcp://*:5580"
+output_dir = "./data"
+
+# Monitor: web interface for live monitoring
+[network.monitor]
+subscribe = "tcp://localhost:5557"
+http_port = 8080
+
+# =============================================================================
+# Operational Settings
+# =============================================================================
+
+[settings]
+source = "file"
+
+[settings.file]
+events_per_batch = 50000  # Larger batches = higher throughput
+batch_interval_ms = 0     # 0 = full speed (stress test)
+num_modules = 2
+channels_per_module = 16

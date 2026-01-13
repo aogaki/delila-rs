@@ -1,6 +1,70 @@
 [package]
 name = "delila-rs"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
+description = "High-performance DAQ system for nuclear physics experiments"
+license = "MIT"
 
 [dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# ZeroMQ (Tokio bindings)
+tmq = "0.4"
+zmq = "0.10"
+futures = "0.3"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rmp-serde = "1"
+toml = "0.8"
+
+# Error handling
+thiserror = "1"
+anyhow = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Random (for emulator)
+rand = "0.8"
+
+# High-performance synchronization primitives
+parking_lot = "0.12"
+dashmap = "6"
+
+# Web API
+axum = "0.7"
+tower-http = { version = "0.5", features = ["cors"] }
+
+# Swagger / OpenAPI
+utoipa = { version = "4", features = ["axum_extras"] }
+utoipa-swagger-ui = { version = "7", features = ["axum"] }
+
+[build-dependencies]
+bindgen = "0.70"
+
+[dev-dependencies]
+tokio-test = "0.4"
+
+[[bin]]
+name = "emulator"
+path = "src/bin/emulator.rs"
+
+[[bin]]
+name = "data_sink"
+path = "src/bin/data_sink.rs"
+
+[[bin]]
+name = "merger"
+path = "src/bin/merger.rs"
+
+[[bin]]
+name = "controller"
+path = "src/bin/controller.rs"
+
+[[bin]]
+name = "operator"
+path = "src/bin/operator.rs"
