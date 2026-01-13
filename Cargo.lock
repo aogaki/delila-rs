@@ -328,6 +328,7 @@ dependencies = [
  "anyhow",
  "axum",
  "bindgen",
+ "cc",
  "dashmap",
  "futures",
  "parking_lot",

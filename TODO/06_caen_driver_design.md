@@ -1,6 +1,6 @@
 # 06: CAEN FFI Driver Design (Phase 2)
 
-**Status: DRAFT** (2026-01-13)
+**Status: COMPLETED** (2026-01-13)
 
 ## Goal
 Design and implement a safe Rust wrapper for CAEN digitizers based on analysis of the C++ DELILA2/lib/digitizer implementation.
@@ -43,7 +43,10 @@ IDecoder (interface)
 
 ## Part 2: Data Format Details
 
-### PSD2 Format (64-bit words, Big Endian → Little Endian)
+### PSD2 Format (64-bit words, Native Little Endian on x86/ARM)
+
+**注意**: C++ 実装では memcpy でそのまま読み込んでおり、バイトスワップは行っていない。
+データは Little Endian でメモリに格納されている。
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -172,402 +175,200 @@ Stop Signal:  3 words, [63:60]=0x3, [59:56]=0x2, ...
 
 **重要**: ReadLoop と DecodeLoop を分離する理由は、デコード処理がブロックされても HW バッファが溢れないようにするため。
 
-### File Structure
+### File Structure (実装済み)
 
 ```
 src/
 ├── reader/
-│   ├── mod.rs              # Reader struct, two-task architecture
+│   ├── mod.rs              # Reader struct with two-task architecture ✅
 │   ├── caen/
-│   │   ├── mod.rs          # Re-exports
-│   │   ├── ffi.rs          # bindgen generated bindings
-│   │   ├── handle.rs       # CaenHandle with RAII Drop
-│   │   ├── error.rs        # CaenError enum
-│   │   └── digitizer.rs    # Digitizer struct (unified Gen1/Gen2)
+│   │   ├── mod.rs          # Re-exports ✅
+│   │   ├── ffi.rs          # bindgen generated bindings ✅
+│   │   ├── handle.rs       # CaenHandle with RAII Drop ✅
+│   │   ├── error.rs        # CaenError enum ✅
+│   │   ├── wrapper.h       # Header for bindgen ✅
+│   │   └── wrapper.c       # C wrapper for variadic functions ✅
 │   └── decoder/
-│       ├── mod.rs          # Decoder enum + dispatch
-│       ├── common.rs       # Shared types (RawData, DataType, etc.)
-│       ├── psd2.rs         # PSD2 decoder (64-bit)
-│       ├── psd1.rs         # PSD1 decoder (32-bit)
-│       └── pha1.rs         # PHA1 decoder (32-bit)
-```
-
-### Core Types
-
-```rust
-// src/reader/decoder/common.rs
-
-/// Raw data from digitizer
-pub struct RawData {
-    pub data: Vec<u8>,
-    pub size: usize,
-    pub n_events: u32,
-}
-
-/// Data classification
-pub enum DataType {
-    Start,
-    Stop,
-    Event,
-    Unknown,
-}
-
-/// Decoder result for error handling
-pub enum DecodeResult {
-    Success,
-    InvalidHeader,
-    InsufficientData,
-    CorruptedData,
-    OutOfBounds,
-}
-
-/// Waveform configuration (PSD2)
-pub struct WaveformConfig {
-    pub ap1_signed: bool,
-    pub ap2_signed: bool,
-    pub ap1_mul_factor: u32,
-    pub ap2_mul_factor: u32,
-}
-```
-
-### Decoder Enum
-
-```rust
-// src/reader/decoder/mod.rs
-
-#[derive(Clone)]
-pub enum Decoder {
-    Psd1(Psd1Decoder),
-    Psd2(Psd2Decoder),
-    Pha1(Pha1Decoder),
-}
-
-impl Decoder {
-    /// Create decoder from firmware type detected via Device Tree
-    pub fn from_firmware_type(fw_type: FirmwareType, config: DecoderConfig) -> Self {
-        match fw_type {
-            FirmwareType::Psd1 => Decoder::Psd1(Psd1Decoder::new(config)),
-            FirmwareType::Psd2 => Decoder::Psd2(Psd2Decoder::new(config)),
-            FirmwareType::Pha1 => Decoder::Pha1(Pha1Decoder::new(config)),
-            _ => panic!("Unsupported firmware type"),
-        }
-    }
-
-    /// Classify data type (Start/Stop/Event/Unknown)
-    pub fn classify(&self, raw: &RawData) -> DataType {
-        match self {
-            Decoder::Psd1(d) => d.classify(raw),
-            Decoder::Psd2(d) => d.classify(raw),
-            Decoder::Pha1(d) => d.classify(raw),
-        }
-    }
-
-    /// Decode raw data to events (pure function, stateless)
-    pub fn decode(&self, raw: &RawData) -> Vec<EventData> {
-        match self {
-            Decoder::Psd1(d) => d.decode(raw),
-            Decoder::Psd2(d) => d.decode(raw),
-            Decoder::Pha1(d) => d.decode(raw),
-        }
-    }
-}
-```
-
-### PSD2 Decoder Implementation Sketch
-
-```rust
-// src/reader/decoder/psd2.rs
-
-/// PSD2 constants (64-bit words, big endian source)
-mod constants {
-    pub const WORD_SIZE: usize = 8;
-
-    // Header
-    pub const HEADER_TYPE_SHIFT: u32 = 60;
-    pub const HEADER_TYPE_MASK: u64 = 0xF;
-    pub const HEADER_TYPE_DATA: u64 = 0x2;
-    pub const AGGREGATE_COUNTER_SHIFT: u32 = 32;
-    pub const AGGREGATE_COUNTER_MASK: u64 = 0xFFFF;
-    pub const TOTAL_SIZE_MASK: u64 = 0xFFFFFFFF;
-
-    // Event first word
-    pub const CHANNEL_SHIFT: u32 = 56;
-    pub const CHANNEL_MASK: u64 = 0x7F;
-    pub const TIMESTAMP_MASK: u64 = 0xFFFFFFFFFFFF;
-
-    // Event second word
-    pub const WAVEFORM_FLAG_SHIFT: u32 = 62;
-    pub const ENERGY_SHORT_SHIFT: u32 = 26;
-    pub const ENERGY_SHORT_MASK: u64 = 0xFFFF;
-    pub const FINE_TIME_SHIFT: u32 = 16;
-    pub const FINE_TIME_MASK: u64 = 0x3FF;
-    pub const FINE_TIME_SCALE: f64 = 1024.0;
-    pub const ENERGY_MASK: u64 = 0xFFFF;
-
-    // Waveform
-    pub const WAVEFORM_WORDS_MASK: u64 = 0xFFF;
-    pub const ANALOG_PROBE_MASK: u32 = 0x3FFF;
-}
-
-#[derive(Clone)]
-pub struct Psd2Decoder {
-    time_step_ns: u32,
-    module_id: u8,
-}
-
-impl Psd2Decoder {
-    pub fn new(config: DecoderConfig) -> Self {
-        Self {
-            time_step_ns: config.time_step_ns,
-            module_id: config.module_id,
-        }
-    }
-
-    pub fn classify(&self, raw: &RawData) -> DataType {
-        if raw.size < 3 * constants::WORD_SIZE {
-            return DataType::Unknown;
-        }
-        if raw.size == 3 * constants::WORD_SIZE && self.is_stop_signal(raw) {
-            return DataType::Stop;
-        }
-        if raw.size == 4 * constants::WORD_SIZE && self.is_start_signal(raw) {
-            return DataType::Start;
-        }
-        DataType::Event
-    }
-
-    pub fn decode(&self, raw: &RawData) -> Vec<EventData> {
-        // Byte swap: big endian → little endian
-        let data = self.byte_swap_words(raw);
-
-        // Validate header
-        let header = self.read_u64(&data, 0);
-        if !self.validate_header(header) {
-            return vec![];
-        }
-
-        let total_size = (header & constants::TOTAL_SIZE_MASK) as usize;
-        let mut events = Vec::with_capacity(total_size / 2);
-        let mut word_index = 1;
-
-        while word_index < total_size {
-            if let Some(event) = self.decode_event(&data, &mut word_index) {
-                events.push(event);
-            }
-        }
-
-        // Sort by timestamp
-        events.sort_by(|a, b| a.timestamp_ns.partial_cmp(&b.timestamp_ns).unwrap());
-        events
-    }
-
-    fn byte_swap_words(&self, raw: &RawData) -> Vec<u8> {
-        let mut data = raw.data.clone();
-        for chunk in data.chunks_exact_mut(constants::WORD_SIZE) {
-            chunk.reverse();
-        }
-        data
-    }
-
-    fn read_u64(&self, data: &[u8], word_index: usize) -> u64 {
-        let offset = word_index * constants::WORD_SIZE;
-        u64::from_le_bytes(data[offset..offset+8].try_into().unwrap())
-    }
-
-    // ... decode_event, decode_waveform, is_start_signal, is_stop_signal
-}
-```
-
-### PSD1 Decoder Implementation Sketch
-
-```rust
-// src/reader/decoder/psd1.rs
-
-mod constants {
-    pub const WORD_SIZE: usize = 4;
-
-    // Board header
-    pub const HEADER_TYPE_SHIFT: u32 = 28;
-    pub const HEADER_TYPE_MASK: u32 = 0xF;
-    pub const HEADER_TYPE_DATA: u32 = 0xA;
-    pub const AGGREGATE_SIZE_MASK: u32 = 0x0FFFFFFF;
-    pub const DUAL_CHANNEL_MASK: u32 = 0xFF;
-    pub const BOARD_HEADER_WORDS: usize = 4;
-
-    // Channel header
-    pub const CHANNEL_HEADER_WORDS: usize = 2;
-    pub const SAMPLES_ENABLED_SHIFT: u32 = 27;
-    pub const EXTRAS_ENABLED_SHIFT: u32 = 28;
-    pub const CHARGE_ENABLED_SHIFT: u32 = 30;
-
-    // Event
-    pub const TRIGGER_TIME_MASK: u32 = 0x7FFFFFFF;
-    pub const ODD_CHANNEL_SHIFT: u32 = 31;
-}
-
-#[derive(Clone)]
-pub struct Psd1Decoder {
-    time_step_ns: u32,
-    module_id: u8,
-}
-
-impl Psd1Decoder {
-    // PSD1 has hierarchical structure:
-    // Board Aggregate → Dual Channel Blocks → Events
-
-    pub fn decode(&self, raw: &RawData) -> Vec<EventData> {
-        let mut events = Vec::new();
-        let mut word_index = 0;
-        let total_words = raw.size / constants::WORD_SIZE;
-
-        // Process multiple board aggregate blocks
-        while word_index < total_words {
-            if let Some(mut block_events) = self.decode_board_aggregate(raw, &mut word_index) {
-                events.append(&mut block_events);
-            }
-        }
-
-        events.sort_by(|a, b| a.timestamp_ns.partial_cmp(&b.timestamp_ns).unwrap());
-        events
-    }
-
-    // ... decode_board_aggregate, decode_channel_block, decode_event
-}
+│       ├── mod.rs          # Decoder re-exports ✅
+│       ├── common.rs       # Shared types (RawData, DataType, EventData) ✅
+│       ├── psd2.rs         # PSD2 decoder (64-bit) ✅
+│       ├── psd1.rs         # PSD1 decoder (32-bit) (後回し)
+│       └── pha1.rs         # PHA1 decoder (32-bit) (後回し)
+├── bin/
+│   └── reader.rs           # Reader binary ✅
 ```
 
 ---
 
-## Part 4: EventData Structure (Rust)
+## Part 4: Implementation Progress
 
-```rust
-// Extend existing src/common/mod.rs
+### Phase 2B: CAEN FFI (Hardware必要) - **COMPLETED** ✅
 
-/// Waveform data from digitizer
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct Waveform {
-    pub analog_probe1: Vec<i32>,
-    pub analog_probe2: Vec<i32>,
-    pub digital_probe1: Vec<u8>,
-    pub digital_probe2: Vec<u8>,
-    pub digital_probe3: Vec<u8>,
-    pub digital_probe4: Vec<u8>,
+- [x] Set up bindgen for CAEN_FELib headers
+- [x] Implement CaenHandle with RAII Drop
+- [x] Implement CaenError enum
+- [x] Implement EndpointHandle for data readout
+- [x] **C wrapper for variadic ReadData function** (macOS ARM64 issue fix)
+- [x] Test with real hardware (VX2730, DPP_PSD firmware)
 
-    pub time_resolution: u8,
-    pub down_sample_factor: u8,
-    pub analog_probe1_type: u8,
-    pub analog_probe2_type: u8,
-    pub digital_probe1_type: u8,
-    pub digital_probe2_type: u8,
-    pub digital_probe3_type: u8,
-    pub digital_probe4_type: u8,
+#### 実装詳細
+
+**問題**: `CAEN_FELib_ReadData` は variadic 関数 (`int CAEN_FELib_ReadData(uint64_t handle, int timeout, ...)`)
+であり、Rust から直接呼び出すと macOS ARM64 でセグフォが発生。
+
+**解決策**: C ラッパー関数を作成し、`cc` クレートでコンパイル。
+
+```c
+// wrapper.c
+int caen_read_data_raw(uint64_t handle, int timeout, uint8_t* data, size_t* size, uint32_t* n_events) {
+    return CAEN_FELib_ReadData(handle, timeout, data, size, n_events);
 }
+```
 
-/// Extended EventData with waveform support
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DigitizerEventData {
-    // Timing
-    pub timestamp_ns: f64,
+#### テスト結果 (2026-01-13)
 
-    // Identification
-    pub module: u8,
-    pub channel: u8,
+```
+===========================================
+CAEN Digitizer Info
+===========================================
+Connecting to: dig2://172.18.4.56
+[OK] Connected successfully
 
-    // Energy
-    pub energy: u16,
-    pub energy_short: u16,
+--- Device Information ---
+  ModelName           : VX2730
+  SerialNum           : 52622
+  FwType              : DPP_PSD
+  FPGA_FwVer          : 1.0.57
+  NumCh               : 32
+  ADC_SamplRate       : 500
+  ADC_Nbit            : 14
 
-    // Flags
-    pub flags: u64,
+--- Data Readout Test ---
+  [READ 1] size: 32 bytes, n_events: 1       <- Start Signal
+  [READ 2] size: 659336 bytes, n_events: 1   <- Event Data
+  [READ 3] size: 657704 bytes, n_events: 1
+  [READ 4] size: 652808 bytes, n_events: 1
+  [READ 5] size: 646280 bytes, n_events: 1
 
-    // Waveform (optional)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub waveform: Option<Waveform>,
-}
+  --- Summary ---
+  Total reads:  5
+  Total bytes:  2616160
+  Total events: 5
+  [OK] Data readout successful!
+```
 
-impl DigitizerEventData {
-    pub const FLAG_PILEUP: u64 = 0x01;
-    pub const FLAG_TRIGGER_LOST: u64 = 0x02;
-    pub const FLAG_OVER_RANGE: u64 = 0x04;
+### Phase 2A: Decoder Implementation (Hardware不要) - **COMPLETED** ✅
 
-    pub fn has_pileup(&self) -> bool {
-        (self.flags & Self::FLAG_PILEUP) != 0
-    }
-}
+- [x] Create `src/reader/decoder/mod.rs` with Decoder enum
+- [x] Create `src/reader/decoder/common.rs` with shared types
+- [x] Implement `src/reader/decoder/psd2.rs`
+  - [x] Header validation
+  - [x] Event decoding (channel, timestamp, energy)
+  - [x] Waveform decoding
+  - [x] Start/Stop signal detection
+  - [x] **Dump機能 (デバッグ用)**
+- [ ] Implement `src/reader/decoder/psd1.rs` (後回し)
+- [x] Unit tests with captured raw data
+
+### Phase 2C: Reader Integration - **COMPLETED** ✅
+
+- [x] Implement Reader with two-task architecture
+- [x] ReadLoop task (spawn_blocking for CAEN read)
+- [x] DecodeLoop task (decode + ZMQ publish)
+- [x] Integration with existing control system (5-state machine, command handling)
+- [x] Create bin/reader.rs binary
+- [x] Unit tests
+
+#### 実装詳細 (2026-01-13)
+
+**アーキテクチャ:**
+- `tokio::sync::mpsc::unbounded_channel` でReadLoop→DecodeLoop間のデータ転送
+- `tokio::task::spawn_blocking` でCAEN FFI読み取りをブロッキングスレッドで実行
+- `watch::channel` でコンポーネント状態をタスク間で共有
+- `broadcast::channel` でシャットダウンシグナルを配信
+
+**コンポーネント:**
+- `Reader` struct: メイン構造体、Emulatorと同様のパターン
+- `ReaderConfig`: URL, アドレス, ファームウェアタイプなどの設定
+- `ReaderMetrics`: events_decoded, bytes_read, batches_published, queue_length
+- `ReadLoop`: CAEN FFI読み取り専用（ブロッキング）
+- `DecodeLoop`: デコード + ZMQ publish（非同期）
+- `command_task`: REQ/REPコマンド処理
+
+**使用方法:**
+```bash
+cargo run --bin reader -- --url dig2://172.18.4.56
+cargo run --bin reader -- --url dig2://172.18.4.56 --source-id 0 --module-id 0
 ```
 
 ---
 
-## Part 5: Implementation Tasks
-
-### Phase 2A: Decoder Implementation (Hardware不要)
-
-- [ ] Create `src/reader/decoder/mod.rs` with Decoder enum
-- [ ] Create `src/reader/decoder/common.rs` with shared types
-- [ ] Implement `src/reader/decoder/psd2.rs`
-  - [ ] Byte swap (big endian → little endian)
-  - [ ] Header validation
-  - [ ] Event decoding (channel, timestamp, energy)
-  - [ ] Waveform decoding
-  - [ ] Start/Stop signal detection
-- [ ] Implement `src/reader/decoder/psd1.rs`
-  - [ ] Board aggregate parsing
-  - [ ] Dual channel header parsing
-  - [ ] Event decoding with extended timestamp
-  - [ ] Waveform decoding (different format)
-- [ ] Unit tests with captured raw data
-
-### Phase 2B: CAEN FFI (Hardware必要)
-
-- [ ] Set up bindgen for CAEN_FELib headers
-- [ ] Implement CaenHandle with RAII Drop
-- [ ] Implement CaenError enum
-- [ ] Implement Digitizer struct
-- [ ] Test with real hardware
-
-### Phase 2C: Reader Integration
-
-- [ ] Implement Reader with two-task architecture
-- [ ] ReadLoop task (spawn_blocking for CAEN read)
-- [ ] DecodeLoop task (decode + ZMQ publish)
-- [ ] Integration with existing control system
-
----
-
-## Part 6: Recommendations
-
-### bindgen について
-
-**質問への回答**: はい、bindgen のセットアップは実機で進めるのが良いです。
-
-理由:
-1. CAEN_FELib.h のパスはインストール環境依存
-2. 生成されたバインディングのテストには実機が必要
-3. エラーコードの挙動確認も実機で行うべき
-
-### 実装順序の推奨
-
-1. **Decoder を先に実装** (Phase 2A)
-   - C++ のキャプチャデータがあれば単体テスト可能
-   - FFI なしで純粋な Rust コードとして開発
-   - C++ 実装との比較検証が容易
-
-2. **FFI は実機作業時に** (Phase 2B)
-   - 実機がある環境で bindgen セットアップ
-   - Digitizer struct の実装とテスト
-   - Reader 統合
-
----
-
-## Dependencies
+## Part 5: Dependencies
 
 ```toml
 [build-dependencies]
-bindgen = "0.69"  # Phase 2B で追加
+bindgen = "0.70"
+cc = "1"  # C wrapper compilation
 
 [dependencies]
 # 既存の依存関係に追加なし
 # Decoder は標準ライブラリのみで実装可能
 ```
+
+---
+
+## Part 6: Key Learnings
+
+### macOS ARM64 での variadic FFI 問題
+
+- Rust は variadic C 関数を直接呼び出せない（ABI の問題）
+- 解決策: C ラッパー関数を作成し、具体的な引数で呼び出す
+- `cc` クレートで `build.rs` からコンパイル
+
+### VX2730 RAW データのエンディアン
+
+**重要な発見 (2026-01-13)**: VX2730 の RAW モードデータは **Big Endian** 形式で送信される。
+
+#### 症状
+- Rust で `u64::from_le_bytes()` を使用すると、ヘッダタイプが `0x8` と解釈される
+- 期待値は `0x2` であり、ビット位置が明らかにずれている
+
+#### 原因
+- VX2730 (x27xx シリーズ) の RAW エンドポイントデータは Big Endian 形式
+- 64-bit ワードの最上位バイトがデータ配列の先頭に来る
+
+#### 解決策
+```rust
+// 正しい実装
+fn read_u64(&self, data: &[u8], word_index: usize) -> u64 {
+    let offset = word_index * 8;
+    u64::from_be_bytes(data[offset..offset + 8].try_into().unwrap())
+}
+```
+
+#### C++ 実装との比較
+C++ の実装は `memcpy` を使用しているが、**間違っていない**。
+
+```cpp
+uint64_t headerWord = 0;
+std::memcpy(&headerWord, rawData->data.data(), sizeof(uint64_t));
+auto headerType = (headerWord >> 60) & 0xF;  // これでも正しく動作
+```
+
+**理由**: `memcpy` は Little Endian マシン (x86/ARM64) 上でバイト配列をそのまま `uint64_t` にコピーする。
+これにより、Big Endian データが「反転」された形で整数値として解釈されるが、
+C++ の定数（シフト量やマスク）はこの「反転後の値」に対して定義されているため、結果的に正しく動作する。
+
+両方のアプローチは正しい：
+- **C++**: `memcpy` + Little Endian マシンでの暗黙的バイトスワップ
+- **Rust**: `from_be_bytes()` で明示的に Big Endian として解釈
+
+#### 教訓
+- CAENドキュメントにはエンディアンの明確な記述がない場合がある
+- 実際のデータのビットパターンを確認することが重要
+- デバッグ用のダンプ機能は必須
+
+---
 
 ## Reference
 

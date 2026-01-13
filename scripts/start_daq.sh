@@ -26,16 +26,37 @@ if [ ! -f "$BINARY_DIR/emulator" ]; then
     cargo build --release
 fi
 
+# Function to check if source has digitizer_url
+has_digitizer_url() {
+    local src_id=$1
+    # Use awk to check if this source ID has a digitizer_url
+    awk -v target_id="$src_id" '
+        /^\[\[network\.sources\]\]/ { in_block=1; in_target=0; next }
+        in_block && /^\[/ { in_block=0; in_target=0 }
+        in_block && /^id *=/ {
+            gsub(/[^0-9]/, "", $3)
+            if ($3 == target_id) in_target=1
+            else in_target=0
+        }
+        in_block && in_target && /^digitizer_url *=/ { print "yes"; exit }
+    ' "$CONFIG_FILE"
+}
+
 # Extract source IDs from config
-SOURCE_IDS=$(grep -E "^id = " "$CONFIG_FILE" | awk '{print $3}')
+SOURCE_IDS=$(grep -E "^id = " "$CONFIG_FILE" | head -n $(grep -c "\[\[network.sources\]\]" "$CONFIG_FILE") | awk '{print $3}')
 
 echo ""
 echo -e "${GREEN}Starting components...${NC}"
 
-# Start emulators
+# Start emulators or readers based on config
 for id in $SOURCE_IDS; do
-    echo "  Starting emulator (source_id=$id)..."
-    $BINARY_DIR/emulator --config "$CONFIG_FILE" --source-id "$id" &
+    if [ "$(has_digitizer_url $id)" = "yes" ]; then
+        echo "  Starting reader (source_id=$id) [digitizer]..."
+        $BINARY_DIR/reader --config "$CONFIG_FILE" --source-id "$id" &
+    else
+        echo "  Starting emulator (source_id=$id)..."
+        $BINARY_DIR/emulator --config "$CONFIG_FILE" --source-id "$id" &
+    fi
     sleep 0.3
 done
 
@@ -55,7 +76,11 @@ echo ""
 echo "Command ports:"
 for id in $SOURCE_IDS; do
     port=$((5560 + id))
-    echo "  Emulator $id: tcp://localhost:$port"
+    if [ "$(has_digitizer_url $id)" = "yes" ]; then
+        echo "  Reader $id:   tcp://localhost:$port (digitizer)"
+    else
+        echo "  Emulator $id: tcp://localhost:$port"
+    fi
 done
 echo "  Merger:     tcp://localhost:5570"
 echo "  DataSink:   tcp://localhost:5580"

@@ -10,17 +10,29 @@ cluster_name = "daq-cluster-1"
 
 # Data sources (emulators or real digitizers)
 # id = module number (0-indexed)
+#
+# For emulator (no digitizer_url):
+#   reader binary will NOT work - use emulator binary instead
+#
+# For real digitizer (with digitizer_url):
+#   reader binary will connect to the digitizer via CAEN library
+
+# Example: Emulator source (for testing without hardware)
 [[network.sources]]
 id = 0
-name = "digitizer-0"
+name = "emulator-0"
 bind = "tcp://*:5555"
-command = "tcp://*:5560"  # Command port for Start/Stop control
+command = "tcp://*:5560"
 
+# Example: Real digitizer source
 [[network.sources]]
 id = 1
 name = "digitizer-1"
 bind = "tcp://*:5556"
-command = "tcp://*:5561"  # Each source needs unique command port
+command = "tcp://*:5561"
+digitizer_url = "dig2://172.18.4.56"  # CAEN dig2 protocol URL
+module_id = 0                         # Event tagging (default: same as id)
+time_step_ns = 2.0                    # ADC time step: 500MHz=2.0, 250MHz=4.0
 
 # Merger: receives from all sources, publishes merged stream
 [network.merger]

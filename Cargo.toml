@@ -45,6 +45,7 @@ utoipa-swagger-ui = { version = "7", features = ["axum"] }
 
 [build-dependencies]
 bindgen = "0.70"
+cc = "1"
 
 [dev-dependencies]
 tokio-test = "0.4"
@@ -68,3 +69,7 @@ path = "src/bin/controller.rs"
 [[bin]]
 name = "operator"
 path = "src/bin/operator.rs"
+
+[[bin]]
+name = "caen_info"
+path = "src/bin/caen_info.rs"

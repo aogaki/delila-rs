@@ -16,6 +16,14 @@ fn main() {
 
     // Tell cargo to invalidate the built crate whenever the wrapper changes
     println!("cargo:rerun-if-changed=src/reader/caen/wrapper.h");
+    println!("cargo:rerun-if-changed=src/reader/caen/wrapper.c");
+
+    // Compile C wrapper for variadic functions
+    // Rust cannot directly call C variadic functions on all platforms (especially macOS ARM64)
+    cc::Build::new()
+        .file("src/reader/caen/wrapper.c")
+        .include("/usr/local/include")
+        .compile("caen_wrapper");
 
     // Generate bindings
     let bindings = bindgen::Builder::default()

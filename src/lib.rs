@@ -8,3 +8,4 @@ pub mod data_sink;
 pub mod data_source_emulator;
 pub mod merger;
 pub mod operator;
+pub mod reader;

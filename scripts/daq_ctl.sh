@@ -18,7 +18,8 @@ BINARY_DIR="./target/release"
 CONTROLLER="$BINARY_DIR/controller"
 
 # Default ports (matching config.toml with 0-indexed sources)
-EMULATOR_PORTS="5560 5561"
+# Source 0: Emulator, Source 1: Reader (digitizer)
+SOURCE_PORTS="5560 5561"
 MERGER_PORT="5570"
 SINK_PORT="5580"
 
@@ -43,7 +44,7 @@ show_help() {
     echo ""
     echo "Components (optional, default: all):"
     echo "  all       - All components"
-    echo "  emulators - All emulators"
+    echo "  sources   - All sources (emulators + readers)"
     echo "  merger    - Merger only"
     echo "  sink      - Data sink only"
     echo "  <port>    - Specific port number"
@@ -95,7 +96,7 @@ EXTRA_ARGS=""
 
 while [ $# -gt 0 ]; do
     case $1 in
-        all|emulators|merger|sink)
+        all|sources|emulators|merger|sink)
             COMPONENT=$1
             shift
             ;;
@@ -145,17 +146,17 @@ echo ""
 
 case $COMPONENT in
     all)
-        for port in $EMULATOR_PORTS; do
+        for port in $SOURCE_PORTS; do
             id=$((port - 5560))
-            send_command "$CMD" "$port" "Emulator $id" $EXTRA_ARGS
+            send_command "$CMD" "$port" "Source $id" $EXTRA_ARGS
         done
         send_command "$CMD" "$MERGER_PORT" "Merger" $EXTRA_ARGS
         send_command "$CMD" "$SINK_PORT" "DataSink" $EXTRA_ARGS
         ;;
-    emulators)
-        for port in $EMULATOR_PORTS; do
+    sources|emulators)
+        for port in $SOURCE_PORTS; do
             id=$((port - 5560))
-            send_command "$CMD" "$port" "Emulator $id" $EXTRA_ARGS
+            send_command "$CMD" "$port" "Source $id" $EXTRA_ARGS
         done
         ;;
     merger)

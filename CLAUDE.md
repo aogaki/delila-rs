@@ -254,6 +254,25 @@ bindgen = "0.69"
 tokio-test = "0.4"
 ```
 
+## Important Files to Read
+
+When starting a new session, read these files to understand current context:
+
+### TODO Directory
+Current tasks and implementation progress:
+- `TODO/*.md` - Active tasks (numbered for priority)
+- `TODO/archive/` - Completed tasks for reference
+
+### Documentation
+Architecture and design decisions:
+- `docs/architecture/config_and_deployment.md` - 設定管理とデプロイメント設計
+- `docs/control_system_design.md` - コントロールシステム設計
+
+### Key Implementation Files
+- `src/reader/caen/` - CAEN FFI bindings (handle.rs, error.rs, wrapper.c)
+- `src/reader/decoder/` - Data decoders (psd2.rs, common.rs)
+- `src/config/mod.rs` - Configuration management
+
 ## Notes
 
 - Reference C++ implementation in `DELILA2/` for algorithm details

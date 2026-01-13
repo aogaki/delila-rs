@@ -51,6 +51,11 @@ impl Config {
         let config: Config = toml::from_str(content)?;
         Ok(config)
     }
+
+    /// Get source configuration by ID
+    pub fn get_source(&self, source_id: u32) -> Option<&SourceNetworkConfig> {
+        self.network.sources.iter().find(|s| s.id == source_id)
+    }
 }
 
 // =============================================================================
@@ -98,6 +103,33 @@ pub struct SourceNetworkConfig {
     /// ZMQ bind address for commands (e.g., "tcp://*:5560")
     #[serde(default)]
     pub command: Option<String>,
+
+    /// Digitizer URL (e.g., "dig2://172.18.4.56")
+    /// If not set, this source is assumed to be an emulator
+    #[serde(default)]
+    pub digitizer_url: Option<String>,
+
+    /// Module ID for event tagging
+    #[serde(default)]
+    pub module_id: Option<u8>,
+
+    /// ADC time step in nanoseconds (default: 2.0 for 500 MHz)
+    #[serde(default)]
+    pub time_step_ns: Option<f64>,
+}
+
+impl SourceNetworkConfig {
+    /// Check if this source is a real digitizer (has URL configured)
+    pub fn is_digitizer(&self) -> bool {
+        self.digitizer_url.is_some()
+    }
+
+    /// Get command address with default fallback
+    pub fn command_address(&self) -> String {
+        self.command
+            .clone()
+            .unwrap_or_else(|| format!("tcp://*:{}", 5560 + self.id as u16))
+    }
 }
 
 /// Merger network configuration
@@ -399,5 +431,87 @@ database = "delila"
 "#;
         let config = Config::from_toml(toml).unwrap();
         assert!(config.settings.get_settings().is_err());
+    }
+
+    #[test]
+    fn parse_digitizer_source() {
+        let toml = r#"
+[network]
+cluster_name = "test"
+
+[[network.sources]]
+id = 0
+name = "digitizer-0"
+bind = "tcp://*:5555"
+command = "tcp://*:5560"
+digitizer_url = "dig2://172.18.4.56"
+module_id = 1
+time_step_ns = 4.0
+"#;
+        let config = Config::from_toml(toml).unwrap();
+        assert_eq!(config.network.sources.len(), 1);
+
+        let source = &config.network.sources[0];
+        assert!(source.is_digitizer());
+        assert_eq!(source.digitizer_url, Some("dig2://172.18.4.56".to_string()));
+        assert_eq!(source.module_id, Some(1));
+        assert_eq!(source.time_step_ns, Some(4.0));
+        assert_eq!(source.command_address(), "tcp://*:5560".to_string());
+    }
+
+    #[test]
+    fn emulator_source_is_not_digitizer() {
+        let toml = r#"
+[network]
+cluster_name = "test"
+
+[[network.sources]]
+id = 0
+name = "emulator-0"
+bind = "tcp://*:5555"
+"#;
+        let config = Config::from_toml(toml).unwrap();
+        let source = &config.network.sources[0];
+
+        // No digitizer_url = not a digitizer (emulator)
+        assert!(!source.is_digitizer());
+        assert!(source.digitizer_url.is_none());
+
+        // Command address uses default
+        assert_eq!(source.command_address(), "tcp://*:5560".to_string());
+    }
+
+    #[test]
+    fn get_source_by_id() {
+        let toml = r#"
+[network]
+cluster_name = "test"
+
+[[network.sources]]
+id = 0
+name = "source-0"
+bind = "tcp://*:5555"
+
+[[network.sources]]
+id = 2
+name = "source-2"
+bind = "tcp://*:5557"
+digitizer_url = "dig2://192.168.1.100"
+"#;
+        let config = Config::from_toml(toml).unwrap();
+
+        // Find source 0
+        let s0 = config.get_source(0);
+        assert!(s0.is_some());
+        assert_eq!(s0.unwrap().name, "source-0");
+
+        // Find source 2
+        let s2 = config.get_source(2);
+        assert!(s2.is_some());
+        assert_eq!(s2.unwrap().name, "source-2");
+        assert!(s2.unwrap().is_digitizer());
+
+        // Source 1 doesn't exist
+        assert!(config.get_source(1).is_none());
     }
 }
