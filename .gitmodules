@@ -1,3 +1,9 @@
 [submodule "DELILA2"]
 	path = DELILA2
 	url = https://github.com/aogaki/DELILA2
+[submodule "external/caen-felib"]
+	path = external/caen-felib
+	url = https://github.com/aogaki/caen-felib.git
+[submodule "external/caen-dig2"]
+	path = external/caen-dig2
+	url = https://github.com/aogaki/caen-dig2.git
