@@ -61,7 +61,7 @@ fn main() {
     for path in &info_paths {
         match handle.get_value(path) {
             Ok(value) => {
-                let name = path.split('/').last().unwrap_or(path);
+                let name = path.split('/').next_back().unwrap_or(path);
                 println!("  {:<20}: {}", name, value);
             }
             Err(e) => {
@@ -136,7 +136,7 @@ fn test_parameter_setting(handle: &CaenHandle) {
 
 /// Helper function to test read-modify-verify cycle
 fn test_param_cycle(handle: &CaenHandle, path: &str, values: &[&str]) {
-    let param_name = path.split('/').last().unwrap_or(path);
+    let param_name = path.split('/').next_back().unwrap_or(path);
 
     // Read original value
     let original = match handle.get_value(path) {

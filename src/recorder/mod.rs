@@ -382,6 +382,7 @@ impl FileWriter {
         self.file_sequence = 0;
     }
 
+    #[allow(dead_code)] // Reserved for future crash recovery feature
     fn reset(&mut self) -> Result<(), RecorderError> {
         self.close_file()?;
         self.run_config = None;
@@ -393,7 +394,7 @@ impl FileWriter {
 /// Command handler extension for Recorder
 struct RecorderCommandExt {
     stats: Arc<AtomicStats>,
-    writer_tx: mpsc::Sender<WriterCommand>,
+    writer_tx: mpsc::UnboundedSender<WriterCommand>,
 }
 
 impl CommandHandlerExt for RecorderCommandExt {
@@ -402,9 +403,9 @@ impl CommandHandlerExt for RecorderCommandExt {
     }
 
     fn on_configure(&mut self, config: &RunConfig) -> Result<(), String> {
-        // Send new run config to writer task
+        // Send new run config to writer task (unbounded send is synchronous)
         self.writer_tx
-            .try_send(WriterCommand::NewRun(config.clone()))
+            .send(WriterCommand::NewRun(config.clone()))
             .map_err(|e| format!("Failed to send config to writer: {}", e))
     }
 
@@ -415,13 +416,13 @@ impl CommandHandlerExt for RecorderCommandExt {
 
     fn on_stop(&mut self) -> Result<(), String> {
         self.writer_tx
-            .try_send(WriterCommand::CloseFile)
+            .send(WriterCommand::CloseFile)
             .map_err(|e| format!("Failed to send close to writer: {}", e))
     }
 
     fn on_reset(&mut self) -> Result<(), String> {
         self.writer_tx
-            .try_send(WriterCommand::CloseFile)
+            .send(WriterCommand::CloseFile)
             .map_err(|e| format!("Failed to send reset to writer: {}", e))
     }
 
@@ -487,11 +488,11 @@ impl Recorder {
         &mut self,
         mut shutdown: tokio::sync::broadcast::Receiver<()>,
     ) -> Result<(), RecorderError> {
-        // Create channels for task communication
+        // Create channels for task communication (unbounded - memory growth indicates bottleneck)
         // Receiver → Sorter
-        let (recv_tx, recv_rx) = mpsc::channel::<MinimalEventDataBatch>(self.config.channel_capacity);
+        let (recv_tx, recv_rx) = mpsc::unbounded_channel::<MinimalEventDataBatch>();
         // Sorter → Writer
-        let (writer_tx, writer_rx) = mpsc::channel::<WriterCommand>(100);
+        let (writer_tx, writer_rx) = mpsc::unbounded_channel::<WriterCommand>();
 
         // Create ZMQ SUB socket
         let context = Context::new();
@@ -586,7 +587,7 @@ impl Recorder {
 
         // Shutdown tasks
         // Note: recv_tx was moved to receiver task, channel will close when receiver exits
-        let _ = writer_tx.send(WriterCommand::Shutdown).await;
+        let _ = writer_tx.send(WriterCommand::Shutdown);
 
         let _ = receiver_handle.await;
         let _ = sorter_handle.await;
@@ -609,7 +610,7 @@ impl Recorder {
     /// Receiver task: ZMQ SUB → channel (non-blocking)
     async fn receiver_task(
         mut socket: subscribe::Subscribe,
-        tx: mpsc::Sender<MinimalEventDataBatch>,
+        tx: mpsc::UnboundedSender<MinimalEventDataBatch>,
         mut shutdown: tokio::sync::broadcast::Receiver<()>,
         stats: Arc<AtomicStats>,
         mut state_rx: watch::Receiver<ComponentState>,
@@ -640,20 +641,12 @@ impl Recorder {
                                         stats.received_batches.fetch_add(1, Ordering::Relaxed);
                                         stats.received_events.fetch_add(batch.events.len() as u64, Ordering::Relaxed);
 
-                                        // Non-blocking send
-                                        match tx.try_send(batch) {
-                                            Ok(()) => {
-                                                debug!("Forwarded batch to sorter");
-                                            }
-                                            Err(mpsc::error::TrySendError::Full(_)) => {
-                                                stats.dropped_batches.fetch_add(1, Ordering::Relaxed);
-                                                warn!("Channel full, dropped batch");
-                                            }
-                                            Err(mpsc::error::TrySendError::Closed(_)) => {
-                                                info!("Channel closed, receiver exiting");
-                                                break;
-                                            }
+                                        // Send to sorter (unbounded channel never blocks)
+                                        if tx.send(batch).is_err() {
+                                            info!("Channel closed, receiver exiting");
+                                            break;
                                         }
+                                        debug!("Forwarded batch to sorter");
                                     }
                                     Ok(Message::EndOfStream { source_id }) => {
                                         info!(source_id, "Received EOS");
@@ -682,8 +675,8 @@ impl Recorder {
 
     /// Sorter task: Sorts events and forwards to writer
     async fn sorter_task(
-        mut rx: mpsc::Receiver<MinimalEventDataBatch>,
-        writer_tx: mpsc::Sender<WriterCommand>,
+        mut rx: mpsc::UnboundedReceiver<MinimalEventDataBatch>,
+        writer_tx: mpsc::UnboundedSender<WriterCommand>,
         config: RecorderConfig,
         _stats: Arc<AtomicStats>,
         mut state_rx: watch::Receiver<ComponentState>,
@@ -702,11 +695,11 @@ impl Recorder {
 
                             // Try to flush if buffer is large enough
                             let events = buffer.flush();
-                            if !events.is_empty() {
-                                if writer_tx.send(WriterCommand::WriteEvents(events)).await.is_err() {
-                                    warn!("Writer channel closed");
-                                    break;
-                                }
+                            if !events.is_empty()
+                                && writer_tx.send(WriterCommand::WriteEvents(events)).is_err()
+                            {
+                                warn!("Writer channel closed");
+                                break;
                             }
                         }
                         None => {
@@ -714,7 +707,7 @@ impl Recorder {
                             info!("Sorter: input channel closed, flushing remaining");
                             let events = buffer.flush_all();
                             if !events.is_empty() {
-                                let _ = writer_tx.send(WriterCommand::WriteEvents(events)).await;
+                                let _ = writer_tx.send(WriterCommand::WriteEvents(events));
                             }
                             break;
                         }
@@ -725,11 +718,11 @@ impl Recorder {
                     // Periodic flush check
                     if *state_rx.borrow() == ComponentState::Running && buffer.len() > 0 {
                         let events = buffer.flush();
-                        if !events.is_empty() {
-                            if writer_tx.send(WriterCommand::WriteEvents(events)).await.is_err() {
-                                warn!("Writer channel closed during periodic flush");
-                                break;
-                            }
+                        if !events.is_empty()
+                            && writer_tx.send(WriterCommand::WriteEvents(events)).is_err()
+                        {
+                            warn!("Writer channel closed during periodic flush");
+                            break;
                         }
                     }
                 }
@@ -742,7 +735,7 @@ impl Recorder {
                     if current == ComponentState::Configured || current == ComponentState::Idle {
                         let events = buffer.flush_all();
                         if !events.is_empty() {
-                            let _ = writer_tx.send(WriterCommand::WriteEvents(events)).await;
+                            let _ = writer_tx.send(WriterCommand::WriteEvents(events));
                         }
                         buffer.clear();
                     }
@@ -755,7 +748,7 @@ impl Recorder {
 
     /// Writer task: Handles file I/O
     async fn writer_task(
-        mut rx: mpsc::Receiver<WriterCommand>,
+        mut rx: mpsc::UnboundedReceiver<WriterCommand>,
         config: RecorderConfig,
         stats: Arc<AtomicStats>,
     ) {

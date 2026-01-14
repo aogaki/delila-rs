@@ -135,6 +135,7 @@ impl AtomicStats {
     }
 
     #[inline]
+    #[allow(dead_code)] // Reserved for future bounded channel debugging
     fn record_drop(&self) {
         self.dropped_batches.fetch_add(1, Ordering::Relaxed);
     }
@@ -274,8 +275,8 @@ impl Merger {
         &mut self,
         mut shutdown: tokio::sync::broadcast::Receiver<()>,
     ) -> Result<(), MergerError> {
-        // Use larger channel for zero-copy (raw bytes are cheap)
-        let (tx, rx) = mpsc::channel::<Bytes>(self.config.channel_capacity);
+        // Use unbounded channel - if memory grows, it indicates downstream bottleneck
+        let (tx, rx) = mpsc::unbounded_channel::<Bytes>();
 
         let context = Context::new();
 
@@ -367,7 +368,7 @@ impl Merger {
     /// Receiver task: SUB → channel (zero-copy with header-only parsing)
     async fn receiver_task(
         mut socket: subscribe::Subscribe,
-        tx: mpsc::Sender<Bytes>,
+        tx: mpsc::UnboundedSender<Bytes>,
         mut shutdown: tokio::sync::broadcast::Receiver<()>,
         ext_state: Arc<MergerExtState>,
         mut state_rx: watch::Receiver<ComponentState>,
@@ -420,20 +421,12 @@ impl Merger {
                                     }
                                 }
 
-                                // Try to send raw bytes without blocking
-                                match tx.try_send(raw_bytes) {
-                                    Ok(()) => {
-                                        debug!("Receiver forwarded message");
-                                    }
-                                    Err(mpsc::error::TrySendError::Full(_)) => {
-                                        ext_state.atomic_stats.record_drop();
-                                        warn!("Channel full, dropped message");
-                                    }
-                                    Err(mpsc::error::TrySendError::Closed(_)) => {
-                                        info!("Channel closed, receiver exiting");
-                                        break;
-                                    }
+                                // Send raw bytes (unbounded channel never blocks)
+                                if tx.send(raw_bytes).is_err() {
+                                    info!("Channel closed, receiver exiting");
+                                    break;
                                 }
+                                debug!("Receiver forwarded message");
                             }
                         }
                         Some(Err(e)) => {
@@ -451,7 +444,7 @@ impl Merger {
 
     /// Sender task: channel → PUB (zero-copy: direct byte forwarding)
     async fn sender_task(
-        mut rx: mpsc::Receiver<Bytes>,
+        mut rx: mpsc::UnboundedReceiver<Bytes>,
         mut socket: publish::Publish,
         ext_state: Arc<MergerExtState>,
     ) {

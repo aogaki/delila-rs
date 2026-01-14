@@ -141,7 +141,7 @@ fn load_digitizer_configs(config_dir: &PathBuf) -> std::io::Result<HashMap<u32, 
         let entry = entry?;
         let path = entry.path();
 
-        if path.extension().map_or(false, |ext| ext == "json") {
+        if path.extension().is_some_and(|ext| ext == "json") {
             if let Ok(content) = std::fs::read_to_string(&path) {
                 if let Ok(config) = serde_json::from_str::<DigitizerConfig>(&content) {
                     configs.insert(config.digitizer_id, config);
@@ -387,30 +387,24 @@ async fn run_start(
         .await;
 
     match start_result {
-        Err(e) => {
-            return (
-                StatusCode::REQUEST_TIMEOUT,
-                Json(ApiResponse::error(format!("Start phase failed: {}", e))),
-            );
-        }
-        Ok(results) if results.iter().any(|r| !r.success) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ApiResponse::error("Start phase failed").with_results(results)),
-            );
-        }
-        Ok(results) => {
-            return (
-                StatusCode::OK,
-                Json(
-                    ApiResponse::success(format!(
-                        "Run {} started successfully (all components synchronized)",
-                        run_number
-                    ))
-                    .with_results(results),
-                ),
-            );
-        }
+        Err(e) => (
+            StatusCode::REQUEST_TIMEOUT,
+            Json(ApiResponse::error(format!("Start phase failed: {}", e))),
+        ),
+        Ok(results) if results.iter().any(|r| !r.success) => (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error("Start phase failed").with_results(results)),
+        ),
+        Ok(results) => (
+            StatusCode::OK,
+            Json(
+                ApiResponse::success(format!(
+                    "Run {} started successfully (all components synchronized)",
+                    run_number
+                ))
+                .with_results(results),
+            ),
+        ),
     }
 }
 

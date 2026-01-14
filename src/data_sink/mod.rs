@@ -204,6 +204,7 @@ impl AtomicStats {
     }
 
     #[inline]
+    #[allow(dead_code)] // Reserved for future bounded channel debugging
     fn record_drop(&self) {
         self.dropped_batches.fetch_add(1, Ordering::Relaxed);
     }
@@ -291,8 +292,8 @@ impl DataSink {
         &mut self,
         mut shutdown: tokio::sync::broadcast::Receiver<()>,
     ) -> Result<(), DataSinkError> {
-        // Create channel for receiver → processor
-        let (proc_tx, proc_rx) = mpsc::channel::<ProcessorMessage>(self.config.channel_capacity);
+        // Create channel for receiver → processor (unbounded - memory growth indicates bottleneck)
+        let (proc_tx, proc_rx) = mpsc::unbounded_channel::<ProcessorMessage>();
 
         // Create SUB socket
         let context = Context::new();
@@ -370,7 +371,7 @@ impl DataSink {
     /// Receiver task: SUB → channel (non-blocking)
     async fn receiver_task(
         mut socket: subscribe::Subscribe,
-        tx: mpsc::Sender<ProcessorMessage>,
+        tx: mpsc::UnboundedSender<ProcessorMessage>,
         mut shutdown: tokio::sync::broadcast::Receiver<()>,
         atomic_stats: Arc<AtomicStats>,
         mut state_rx: watch::Receiver<ComponentState>,
@@ -406,23 +407,16 @@ impl DataSink {
                                             "Received batch"
                                         );
 
-                                        // Non-blocking send to processor
-                                        match tx.try_send(ProcessorMessage::Data(batch)) {
-                                            Ok(()) => {}
-                                            Err(mpsc::error::TrySendError::Full(_)) => {
-                                                atomic_stats.record_drop();
-                                                warn!("Processor channel full, dropped batch");
-                                            }
-                                            Err(mpsc::error::TrySendError::Closed(_)) => {
-                                                info!("Processor channel closed, exiting");
-                                                break;
-                                            }
+                                        // Non-blocking send to processor (unbounded)
+                                        if tx.send(ProcessorMessage::Data(batch)).is_err() {
+                                            info!("Processor channel closed, exiting");
+                                            break;
                                         }
                                     }
                                     Ok(Message::EndOfStream { source_id }) => {
                                         atomic_stats.record_eos();
                                         info!(source_id = source_id, "Received EOS from upstream");
-                                        let _ = tx.try_send(ProcessorMessage::Eos { source_id });
+                                        let _ = tx.send(ProcessorMessage::Eos { source_id });
                                     }
                                     Ok(Message::Heartbeat(hb)) => {
                                         debug!(source_id = hb.source_id, counter = hb.counter, "Received heartbeat");
@@ -448,7 +442,7 @@ impl DataSink {
 
     /// Processor task: channel → stats + console output
     async fn processor_task(
-        mut rx: mpsc::Receiver<ProcessorMessage>,
+        mut rx: mpsc::UnboundedReceiver<ProcessorMessage>,
         atomic_stats: Arc<AtomicStats>,
         stats_interval_secs: u64,
     ) {

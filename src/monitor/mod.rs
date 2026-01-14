@@ -281,6 +281,7 @@ impl AtomicStats {
     }
 
     #[inline]
+    #[allow(dead_code)] // Reserved for future bounded channel debugging
     fn record_drop(&self) {
         self.dropped_batches.fetch_add(1, Ordering::Relaxed);
     }
@@ -310,7 +311,7 @@ enum HistogramMessage {
 #[derive(Clone)]
 pub struct AppState {
     /// Channel to send requests to histogram task
-    histogram_tx: mpsc::Sender<HistogramMessage>,
+    histogram_tx: mpsc::UnboundedSender<HistogramMessage>,
     /// Component state for status
     pub component_state: Arc<tokio::sync::Mutex<ComponentSharedState>>,
 }
@@ -338,7 +339,7 @@ struct ChannelSummary {
 /// GET /api/histograms - List all histograms
 async fn list_histograms(State(state): State<AppState>) -> Json<HistogramListResponse> {
     let (tx, rx) = oneshot::channel();
-    let _ = state.histogram_tx.send(HistogramMessage::GetSnapshot(tx)).await;
+    let _ = state.histogram_tx.send(HistogramMessage::GetSnapshot(tx));
 
     match rx.await {
         Ok(snapshot) => {
@@ -382,7 +383,7 @@ async fn get_histogram(
 ) -> Result<Json<Histogram1D>, StatusCode> {
     let (tx, rx) = oneshot::channel();
     let key = ChannelKey::new(module_id, channel_id);
-    let _ = state.histogram_tx.send(HistogramMessage::GetHistogram(key, tx)).await;
+    let _ = state.histogram_tx.send(HistogramMessage::GetHistogram(key, tx));
 
     match rx.await {
         Ok(Some(hist)) => Ok(Json(hist)),
@@ -393,7 +394,7 @@ async fn get_histogram(
 
 /// POST /api/histograms/clear - Clear all histograms
 async fn clear_histograms(State(state): State<AppState>) -> StatusCode {
-    let _ = state.histogram_tx.send(HistogramMessage::Clear).await;
+    let _ = state.histogram_tx.send(HistogramMessage::Clear);
     info!("Histograms cleared");
     StatusCode::OK
 }
@@ -414,7 +415,7 @@ async fn get_status(State(state): State<AppState>) -> Json<StatusResponse> {
     drop(component);
 
     let (tx, rx) = oneshot::channel();
-    let _ = state.histogram_tx.send(HistogramMessage::GetSnapshot(tx)).await;
+    let _ = state.histogram_tx.send(HistogramMessage::GetSnapshot(tx));
 
     match rx.await {
         Ok(snapshot) => Json(StatusResponse {
@@ -459,7 +460,7 @@ pub fn create_router(state: AppState) -> Router {
 
 /// Command handler extension for Monitor
 struct MonitorCommandExt {
-    histogram_tx: mpsc::Sender<HistogramMessage>,
+    histogram_tx: mpsc::UnboundedSender<HistogramMessage>,
     atomic_stats: Arc<AtomicStats>,
 }
 
@@ -469,19 +470,13 @@ impl CommandHandlerExt for MonitorCommandExt {
     }
 
     fn on_start(&mut self) -> Result<(), String> {
-        // Set start time when Running begins
-        let tx = self.histogram_tx.clone();
-        tokio::spawn(async move {
-            let _ = tx.send(HistogramMessage::SetStartTime).await;
-        });
+        // Set start time when Running begins (unbounded send is synchronous)
+        let _ = self.histogram_tx.send(HistogramMessage::SetStartTime);
         Ok(())
     }
 
     fn on_reset(&mut self) -> Result<(), String> {
-        let tx = self.histogram_tx.clone();
-        tokio::spawn(async move {
-            let _ = tx.send(HistogramMessage::Clear).await;
-        });
+        let _ = self.histogram_tx.send(HistogramMessage::Clear);
         Ok(())
     }
 
@@ -534,9 +529,9 @@ impl Monitor {
         &mut self,
         mut shutdown: broadcast::Receiver<()>,
     ) -> Result<(), MonitorError> {
-        // Create channels
-        let (hist_tx, hist_rx) = mpsc::channel::<HistogramMessage>(self.config.channel_capacity);
-        let (data_tx, data_rx) = mpsc::channel::<MinimalEventDataBatch>(self.config.channel_capacity);
+        // Create channels (unbounded - memory growth indicates bottleneck)
+        let (hist_tx, hist_rx) = mpsc::unbounded_channel::<HistogramMessage>();
+        let (data_tx, data_rx) = mpsc::unbounded_channel::<MinimalEventDataBatch>();
 
         // Create ZMQ SUB socket
         let context = Context::new();
@@ -640,7 +635,7 @@ impl Monitor {
     /// Receiver task: ZMQ SUB → channel (non-blocking)
     async fn receiver_task(
         mut socket: subscribe::Subscribe,
-        tx: mpsc::Sender<MinimalEventDataBatch>,
+        tx: mpsc::UnboundedSender<MinimalEventDataBatch>,
         mut shutdown: broadcast::Receiver<()>,
         atomic_stats: Arc<AtomicStats>,
         mut state_rx: watch::Receiver<ComponentState>,
@@ -676,17 +671,10 @@ impl Monitor {
                                             "Received batch"
                                         );
 
-                                        // Non-blocking send to histogram task
-                                        match tx.try_send(batch) {
-                                            Ok(()) => {}
-                                            Err(mpsc::error::TrySendError::Full(_)) => {
-                                                atomic_stats.record_drop();
-                                                warn!("Histogram channel full, dropped batch");
-                                            }
-                                            Err(mpsc::error::TrySendError::Closed(_)) => {
-                                                info!("Histogram channel closed, exiting");
-                                                break;
-                                            }
+                                        // Non-blocking send to histogram task (unbounded)
+                                        if tx.send(batch).is_err() {
+                                            info!("Histogram channel closed, exiting");
+                                            break;
                                         }
                                     }
                                     Ok(Message::EndOfStream { source_id }) => {
@@ -716,8 +704,8 @@ impl Monitor {
 
     /// Histogram task: owns MonitorState, processes batches and HTTP queries
     async fn histogram_task(
-        mut cmd_rx: mpsc::Receiver<HistogramMessage>,
-        mut data_rx: mpsc::Receiver<MinimalEventDataBatch>,
+        mut cmd_rx: mpsc::UnboundedReceiver<HistogramMessage>,
+        mut data_rx: mpsc::UnboundedReceiver<MinimalEventDataBatch>,
         histogram_config: HistogramConfig,
         atomic_stats: Arc<AtomicStats>,
     ) {

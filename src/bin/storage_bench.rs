@@ -5,7 +5,7 @@
 
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 const BATCH_SIZE_BYTES: usize = 1_100_000; // ~1.1MB (50K events * 22 bytes)
@@ -13,13 +13,14 @@ const ITERATIONS: usize = 100;
 
 struct BenchResult {
     name: String,
+    #[allow(dead_code)]
     total_time: Duration,
     throughput_mbps: f64,
     latency_per_batch_ms: f64,
     max_event_rate: f64, // events/sec assuming 50K events per batch
 }
 
-fn benchmark_no_fsync(path: &PathBuf, data: &[u8]) -> BenchResult {
+fn benchmark_no_fsync(path: &Path, data: &[u8]) -> BenchResult {
     let file_path = path.join("bench_no_fsync.dat");
     let file = File::create(&file_path).expect("Failed to create file");
     let mut writer = BufWriter::with_capacity(64 * 1024, file);
@@ -47,7 +48,7 @@ fn benchmark_no_fsync(path: &PathBuf, data: &[u8]) -> BenchResult {
     }
 }
 
-fn benchmark_fsync_every_batch(path: &PathBuf, data: &[u8]) -> BenchResult {
+fn benchmark_fsync_every_batch(path: &Path, data: &[u8]) -> BenchResult {
     let file_path = path.join("bench_fsync_every.dat");
     let file = File::create(&file_path).expect("Failed to create file");
     let mut writer = BufWriter::with_capacity(64 * 1024, file);
@@ -76,7 +77,7 @@ fn benchmark_fsync_every_batch(path: &PathBuf, data: &[u8]) -> BenchResult {
     }
 }
 
-fn benchmark_fsync_every_n(path: &PathBuf, data: &[u8], n: usize) -> BenchResult {
+fn benchmark_fsync_every_n(path: &Path, data: &[u8], n: usize) -> BenchResult {
     let file_path = path.join(format!("bench_fsync_every_{}.dat", n));
     let file = File::create(&file_path).expect("Failed to create file");
     let mut writer = BufWriter::with_capacity(64 * 1024, file);
@@ -109,7 +110,7 @@ fn benchmark_fsync_every_n(path: &PathBuf, data: &[u8], n: usize) -> BenchResult
     }
 }
 
-fn benchmark_realistic_recorder(path: &PathBuf, data: &[u8], fsync_interval: usize) -> BenchResult {
+fn benchmark_realistic_recorder(path: &Path, data: &[u8], fsync_interval: usize) -> BenchResult {
     // Simulate realistic recorder behavior:
     // - Write batches
     // - fsync at intervals
@@ -167,7 +168,7 @@ fn print_result(result: &BenchResult, target_rate: f64) {
     );
 }
 
-fn run_benchmarks(path: &PathBuf, name: &str) {
+fn run_benchmarks(path: &Path, name: &str) {
     println!("\n{}", "=".repeat(60));
     println!("  Storage: {} ({})", name, path.display());
     println!("{}", "=".repeat(60));

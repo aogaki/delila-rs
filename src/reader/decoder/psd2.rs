@@ -24,7 +24,6 @@ mod constants {
     pub const TIMESTAMP_MASK: u64 = 0xFFFFFFFFFFFF;
 
     // Event second word
-    pub const LAST_WORD_SHIFT: u32 = 63;
     pub const WAVEFORM_FLAG_SHIFT: u32 = 62;
     pub const FLAGS_LOW_PRIORITY_SHIFT: u32 = 50;
     pub const FLAGS_LOW_PRIORITY_MASK: u64 = 0x7FF;
@@ -126,17 +125,13 @@ impl Psd2Decoder {
         }
 
         // Check for stop signal (3 words)
-        if raw.size == constants::STOP_SIGNAL_SIZE {
-            if self.is_stop_signal(&raw.data) {
-                return DataType::Stop;
-            }
+        if raw.size == constants::STOP_SIGNAL_SIZE && self.is_stop_signal(&raw.data) {
+            return DataType::Stop;
         }
 
         // Check for start signal (4 words)
-        if raw.size == constants::START_SIGNAL_SIZE {
-            if self.is_start_signal(&raw.data) {
-                return DataType::Start;
-            }
+        if raw.size == constants::START_SIGNAL_SIZE && self.is_start_signal(&raw.data) {
+            return DataType::Start;
         }
 
         DataType::Event
@@ -272,25 +267,22 @@ impl Psd2Decoder {
         // Check counter continuity (only warn, don't fail)
         if aggregate_counter != 0
             && aggregate_counter != self.last_aggregate_counter.wrapping_add(1)
+            && self.config.dump_enabled
         {
-            if self.config.dump_enabled {
-                println!(
-                    "[PSD2] Aggregate counter discontinuity: {} -> {}",
-                    self.last_aggregate_counter, aggregate_counter
-                );
-            }
+            println!(
+                "[PSD2] Aggregate counter discontinuity: {} -> {}",
+                self.last_aggregate_counter, aggregate_counter
+            );
         }
         self.last_aggregate_counter = aggregate_counter;
 
         let total_size = (header & constants::TOTAL_SIZE_MASK) as usize;
-        if total_size * constants::WORD_SIZE != data_size {
-            if self.config.dump_enabled {
-                println!(
-                    "[PSD2] Size mismatch: header={} bytes, actual={} bytes",
-                    total_size * constants::WORD_SIZE,
-                    data_size
-                );
-            }
+        if total_size * constants::WORD_SIZE != data_size && self.config.dump_enabled {
+            println!(
+                "[PSD2] Size mismatch: header={} bytes, actual={} bytes",
+                total_size * constants::WORD_SIZE,
+                data_size
+            );
             // Continue anyway, use actual data size
         }
 
