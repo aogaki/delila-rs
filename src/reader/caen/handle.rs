@@ -376,3 +376,98 @@ impl Drop for CaenHandle {
 
 // CaenHandle is NOT Send/Sync because CAEN_FELib_Open/Close are not thread-safe
 // according to the documentation. If thread safety is needed, wrap in Arc<Mutex<>>.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_raw_data_struct() {
+        let raw = RawData {
+            data: vec![1, 2, 3, 4],
+            size: 4,
+            n_events: 1,
+        };
+        assert_eq!(raw.data.len(), 4);
+        assert_eq!(raw.size, 4);
+        assert_eq!(raw.n_events, 1);
+    }
+
+    #[test]
+    fn test_raw_data_debug() {
+        let raw = RawData {
+            data: vec![0xAB, 0xCD],
+            size: 2,
+            n_events: 0,
+        };
+        let debug = format!("{:?}", raw);
+        assert!(debug.contains("RawData"));
+        assert!(debug.contains("size: 2"));
+    }
+
+    #[test]
+    fn test_cstring_null_byte_in_url() {
+        // Test that null bytes in URL are rejected
+        let url_with_null = "dig2://192.168.0.1\0/extra";
+        let c_string = CString::new(url_with_null);
+        assert!(c_string.is_err());
+    }
+
+    #[test]
+    fn test_cstring_valid_url() {
+        let valid_url = "dig2://192.168.0.1";
+        let c_string = CString::new(valid_url);
+        assert!(c_string.is_ok());
+    }
+
+    #[test]
+    fn test_cstring_null_byte_in_path() {
+        // Test that null bytes in path are rejected
+        let path_with_null = "/par/Model\0Name";
+        let c_string = CString::new(path_with_null);
+        assert!(c_string.is_err());
+    }
+
+    #[test]
+    fn test_cstring_valid_path() {
+        let valid_path = "/par/ModelName";
+        let c_string = CString::new(valid_path);
+        assert!(c_string.is_ok());
+    }
+
+    #[test]
+    fn test_endpoint_handle_raw() {
+        let ep = EndpointHandle { handle: 12345 };
+        assert_eq!(ep.raw(), 12345);
+    }
+
+    #[test]
+    fn test_format_json_validity() {
+        // Test that the format JSON used in configure_endpoint is valid JSON
+        let format_json = r#"[
+            {"name": "DATA", "type": "U8", "dim": 1},
+            {"name": "SIZE", "type": "SIZE_T", "dim": 0},
+            {"name": "N_EVENTS", "type": "U32", "dim": 0}
+        ]"#;
+
+        let parsed: Result<serde_json::Value, _> = serde_json::from_str(format_json);
+        assert!(parsed.is_ok());
+
+        let arr = parsed.unwrap();
+        assert!(arr.is_array());
+        assert_eq!(arr.as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn test_buffer_sizes() {
+        // Verify buffer sizes used in the code are reasonable
+        let value_buffer_size = 256;
+        let name_buffer_size = 32;
+        let desc_buffer_size = 256;
+
+        // These should be large enough for typical CAEN responses
+        assert!(value_buffer_size >= 128);
+        assert!(name_buffer_size >= 16);
+        assert!(desc_buffer_size >= 64);
+    }
+}

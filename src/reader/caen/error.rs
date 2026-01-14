@@ -91,3 +91,103 @@ pub mod codes {
     pub const BAD_LIBRARY_VERSION: i32 = -14;
     pub const COMMUNICATION_ERROR: i32 = -15;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_success_returns_none() {
+        assert!(CaenError::from_code(codes::SUCCESS).is_none());
+    }
+
+    #[test]
+    fn test_error_codes_return_some() {
+        // Test various error codes return Some
+        let error = CaenError::from_code(codes::GENERIC_ERROR);
+        assert!(error.is_some());
+        let err = error.unwrap();
+        assert_eq!(err.code, codes::GENERIC_ERROR);
+
+        let error = CaenError::from_code(codes::TIMEOUT);
+        assert!(error.is_some());
+        assert_eq!(error.unwrap().code, codes::TIMEOUT);
+    }
+
+    #[test]
+    fn test_check_success() {
+        assert!(CaenError::check(codes::SUCCESS).is_ok());
+    }
+
+    #[test]
+    fn test_check_error() {
+        let result = CaenError::check(codes::INVALID_PARAM);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.code, codes::INVALID_PARAM);
+    }
+
+    #[test]
+    fn test_error_display() {
+        let error = CaenError {
+            code: -1,
+            name: "GenericError".to_string(),
+            description: "A generic error occurred".to_string(),
+        };
+        let display = format!("{}", error);
+        assert!(display.contains("CAEN error -1"));
+        assert!(display.contains("GenericError"));
+        assert!(display.contains("A generic error occurred"));
+    }
+
+    #[test]
+    fn test_error_debug() {
+        let error = CaenError {
+            code: -2,
+            name: "InvalidParam".to_string(),
+            description: "Invalid parameter".to_string(),
+        };
+        let debug = format!("{:?}", error);
+        assert!(debug.contains("CaenError"));
+        assert!(debug.contains("-2"));
+    }
+
+    #[test]
+    fn test_all_error_codes() {
+        // Verify all defined error codes
+        let codes_to_test = [
+            (codes::GENERIC_ERROR, -1),
+            (codes::INVALID_PARAM, -2),
+            (codes::DEVICE_ALREADY_OPEN, -3),
+            (codes::DEVICE_NOT_FOUND, -4),
+            (codes::MAX_DEVICES_ERROR, -5),
+            (codes::COMMAND_ERROR, -6),
+            (codes::INTERNAL_ERROR, -7),
+            (codes::NOT_IMPLEMENTED, -8),
+            (codes::INVALID_HANDLE, -9),
+            (codes::DEVICE_LIBRARY_NOT_AVAILABLE, -10),
+            (codes::TIMEOUT, -11),
+            (codes::STOP, -12),
+            (codes::DISABLED, -13),
+            (codes::BAD_LIBRARY_VERSION, -14),
+            (codes::COMMUNICATION_ERROR, -15),
+        ];
+
+        for (code, expected) in codes_to_test {
+            assert_eq!(code, expected, "Error code constant mismatch");
+        }
+    }
+
+    #[test]
+    fn test_error_clone() {
+        let error = CaenError {
+            code: -5,
+            name: "TestError".to_string(),
+            description: "Test description".to_string(),
+        };
+        let cloned = error.clone();
+        assert_eq!(error.code, cloned.code);
+        assert_eq!(error.name, cloned.name);
+        assert_eq!(error.description, cloned.description);
+    }
+}

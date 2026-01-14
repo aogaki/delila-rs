@@ -367,6 +367,9 @@ mod tests {
         assert_eq!(config.events_per_batch, 100);
         assert_eq!(config.batch_interval_ms, 100);
         assert_eq!(config.command_address, "tcp://*:5560");
+        assert_eq!(config.heartbeat_interval_ms, 1000);
+        assert_eq!(config.num_modules, 1);
+        assert_eq!(config.channels_per_module, 16);
     }
 
     #[test]
@@ -376,5 +379,119 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(config.events_per_batch, 50);
+    }
+
+    #[test]
+    fn test_config_custom() {
+        let config = EmulatorConfig {
+            address: "tcp://*:6000".to_string(),
+            command_address: "tcp://*:6001".to_string(),
+            source_id: 42,
+            events_per_batch: 200,
+            batch_interval_ms: 50,
+            heartbeat_interval_ms: 500,
+            num_modules: 2,
+            channels_per_module: 8,
+        };
+        assert_eq!(config.source_id, 42);
+        assert_eq!(config.events_per_batch, 200);
+        assert_eq!(config.batch_interval_ms, 50);
+        assert_eq!(config.num_modules, 2);
+    }
+
+    #[test]
+    fn test_emulator_error_json() {
+        // Test JSON error variant (easier to create than ZMQ errors)
+        let invalid_json = "not valid json";
+        let result: Result<serde_json::Value, _> = serde_json::from_str(invalid_json);
+        if let Err(e) = result {
+            let err: EmulatorError = e.into();
+            let err_str = format!("{}", err);
+            assert!(err_str.contains("JSON error"));
+        }
+    }
+
+    #[test]
+    fn test_emulator_error_debug() {
+        // Test JSON error debug output
+        let invalid_json = "not valid json";
+        let result: Result<serde_json::Value, _> = serde_json::from_str(invalid_json);
+        if let Err(e) = result {
+            let err: EmulatorError = e.into();
+            let debug = format!("{:?}", err);
+            assert!(debug.contains("Json"));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_emulator_creation() {
+        // Use unique ports to avoid conflicts
+        let config = EmulatorConfig {
+            address: "tcp://127.0.0.1:15555".to_string(),
+            command_address: "tcp://127.0.0.1:15560".to_string(),
+            source_id: 0,
+            ..Default::default()
+        };
+
+        let emulator = Emulator::new(config).await;
+        assert!(emulator.is_ok());
+
+        let emu = emulator.unwrap();
+        assert_eq!(emu.state(), ComponentState::Idle);
+    }
+
+    #[tokio::test]
+    async fn test_emulator_initial_state() {
+        let config = EmulatorConfig {
+            address: "tcp://127.0.0.1:15556".to_string(),
+            command_address: "tcp://127.0.0.1:15561".to_string(),
+            source_id: 1,
+            ..Default::default()
+        };
+
+        let emulator = Emulator::new(config).await.unwrap();
+        assert_eq!(emulator.state(), ComponentState::Idle);
+        assert_eq!(emulator.sequence_number, 0);
+        assert_eq!(emulator.heartbeat_counter, 0);
+    }
+
+    #[test]
+    fn test_flag_constants() {
+        // Verify flag constants are defined correctly
+        assert_eq!(flags::FLAG_PILEUP, 1);
+        assert_eq!(flags::FLAG_OVER_RANGE, 4);
+    }
+
+    #[test]
+    fn test_message_data_creation() {
+        let batch = MinimalEventDataBatch::with_capacity(0, 0, 10);
+        let msg = Message::data(batch);
+        match msg {
+            Message::Data(_) => (),
+            _ => panic!("Expected Data message"),
+        }
+    }
+
+    #[test]
+    fn test_message_eos_creation() {
+        let msg = Message::eos(42);
+        match msg {
+            Message::EndOfStream { source_id } => {
+                assert_eq!(source_id, 42);
+            }
+            _ => panic!("Expected EndOfStream message"),
+        }
+    }
+
+    #[test]
+    fn test_message_heartbeat_creation() {
+        let msg = Message::heartbeat(1, 100);
+        match msg {
+            Message::Heartbeat(hb) => {
+                assert_eq!(hb.source_id, 1);
+                assert_eq!(hb.counter, 100);
+            }
+            _ => panic!("Expected Heartbeat message"),
+        }
     }
 }

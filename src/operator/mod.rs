@@ -195,3 +195,249 @@ impl Default for OperatorConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_status(name: &str, state: ComponentState, online: bool) -> ComponentStatus {
+        ComponentStatus {
+            name: name.to_string(),
+            address: format!("tcp://localhost:555{}", name.len()),
+            state,
+            run_number: None,
+            metrics: None,
+            error: if state == ComponentState::Error {
+                Some("Test error".to_string())
+            } else {
+                None
+            },
+            online,
+        }
+    }
+
+    #[test]
+    fn test_system_state_empty_components() {
+        let components: Vec<ComponentStatus> = vec![];
+        assert_eq!(SystemState::from_components(&components), SystemState::Idle);
+    }
+
+    #[test]
+    fn test_system_state_all_idle() {
+        let components = vec![
+            make_status("A", ComponentState::Idle, true),
+            make_status("B", ComponentState::Idle, true),
+        ];
+        assert_eq!(SystemState::from_components(&components), SystemState::Idle);
+    }
+
+    #[test]
+    fn test_system_state_all_configured() {
+        let components = vec![
+            make_status("A", ComponentState::Configured, true),
+            make_status("B", ComponentState::Configured, true),
+        ];
+        assert_eq!(
+            SystemState::from_components(&components),
+            SystemState::Configured
+        );
+    }
+
+    #[test]
+    fn test_system_state_all_armed() {
+        let components = vec![
+            make_status("A", ComponentState::Armed, true),
+            make_status("B", ComponentState::Armed, true),
+        ];
+        assert_eq!(
+            SystemState::from_components(&components),
+            SystemState::Armed
+        );
+    }
+
+    #[test]
+    fn test_system_state_all_running() {
+        let components = vec![
+            make_status("A", ComponentState::Running, true),
+            make_status("B", ComponentState::Running, true),
+        ];
+        assert_eq!(
+            SystemState::from_components(&components),
+            SystemState::Running
+        );
+    }
+
+    #[test]
+    fn test_system_state_mixed() {
+        let components = vec![
+            make_status("A", ComponentState::Idle, true),
+            make_status("B", ComponentState::Running, true),
+        ];
+        assert_eq!(
+            SystemState::from_components(&components),
+            SystemState::Mixed
+        );
+    }
+
+    #[test]
+    fn test_system_state_degraded_offline() {
+        let components = vec![
+            make_status("A", ComponentState::Running, true),
+            make_status("B", ComponentState::Running, false), // offline
+        ];
+        assert_eq!(
+            SystemState::from_components(&components),
+            SystemState::Degraded
+        );
+    }
+
+    #[test]
+    fn test_system_state_error() {
+        let components = vec![
+            make_status("A", ComponentState::Running, true),
+            make_status("B", ComponentState::Error, true),
+        ];
+        assert_eq!(
+            SystemState::from_components(&components),
+            SystemState::Error
+        );
+    }
+
+    #[test]
+    fn test_system_state_degraded_takes_priority_over_error() {
+        // If a component is offline, we report Degraded (can't know true state)
+        let components = vec![
+            make_status("A", ComponentState::Error, true),
+            make_status("B", ComponentState::Running, false), // offline
+        ];
+        assert_eq!(
+            SystemState::from_components(&components),
+            SystemState::Degraded
+        );
+    }
+
+    #[test]
+    fn test_api_response_success() {
+        let resp = ApiResponse::success("OK");
+        assert!(resp.success);
+        assert_eq!(resp.message, "OK");
+        assert!(resp.results.is_none());
+    }
+
+    #[test]
+    fn test_api_response_error() {
+        let resp = ApiResponse::error("Failed");
+        assert!(!resp.success);
+        assert_eq!(resp.message, "Failed");
+        assert!(resp.results.is_none());
+    }
+
+    #[test]
+    fn test_api_response_with_results_all_success() {
+        let results = vec![
+            CommandResult {
+                name: "A".to_string(),
+                success: true,
+                state: ComponentState::Running,
+                message: "OK".to_string(),
+            },
+            CommandResult {
+                name: "B".to_string(),
+                success: true,
+                state: ComponentState::Running,
+                message: "OK".to_string(),
+            },
+        ];
+        let resp = ApiResponse::success("Commands sent").with_results(results);
+        assert!(resp.success);
+        assert!(resp.results.is_some());
+        assert_eq!(resp.results.unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_api_response_with_results_partial_failure() {
+        let results = vec![
+            CommandResult {
+                name: "A".to_string(),
+                success: true,
+                state: ComponentState::Running,
+                message: "OK".to_string(),
+            },
+            CommandResult {
+                name: "B".to_string(),
+                success: false,
+                state: ComponentState::Error,
+                message: "Failed".to_string(),
+            },
+        ];
+        let resp = ApiResponse::success("Commands sent").with_results(results);
+        // Should be false because not all succeeded
+        assert!(!resp.success);
+    }
+
+    #[test]
+    fn test_configure_request_to_run_config() {
+        let req = ConfigureRequest {
+            run_number: 42,
+            comment: "Test run".to_string(),
+            exp_name: "experiment1".to_string(),
+        };
+        let config: RunConfig = req.into();
+        assert_eq!(config.run_number, 42);
+        assert_eq!(config.comment, "Test run");
+        assert_eq!(config.exp_name, "experiment1");
+    }
+
+    #[test]
+    fn test_operator_config_default() {
+        let config = OperatorConfig::default();
+        assert_eq!(config.configure_timeout_ms, 5000);
+        assert_eq!(config.arm_timeout_ms, 5000);
+        assert_eq!(config.start_timeout_ms, 5000);
+    }
+
+    #[test]
+    fn test_component_config() {
+        let config = ComponentConfig {
+            name: "Merger".to_string(),
+            address: "tcp://localhost:5570".to_string(),
+        };
+        assert_eq!(config.name, "Merger");
+        assert!(config.address.contains("5570"));
+    }
+
+    #[test]
+    fn test_component_status_serialization() {
+        let status = make_status("Test", ComponentState::Running, true);
+        let json = serde_json::to_string(&status).unwrap();
+        assert!(json.contains("\"name\":\"Test\""));
+        assert!(json.contains("\"online\":true"));
+
+        let deserialized: ComponentStatus = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.name, "Test");
+        assert_eq!(deserialized.state, ComponentState::Running);
+    }
+
+    #[test]
+    fn test_system_status_serialization() {
+        let status = SystemStatus {
+            components: vec![make_status("A", ComponentState::Idle, true)],
+            system_state: SystemState::Idle,
+        };
+        let json = serde_json::to_string(&status).unwrap();
+        assert!(json.contains("\"system_state\":\"Idle\""));
+    }
+
+    #[test]
+    fn test_command_result_debug() {
+        let result = CommandResult {
+            name: "Test".to_string(),
+            success: true,
+            state: ComponentState::Configured,
+            message: "OK".to_string(),
+        };
+        let debug = format!("{:?}", result);
+        assert!(debug.contains("CommandResult"));
+        assert!(debug.contains("Test"));
+    }
+}

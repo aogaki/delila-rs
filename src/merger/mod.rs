@@ -486,6 +486,19 @@ mod tests {
         let config = MergerConfig::default();
         assert_eq!(config.pub_address, "tcp://*:5556");
         assert_eq!(config.channel_capacity, 10000);
+        assert_eq!(config.command_address, "tcp://*:5570");
+    }
+
+    #[test]
+    fn custom_config() {
+        let config = MergerConfig {
+            sub_addresses: vec!["tcp://localhost:6000".to_string()],
+            pub_address: "tcp://*:6001".to_string(),
+            command_address: "tcp://*:6002".to_string(),
+            channel_capacity: 5000,
+        };
+        assert_eq!(config.sub_addresses.len(), 1);
+        assert_eq!(config.channel_capacity, 5000);
     }
 
     #[test]
@@ -510,6 +523,29 @@ mod tests {
     }
 
     #[test]
+    fn source_stats_no_gap_sequential() {
+        let mut stats = SourceStats::default();
+        for i in 0..100 {
+            stats.update(i);
+        }
+        assert_eq!(stats.total_batches, 100);
+        assert_eq!(stats.gaps_detected, 0);
+        assert_eq!(stats.total_gap_size, 0);
+        assert_eq!(stats.restart_count, 0);
+    }
+
+    #[test]
+    fn source_stats_multiple_gaps() {
+        let mut stats = SourceStats::default();
+        stats.update(0);
+        stats.update(5); // gap of 4
+        stats.update(10); // gap of 4
+        stats.update(100); // gap of 89
+        assert_eq!(stats.gaps_detected, 3);
+        assert_eq!(stats.total_gap_size, 4 + 4 + 89);
+    }
+
+    #[test]
     fn atomic_stats() {
         let stats = AtomicStats::new();
         stats.record_received();
@@ -522,5 +558,120 @@ mod tests {
         assert_eq!(sent, 1);
         assert_eq!(drop, 1);
         assert_eq!(eos, 0);
+    }
+
+    #[test]
+    fn atomic_stats_eos() {
+        let stats = AtomicStats::new();
+        stats.record_eos();
+        stats.record_eos();
+        stats.record_eos();
+
+        let (_, _, _, eos) = stats.snapshot();
+        assert_eq!(eos, 3);
+    }
+
+    #[test]
+    fn merger_stats_total_gaps() {
+        let mut stats = MergerStats::default();
+        stats.sources.insert(
+            0,
+            SourceStats {
+                gaps_detected: 5,
+                total_gap_size: 10,
+                ..Default::default()
+            },
+        );
+        stats.sources.insert(
+            1,
+            SourceStats {
+                gaps_detected: 3,
+                total_gap_size: 7,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(stats.total_gaps(), 8);
+        assert_eq!(stats.total_missing(), 17);
+    }
+
+    #[test]
+    fn merger_ext_state_new() {
+        let state = MergerExtState::new();
+        let stats = state.get_stats();
+        assert_eq!(stats.received_batches, 0);
+        assert_eq!(stats.sent_batches, 0);
+        assert!(stats.sources.is_empty());
+    }
+
+    #[test]
+    fn merger_ext_state_clear() {
+        let state = MergerExtState::new();
+        state.source_stats.insert(0, SourceStats::default());
+        state.source_stats.insert(1, SourceStats::default());
+        assert_eq!(state.source_stats.len(), 2);
+
+        state.clear();
+        assert_eq!(state.source_stats.len(), 0);
+    }
+
+    #[test]
+    fn merger_creation() {
+        let config = MergerConfig::default();
+        let merger = Merger::new(config);
+        assert_eq!(merger.state(), ComponentState::Idle);
+    }
+
+    #[test]
+    fn merger_stats_empty() {
+        let config = MergerConfig::default();
+        let merger = Merger::new(config);
+        let stats = merger.stats();
+        assert_eq!(stats.received_batches, 0);
+        assert_eq!(stats.sent_batches, 0);
+    }
+
+    #[test]
+    fn merger_error_display() {
+        let err = MergerError::NoUpstreamAddresses;
+        let msg = format!("{}", err);
+        assert!(msg.contains("No upstream"));
+
+        let err = MergerError::ChannelSend;
+        let msg = format!("{}", err);
+        assert!(msg.contains("Channel"));
+    }
+
+    #[test]
+    fn merger_command_ext_component_name() {
+        let ext_state = Arc::new(MergerExtState::new());
+        let ext = MergerCommandExt { ext_state };
+        assert_eq!(ext.component_name(), "Merger");
+    }
+
+    #[test]
+    fn merger_command_ext_on_reset() {
+        let ext_state = Arc::new(MergerExtState::new());
+        ext_state.source_stats.insert(0, SourceStats::default());
+
+        let mut ext = MergerCommandExt {
+            ext_state: ext_state.clone(),
+        };
+        assert!(ext.on_reset().is_ok());
+        assert_eq!(ext_state.source_stats.len(), 0);
+    }
+
+    #[test]
+    fn merger_command_ext_status_details() {
+        let ext_state = Arc::new(MergerExtState::new());
+        ext_state.atomic_stats.record_received();
+        ext_state.atomic_stats.record_sent();
+
+        let ext = MergerCommandExt { ext_state };
+        let details = ext.status_details();
+        assert!(details.is_some());
+        let s = details.unwrap();
+        assert!(s.contains("Received: 1"));
+        assert!(s.contains("Sent: 1"));
     }
 }

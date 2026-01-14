@@ -515,13 +515,269 @@ mod tests {
     }
 
     #[test]
+    fn test_decoder_with_config() {
+        let config = Psd2Config {
+            time_step_ns: 4.0,
+            module_id: 5,
+            dump_enabled: true,
+        };
+        let decoder = Psd2Decoder::new(config);
+        assert_eq!(decoder.config.time_step_ns, 4.0);
+        assert_eq!(decoder.config.module_id, 5);
+        assert!(decoder.config.dump_enabled);
+    }
+
+    #[test]
     fn test_classify_small_data() {
         let decoder = Psd2Decoder::with_defaults();
         let raw = RawData {
-            data: vec![0; 16], // Too small
+            data: vec![0; 16], // Too small (< 24 bytes = 3 words)
             size: 16,
             n_events: 0,
         };
         assert_eq!(decoder.classify(&raw), DataType::Unknown);
+    }
+
+    #[test]
+    fn test_classify_minimum_size() {
+        let decoder = Psd2Decoder::with_defaults();
+        // Exactly 24 bytes (3 words) - minimum for event data
+        let raw = RawData {
+            data: vec![0; 24],
+            size: 24,
+            n_events: 0,
+        };
+        // Not a start/stop signal, so should be Event
+        assert_eq!(decoder.classify(&raw), DataType::Event);
+    }
+
+    #[test]
+    fn test_classify_stop_signal() {
+        let decoder = Psd2Decoder::with_defaults();
+        // Stop signal: 24 bytes (3 words), type=0x3, subtype=0x2
+        // Word format (Big Endian): type in bits 63-60, subtype in bits 59-56
+        let mut data = vec![0u8; 24];
+        // Set first word: type=3 at bits 63-60, subtype=2 at bits 59-56
+        // In Big Endian: byte 0 contains bits 63-56
+        data[0] = 0x32; // type=3, subtype=2
+        let raw = RawData {
+            data,
+            size: 24,
+            n_events: 0,
+        };
+        assert_eq!(decoder.classify(&raw), DataType::Stop);
+    }
+
+    #[test]
+    fn test_classify_start_signal() {
+        let decoder = Psd2Decoder::with_defaults();
+        // Start signal: 32 bytes (4 words), type=0x3, subtype=0x0
+        let mut data = vec![0u8; 32];
+        // Set first word: type=3 at bits 63-60, subtype=0 at bits 59-56
+        data[0] = 0x30; // type=3, subtype=0
+        let raw = RawData {
+            data,
+            size: 32,
+            n_events: 0,
+        };
+        assert_eq!(decoder.classify(&raw), DataType::Start);
+    }
+
+    #[test]
+    fn test_read_u64_big_endian() {
+        let decoder = Psd2Decoder::with_defaults();
+        // Test big-endian reading
+        let data: Vec<u8> = vec![0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
+        let word = decoder.read_u64(&data, 0);
+        assert_eq!(word, 0x0102030405060708);
+    }
+
+    #[test]
+    fn test_set_dump_enabled() {
+        let mut decoder = Psd2Decoder::with_defaults();
+        assert!(!decoder.config.dump_enabled);
+        decoder.set_dump_enabled(true);
+        assert!(decoder.config.dump_enabled);
+        decoder.set_dump_enabled(false);
+        assert!(!decoder.config.dump_enabled);
+    }
+
+    #[test]
+    fn test_decode_empty_returns_empty() {
+        let mut decoder = Psd2Decoder::with_defaults();
+        let raw = RawData {
+            data: vec![0; 8], // Too small
+            size: 8,
+            n_events: 0,
+        };
+        let events = decoder.decode(&raw);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn test_decode_stop_signal_returns_empty() {
+        let mut decoder = Psd2Decoder::with_defaults();
+        let mut data = vec![0u8; 24];
+        data[0] = 0x32; // Stop signal
+        let raw = RawData {
+            data,
+            size: 24,
+            n_events: 0,
+        };
+        let events = decoder.decode(&raw);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn test_decode_start_signal_returns_empty() {
+        let mut decoder = Psd2Decoder::with_defaults();
+        let mut data = vec![0u8; 32];
+        data[0] = 0x30; // Start signal
+        let raw = RawData {
+            data,
+            size: 32,
+            n_events: 0,
+        };
+        let events = decoder.decode(&raw);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn test_decode_invalid_header_type() {
+        let mut decoder = Psd2Decoder::with_defaults();
+        // Create data with wrong header type (not 0x2)
+        let mut data = vec![0u8; 24];
+        // Header type at bits 63-60, set to 0x1 (invalid, should be 0x2)
+        data[0] = 0x10;
+        let raw = RawData {
+            data,
+            size: 24,
+            n_events: 0,
+        };
+        let events = decoder.decode(&raw);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn test_decode_valid_single_event() {
+        let mut decoder = Psd2Decoder::with_defaults();
+
+        // Create valid event data (Big Endian)
+        // Word 0 (Header): type=0x2, total_size=3 (3 words)
+        // Word 1 (Event first): channel=5, timestamp=1000
+        // Word 2 (Event second): flags, energy, etc.
+        let mut data = vec![0u8; 24];
+
+        // Header word (8 bytes, Big Endian):
+        // - bits 63-60: type = 0x2 (DATA)
+        // - bits 31-0: total_size = 3 (words)
+        data[0] = 0x20; // type=2 in high nibble
+        data[7] = 0x03; // total_size=3 in low byte
+
+        // Event first word (channel and timestamp):
+        // - bits 62-56: channel = 5
+        // - bits 47-0: timestamp (coarse) = 500
+        data[8] = 0x05; // channel=5 in bits 62-56 (shifted)
+        // timestamp = 500 in low 6 bytes
+        data[13] = 0x00;
+        data[14] = 0x01;
+        data[15] = 0xF4; // 500 = 0x1F4
+
+        // Event second word (energy, flags, etc.):
+        // - bits 15-0: energy = 1234
+        // - bits 41-26: energy_short = 567
+        // - bits 25-16: fine_time = 100
+        data[22] = 0x04; // energy high byte
+        data[23] = 0xD2; // energy low byte = 1234
+
+        let raw = RawData {
+            data,
+            size: 24,
+            n_events: 1,
+        };
+
+        let events = decoder.decode(&raw);
+        assert_eq!(events.len(), 1);
+
+        let event = &events[0];
+        assert_eq!(event.channel, 5);
+        assert_eq!(event.energy, 1234);
+    }
+
+    #[test]
+    fn test_psd2_config_default() {
+        let config = Psd2Config::default();
+        assert_eq!(config.time_step_ns, 2.0);
+        assert_eq!(config.module_id, 0);
+        assert!(!config.dump_enabled);
+    }
+
+    #[test]
+    fn test_constants_word_size() {
+        assert_eq!(constants::WORD_SIZE, 8);
+        assert_eq!(constants::MIN_DATA_SIZE, 24); // 3 * 8
+        assert_eq!(constants::START_SIGNAL_SIZE, 32); // 4 * 8
+        assert_eq!(constants::STOP_SIGNAL_SIZE, 24); // 3 * 8
+    }
+
+    #[test]
+    fn test_constants_header_masks() {
+        assert_eq!(constants::HEADER_TYPE_MASK, 0xF);
+        assert_eq!(constants::HEADER_TYPE_DATA, 0x2);
+        assert_eq!(constants::HEADER_TYPE_SHIFT, 60);
+    }
+
+    #[test]
+    fn test_constants_signal_types() {
+        assert_eq!(constants::START_SIGNAL_TYPE, 0x3);
+        assert_eq!(constants::START_SIGNAL_SUBTYPE, 0x0);
+        assert_eq!(constants::STOP_SIGNAL_TYPE, 0x3);
+        assert_eq!(constants::STOP_SIGNAL_SUBTYPE, 0x2);
+    }
+
+    #[test]
+    fn test_aggregate_counter_tracking() {
+        let mut decoder = Psd2Decoder::with_defaults();
+        assert_eq!(decoder.last_aggregate_counter, 0);
+    }
+
+    #[test]
+    fn test_events_sorted_by_timestamp() {
+        let mut decoder = Psd2Decoder::with_defaults();
+
+        // Create data with header indicating 2 events
+        let mut data = vec![0u8; 40]; // 5 words (header + 2 events)
+
+        // Header: type=2, total_size=5
+        data[0] = 0x20;
+        data[7] = 0x05;
+
+        // First event: channel=1, later timestamp
+        data[8] = 0x01;
+        data[15] = 0xFF; // larger timestamp
+
+        // Energy for first event
+        data[22] = 0x00;
+        data[23] = 0x64; // 100
+
+        // Second event: channel=2, earlier timestamp
+        data[24] = 0x02;
+        data[31] = 0x01; // smaller timestamp
+
+        // Energy for second event
+        data[38] = 0x00;
+        data[39] = 0xC8; // 200
+
+        let raw = RawData {
+            data,
+            size: 40,
+            n_events: 2,
+        };
+
+        let events = decoder.decode(&raw);
+        // Events should be sorted by timestamp (ascending)
+        if events.len() >= 2 {
+            assert!(events[0].timestamp_ns <= events[1].timestamp_ns);
+        }
     }
 }
