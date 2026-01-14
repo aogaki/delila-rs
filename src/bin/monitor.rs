@@ -6,7 +6,7 @@
 //!   cargo run --bin monitor -- --address tcp://localhost:5557 --port 8080
 
 use delila_rs::config::Config;
-use delila_rs::monitor::{Monitor, MonitorConfig, HistogramConfig};
+use delila_rs::monitor::{HistogramConfig, Monitor, MonitorConfig};
 use tokio::sync::broadcast;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -85,15 +85,9 @@ async fn main() -> anyhow::Result<()> {
         let config = Config::load(&path)?;
 
         let (subscribe_addr, http_port) = if let Some(ref monitor) = config.network.monitor {
-            (
-                monitor.subscribe.clone(),
-                monitor.http_port,
-            )
+            (monitor.subscribe.clone(), monitor.http_port)
         } else {
-            (
-                "tcp://localhost:5557".to_string(),
-                8081,
-            )
+            ("tcp://localhost:5557".to_string(), 8081)
         };
 
         info!(config_file = %path, "Loaded configuration");
@@ -137,7 +131,10 @@ async fn main() -> anyhow::Result<()> {
     println!("========================================");
     println!();
     println!("  Subscribing to: {}", monitor_config.subscribe_address);
-    println!("  Web UI:         http://localhost:{}/", monitor_config.http_port);
+    println!(
+        "  Web UI:         http://localhost:{}/",
+        monitor_config.http_port
+    );
     println!();
     println!("  Press Ctrl+C to stop.");
     println!("========================================");

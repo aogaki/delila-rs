@@ -60,19 +60,25 @@ async fn main() -> Result<()> {
                 }
             }
             "--help" | "-h" => {
-                println!("Merger - receives from multiple upstream sources and forwards downstream");
+                println!(
+                    "Merger - receives from multiple upstream sources and forwards downstream"
+                );
                 println!();
                 println!("Usage: merger [OPTIONS]");
                 println!();
                 println!("Options:");
                 println!("  --config, -c <FILE>  Load configuration from TOML file");
-                println!("  --sub, -s <ADDR>     Subscribe to upstream address (can specify multiple)");
+                println!(
+                    "  --sub, -s <ADDR>     Subscribe to upstream address (can specify multiple)"
+                );
                 println!("  --pub, -p <ADDR>     Publish to downstream address");
                 println!("  --help, -h           Show this help message");
                 println!();
                 println!("Examples:");
                 println!("  merger --config config.toml");
-                println!("  merger -s tcp://localhost:5555 -s tcp://localhost:5556 -p tcp://*:5557");
+                println!(
+                    "  merger -s tcp://localhost:5555 -s tcp://localhost:5556 -p tcp://*:5557"
+                );
                 return Ok(());
             }
             _ => {
@@ -101,7 +107,9 @@ async fn main() -> Result<()> {
                 sub_addresses
             },
             pub_address: pub_address.unwrap_or(merger_net.publish),
-            command_address: merger_net.command.unwrap_or_else(|| "tcp://*:5570".to_string()),
+            command_address: merger_net
+                .command
+                .unwrap_or_else(|| "tcp://*:5570".to_string()),
             channel_capacity: merger_net.channel_capacity,
         }
     } else {

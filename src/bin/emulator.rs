@@ -92,7 +92,9 @@ async fn main() -> anyhow::Result<()> {
                 println!();
                 println!("Options:");
                 println!("  --config, -c <FILE>   Load configuration from TOML file");
-                println!("  --source-id, -s <ID>  Source ID (selects config from file) [default: 0]");
+                println!(
+                    "  --source-id, -s <ID>  Source ID (selects config from file) [default: 0]"
+                );
                 println!("  --batches, -b <N>     Run for N batches then send EOS and exit");
                 println!("  --address, -a <ADDR>  Override ZMQ bind address");
                 println!("  --interval, -i <MS>   Batch interval in milliseconds [default: 100]");
@@ -120,11 +122,7 @@ async fn main() -> anyhow::Result<()> {
 
         // Find source config by ID
         let sid = source_id.unwrap_or(0);
-        let source_net = config
-            .network
-            .sources
-            .iter()
-            .find(|s| s.id == sid);
+        let source_net = config.network.sources.iter().find(|s| s.id == sid);
 
         let bind_address = if let Some(addr) = address {
             addr

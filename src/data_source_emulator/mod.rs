@@ -20,8 +20,8 @@ use tokio::time::interval;
 use tracing::{debug, info};
 
 use crate::common::{
-    flags, ComponentSharedState, ComponentState, Message, MinimalEventData,
-    MinimalEventDataBatch, handle_command_simple, run_command_task,
+    flags, handle_command_simple, run_command_task, ComponentSharedState, ComponentState, Message,
+    MinimalEventData, MinimalEventDataBatch,
 };
 
 /// Emulator configuration
@@ -191,7 +191,11 @@ impl Emulator {
                 info!(source_id = source_id, "Published EOS");
             }
             Message::Heartbeat(hb) => {
-                debug!(source_id = hb.source_id, counter = hb.counter, "Published heartbeat");
+                debug!(
+                    source_id = hb.source_id,
+                    counter = hb.counter,
+                    "Published heartbeat"
+                );
             }
         }
 

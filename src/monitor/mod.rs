@@ -383,7 +383,9 @@ async fn get_histogram(
 ) -> Result<Json<Histogram1D>, StatusCode> {
     let (tx, rx) = oneshot::channel();
     let key = ChannelKey::new(module_id, channel_id);
-    let _ = state.histogram_tx.send(HistogramMessage::GetHistogram(key, tx));
+    let _ = state
+        .histogram_tx
+        .send(HistogramMessage::GetHistogram(key, tx));
 
     match rx.await {
         Ok(Some(hist)) => Ok(Json(hist)),
@@ -446,11 +448,11 @@ pub fn create_router(state: AppState) -> Router {
         .route("/", get(serve_ui))
         .route("/api/status", get(get_status))
         .route("/api/histograms", get(list_histograms))
+        .route("/api/histograms/:module_id/:channel_id", get(get_histogram))
         .route(
-            "/api/histograms/:module_id/:channel_id",
-            get(get_histogram),
+            "/api/histograms/clear",
+            axum::routing::post(clear_histograms),
         )
-        .route("/api/histograms/clear", axum::routing::post(clear_histograms))
         .with_state(state)
 }
 
@@ -525,10 +527,7 @@ impl Monitor {
     }
 
     /// Run the monitor
-    pub async fn run(
-        &mut self,
-        mut shutdown: broadcast::Receiver<()>,
-    ) -> Result<(), MonitorError> {
+    pub async fn run(&mut self, mut shutdown: broadcast::Receiver<()>) -> Result<(), MonitorError> {
         // Create channels (unbounded - memory growth indicates bottleneck)
         let (hist_tx, hist_rx) = mpsc::unbounded_channel::<HistogramMessage>();
         let (data_tx, data_rx) = mpsc::unbounded_channel::<MinimalEventDataBatch>();
@@ -599,7 +598,14 @@ impl Monitor {
         let atomic_stats_for_recv = self.atomic_stats.clone();
         let state_rx_for_recv = self.state_rx.clone();
         let recv_handle = tokio::spawn(async move {
-            Self::receiver_task(socket, data_tx, shutdown_for_recv, atomic_stats_for_recv, state_rx_for_recv).await
+            Self::receiver_task(
+                socket,
+                data_tx,
+                shutdown_for_recv,
+                atomic_stats_for_recv,
+                state_rx_for_recv,
+            )
+            .await
         });
 
         // Spawn histogram task

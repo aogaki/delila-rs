@@ -95,7 +95,11 @@ fn parse_args() -> Option<(Command, String)> {
                 }
             };
 
-            Command::Configure(RunConfig { run_number, comment, exp_name: String::new() })
+            Command::Configure(RunConfig {
+                run_number,
+                comment,
+                exp_name: String::new(),
+            })
         }
         "arm" => Command::Arm,
         "start" => Command::Start,

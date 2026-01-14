@@ -506,7 +506,11 @@ mod tests {
         assert_eq!(restored.board.start_source, Some("SWcmd".to_string()));
         assert_eq!(restored.channel_defaults.trigger_threshold, Some(500));
         assert_eq!(
-            restored.channel_overrides.get(&0).unwrap().trigger_threshold,
+            restored
+                .channel_overrides
+                .get(&0)
+                .unwrap()
+                .trigger_threshold,
             Some(1000)
         );
     }

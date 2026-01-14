@@ -17,7 +17,11 @@ pub struct CaenError {
 
 impl fmt::Display for CaenError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "CAEN error {}: {} - {}", self.code, self.name, self.description)
+        write!(
+            f,
+            "CAEN error {}: {} - {}",
+            self.code, self.name, self.description
+        )
     }
 }
 

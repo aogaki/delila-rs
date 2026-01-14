@@ -122,7 +122,8 @@ impl CaenHandle {
         })?;
 
         let mut buffer = [0i8; 256];
-        let ret = unsafe { ffi::CAEN_FELib_GetValue(self.handle, c_path.as_ptr(), buffer.as_mut_ptr()) };
+        let ret =
+            unsafe { ffi::CAEN_FELib_GetValue(self.handle, c_path.as_ptr(), buffer.as_mut_ptr()) };
 
         CaenError::check(ret)?;
 
@@ -148,7 +149,8 @@ impl CaenHandle {
             description: "Value contains null byte".to_string(),
         })?;
 
-        let ret = unsafe { ffi::CAEN_FELib_SetValue(self.handle, c_path.as_ptr(), c_value.as_ptr()) };
+        let ret =
+            unsafe { ffi::CAEN_FELib_SetValue(self.handle, c_path.as_ptr(), c_value.as_ptr()) };
 
         CaenError::check(ret)
     }
@@ -181,7 +183,8 @@ impl CaenHandle {
         })?;
 
         let mut sub_handle: u64 = 0;
-        let ret = unsafe { ffi::CAEN_FELib_GetHandle(self.handle, c_path.as_ptr(), &mut sub_handle) };
+        let ret =
+            unsafe { ffi::CAEN_FELib_GetHandle(self.handle, c_path.as_ptr(), &mut sub_handle) };
 
         CaenError::check(ret)?;
         Ok(sub_handle)
@@ -207,7 +210,12 @@ impl CaenHandle {
     /// * `handle` - Sub-handle to use
     /// * `path` - Parameter path
     /// * `value` - Value to set
-    pub fn set_value_with_handle(&self, handle: u64, path: &str, value: &str) -> Result<(), CaenError> {
+    pub fn set_value_with_handle(
+        &self,
+        handle: u64,
+        path: &str,
+        value: &str,
+    ) -> Result<(), CaenError> {
         let c_path = CString::new(path).map_err(|_| CaenError {
             code: -2,
             name: "InvalidParam".to_string(),
@@ -258,7 +266,9 @@ impl CaenHandle {
         let ret = unsafe { ffi::CAEN_FELib_SetReadDataFormat(read_data_handle, c_format.as_ptr()) };
         CaenError::check(ret)?;
 
-        Ok(EndpointHandle { handle: read_data_handle })
+        Ok(EndpointHandle {
+            handle: read_data_handle,
+        })
     }
 }
 
@@ -309,7 +319,11 @@ impl EndpointHandle {
     /// # Safety
     /// This function uses variadic C FFI internally. The format must match
     /// what was configured in `configure_endpoint()`.
-    pub fn read_data(&self, timeout_ms: i32, buffer_size: usize) -> Result<Option<RawData>, CaenError> {
+    pub fn read_data(
+        &self,
+        timeout_ms: i32,
+        buffer_size: usize,
+    ) -> Result<Option<RawData>, CaenError> {
         // Allocate buffer - must be pre-allocated like C++ version
         let mut data = vec![0u8; buffer_size];
         let mut size: usize = 0;
@@ -329,7 +343,11 @@ impl EndpointHandle {
         if ret == 0 {
             // Success - truncate data to actual size
             data.truncate(size);
-            Ok(Some(RawData { data, size, n_events }))
+            Ok(Some(RawData {
+                data,
+                size,
+                n_events,
+            }))
         } else if ret == -11 {
             // Timeout
             Ok(None)

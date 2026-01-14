@@ -106,7 +106,9 @@ async fn main() -> anyhow::Result<()> {
                 println!("  --module-id, -m <ID>         Module ID for decoded events");
                 println!("  --data-address, -d <ADDR>    ZMQ data publish address");
                 println!("  --command-address, -c <ADDR> ZMQ command address");
-                println!("  --time-step, -t <NS>         ADC time step in nanoseconds [default: 2.0]");
+                println!(
+                    "  --time-step, -t <NS>         ADC time step in nanoseconds [default: 2.0]"
+                );
                 println!("  --help, -h                   Show this help message");
                 println!();
                 println!("Examples:");
@@ -128,8 +130,8 @@ async fn main() -> anyhow::Result<()> {
         let file_config = Config::load(&path)?;
 
         // Get base config from file
-        let mut reader_config = ReaderConfig::from_config(&file_config, source_id)
-            .unwrap_or_else(|| {
+        let mut reader_config =
+            ReaderConfig::from_config(&file_config, source_id).unwrap_or_else(|| {
                 eprintln!(
                     "Error: source {} not found in config file, or no digitizer_url specified",
                     source_id
@@ -168,8 +170,10 @@ async fn main() -> anyhow::Result<()> {
 
         ReaderConfig {
             url: url.clone(),
-            data_address: data_address.unwrap_or_else(|| format!("tcp://*:{}", 5555 + source_id as u16)),
-            command_address: command_address.unwrap_or_else(|| format!("tcp://*:{}", 5560 + source_id as u16)),
+            data_address: data_address
+                .unwrap_or_else(|| format!("tcp://*:{}", 5555 + source_id as u16)),
+            command_address: command_address
+                .unwrap_or_else(|| format!("tcp://*:{}", 5560 + source_id as u16)),
             source_id,
             firmware: FirmwareType::Psd2,
             module_id: module_id.unwrap_or(source_id as u8),

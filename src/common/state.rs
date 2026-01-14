@@ -102,7 +102,10 @@ pub fn handle_command<E: CommandHandlerExt>(
     mut ext: Option<&mut E>,
 ) -> CommandResponse {
     let current = state.state;
-    let component_name = ext.as_ref().map(|e| e.component_name()).unwrap_or("Component");
+    let component_name = ext
+        .as_ref()
+        .map(|e| e.component_name())
+        .unwrap_or("Component");
 
     match cmd {
         Command::Configure(run_config) => {
@@ -125,11 +128,7 @@ pub fn handle_command<E: CommandHandlerExt>(
             state.state = ComponentState::Configured;
             let _ = state_tx.send(ComponentState::Configured);
 
-            info!(
-                component = component_name,
-                run_number,
-                "Configured"
-            );
+            info!(component = component_name, run_number, "Configured");
             CommandResponse::success_with_run(ComponentState::Configured, "Configured", run_number)
         }
 
@@ -327,7 +326,12 @@ mod tests {
             comment: "test".to_string(),
             exp_name: "TestExp".to_string(),
         };
-        let resp = handle_command(&mut state, &state_tx, Command::Configure(config), Some(&mut ext));
+        let resp = handle_command(
+            &mut state,
+            &state_tx,
+            Command::Configure(config),
+            Some(&mut ext),
+        );
         assert!(resp.success);
         assert_eq!(state.state, ComponentState::Configured);
         assert!(ext.configure_called);
@@ -397,7 +401,8 @@ mod tests {
             comment: "".to_string(),
             exp_name: "".to_string(),
         };
-        let resp = handle_command_simple(&mut state, &state_tx, Command::Configure(config), "Simple");
+        let resp =
+            handle_command_simple(&mut state, &state_tx, Command::Configure(config), "Simple");
         assert!(resp.success);
         assert_eq!(state.state, ComponentState::Configured);
     }

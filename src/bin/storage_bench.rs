@@ -172,9 +172,11 @@ fn run_benchmarks(path: &Path, name: &str) {
     println!("\n{}", "=".repeat(60));
     println!("  Storage: {} ({})", name, path.display());
     println!("{}", "=".repeat(60));
-    println!("  Batch size: {:.1} MB ({} events)",
-             BATCH_SIZE_BYTES as f64 / 1_000_000.0,
-             BATCH_SIZE_BYTES / 22);
+    println!(
+        "  Batch size: {:.1} MB ({} events)",
+        BATCH_SIZE_BYTES as f64 / 1_000_000.0,
+        BATCH_SIZE_BYTES / 22
+    );
     println!("  Iterations: {}", ITERATIONS);
     println!();
 
@@ -184,9 +186,14 @@ fn run_benchmarks(path: &Path, name: &str) {
     let target_2m = 2_000_000.0;
     let target_10m = 10_000_000.0;
 
-    println!("  {:25} | {:>11} | {:>13} | {:>13} | Status",
-             "Mode", "Throughput", "Latency", "Max Rate");
-    println!("  {:-<25}-+-{:-<11}-+-{:-<13}-+-{:-<13}-+-------", "", "", "", "");
+    println!(
+        "  {:25} | {:>11} | {:>13} | {:>13} | Status",
+        "Mode", "Throughput", "Latency", "Max Rate"
+    );
+    println!(
+        "  {:-<25}-+-{:-<11}-+-{:-<13}-+-{:-<13}-+-------",
+        "", "", "", ""
+    );
 
     // Run benchmarks
     let results = vec![
@@ -210,22 +217,40 @@ fn run_benchmarks(path: &Path, name: &str) {
 
     // Summary
     println!();
-    let best_for_2m = results.iter()
+    let best_for_2m = results
+        .iter()
         .filter(|r| r.max_event_rate >= target_2m)
-        .min_by(|a, b| a.latency_per_batch_ms.partial_cmp(&b.latency_per_batch_ms).unwrap());
+        .min_by(|a, b| {
+            a.latency_per_batch_ms
+                .partial_cmp(&b.latency_per_batch_ms)
+                .unwrap()
+        });
 
-    let best_for_10m = results.iter()
+    let best_for_10m = results
+        .iter()
         .filter(|r| r.max_event_rate >= target_10m)
-        .min_by(|a, b| a.latency_per_batch_ms.partial_cmp(&b.latency_per_batch_ms).unwrap());
+        .min_by(|a, b| {
+            a.latency_per_batch_ms
+                .partial_cmp(&b.latency_per_batch_ms)
+                .unwrap()
+        });
 
     if let Some(best) = best_for_2m {
-        println!("  Best for 2 MHz:  {} ({:.1}M evt/s)", best.name, best.max_event_rate / 1_000_000.0);
+        println!(
+            "  Best for 2 MHz:  {} ({:.1}M evt/s)",
+            best.name,
+            best.max_event_rate / 1_000_000.0
+        );
     } else {
         println!("  Best for 2 MHz:  NONE - storage too slow!");
     }
 
     if let Some(best) = best_for_10m {
-        println!("  Best for 10 MHz: {} ({:.1}M evt/s)", best.name, best.max_event_rate / 1_000_000.0);
+        println!(
+            "  Best for 10 MHz: {} ({:.1}M evt/s)",
+            best.name,
+            best.max_event_rate / 1_000_000.0
+        );
     } else {
         println!("  Best for 10 MHz: NONE - storage too slow!");
     }

@@ -286,9 +286,7 @@ impl Merger {
             .first()
             .ok_or(MergerError::NoUpstreamAddresses)?;
 
-        let sub_socket = subscribe(&context)
-            .connect(first_addr)?
-            .subscribe(b"")?;
+        let sub_socket = subscribe(&context).connect(first_addr)?.subscribe(b"")?;
 
         info!(address = %first_addr, "Merger subscribed to upstream");
 
@@ -331,15 +329,22 @@ impl Merger {
         let ext_state_for_recv = self.ext_state.clone();
         let state_rx_for_recv = self.state_rx.clone();
         let receiver_handle = tokio::spawn(async move {
-            Self::receiver_task(sub_socket, tx, shutdown_rx, ext_state_for_recv, state_rx_for_recv)
-                .await
+            Self::receiver_task(
+                sub_socket,
+                tx,
+                shutdown_rx,
+                ext_state_for_recv,
+                state_rx_for_recv,
+            )
+            .await
         });
 
         // Spawn sender task (zero-copy: forwards raw bytes)
         let ext_state_for_send = self.ext_state.clone();
-        let sender_handle = tokio::spawn(async move {
-            Self::sender_task(rx, pub_socket, ext_state_for_send).await
-        });
+        let sender_handle =
+            tokio::spawn(
+                async move { Self::sender_task(rx, pub_socket, ext_state_for_send).await },
+            );
 
         // Wait for shutdown signal
         let _ = shutdown.recv().await;

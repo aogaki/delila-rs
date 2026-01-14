@@ -89,7 +89,9 @@ async fn main() -> anyhow::Result<()> {
                 println!("  --config, -c <FILE>   Load configuration from TOML file");
                 println!("  --address, -a <ADDR>  ZMQ address to connect to (default: tcp://localhost:5557)");
                 println!("  --output, -o <DIR>    Output directory (default: ./data)");
-                println!("  --fsync, -f <N>       fsync every N batches (0=file close only, default: 0)");
+                println!(
+                    "  --fsync, -f <N>       fsync every N batches (0=file close only, default: 0)"
+                );
                 println!("                        HDD: 0 (file close only)");
                 println!("                        SSD: 5 (every 5 batches)");
                 println!("  --help, -h            Show this help message");
@@ -120,7 +122,10 @@ async fn main() -> anyhow::Result<()> {
             if let Some(ref recorder) = config.network.recorder {
                 (
                     recorder.subscribe.clone(),
-                    recorder.command.clone().unwrap_or_else(|| "tcp://*:5580".to_string()),
+                    recorder
+                        .command
+                        .clone()
+                        .unwrap_or_else(|| "tcp://*:5580".to_string()),
                     recorder.output_dir.clone(),
                     recorder.max_file_size_mb,
                     recorder.max_file_duration_sec,
@@ -156,7 +161,7 @@ async fn main() -> anyhow::Result<()> {
             command_address: "tcp://*:5580".to_string(),
             output_dir: PathBuf::from(output_dir.unwrap_or_else(|| "./data".to_string())),
             max_file_size: 1024 * 1024 * 1024, // 1GB
-            max_file_duration_secs: 600,        // 10 minutes
+            max_file_duration_secs: 600,       // 10 minutes
             fsync_interval_batches: fsync_interval.unwrap_or(0),
             ..Default::default()
         }
@@ -184,12 +189,27 @@ async fn main() -> anyhow::Result<()> {
     println!();
     println!("  Subscribing to: {}", recorder_config.subscribe_address);
     println!("  Output dir:     {}", recorder_config.output_dir.display());
-    println!("  Max file size:  {} MB", recorder_config.max_file_size / 1_000_000);
-    println!("  Max duration:   {} sec", recorder_config.max_file_duration_secs);
-    println!("  Sort margin:    {}%", recorder_config.sort_margin_ratio * 100.0);
-    println!("  fsync interval: {} batches {}",
-             recorder_config.fsync_interval_batches,
-             if recorder_config.fsync_interval_batches == 0 { "(file close only)" } else { "" });
+    println!(
+        "  Max file size:  {} MB",
+        recorder_config.max_file_size / 1_000_000
+    );
+    println!(
+        "  Max duration:   {} sec",
+        recorder_config.max_file_duration_secs
+    );
+    println!(
+        "  Sort margin:    {}%",
+        recorder_config.sort_margin_ratio * 100.0
+    );
+    println!(
+        "  fsync interval: {} batches {}",
+        recorder_config.fsync_interval_batches,
+        if recorder_config.fsync_interval_batches == 0 {
+            "(file close only)"
+        } else {
+            ""
+        }
+    );
     println!();
     println!("  Press Ctrl+C to stop.");
     println!("========================================");

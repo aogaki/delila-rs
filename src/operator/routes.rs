@@ -194,9 +194,8 @@ async fn configure(
         .configure_all(&state.components, run_config)
         .await;
 
-    let response =
-        ApiResponse::success(format!("Configure command sent for run {}", run_number))
-            .with_results(results);
+    let response = ApiResponse::success(format!("Configure command sent for run {}", run_number))
+        .with_results(results);
 
     let status = if response.success {
         StatusCode::OK
@@ -349,10 +348,7 @@ async fn run_start(
         Ok(results) if results.iter().any(|r| !r.success) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(
-                    ApiResponse::error("Configure phase failed")
-                        .with_results(results),
-                ),
+                Json(ApiResponse::error("Configure phase failed").with_results(results)),
             );
         }
         Ok(_) => {}
@@ -447,16 +443,12 @@ async fn get_digitizer(
 ) -> Result<Json<DigitizerConfig>, (StatusCode, Json<ApiResponse>)> {
     let configs = state.digitizer_configs.read().await;
 
-    configs
-        .get(&id)
-        .cloned()
-        .map(Json)
-        .ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                Json(ApiResponse::error(format!("Digitizer {} not found", id))),
-            )
-        })
+    configs.get(&id).cloned().map(Json).ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ApiResponse::error(format!("Digitizer {} not found", id))),
+        )
+    })
 }
 
 /// Update a digitizer configuration (in memory)
@@ -552,7 +544,10 @@ async fn save_digitizer(
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiResponse::error(format!("Failed to serialize config: {}", e))),
+                Json(ApiResponse::error(format!(
+                    "Failed to serialize config: {}",
+                    e
+                ))),
             );
         }
     };
@@ -560,7 +555,10 @@ async fn save_digitizer(
     if let Err(e) = std::fs::write(&file_path, json) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiResponse::error(format!("Failed to write config file: {}", e))),
+            Json(ApiResponse::error(format!(
+                "Failed to write config file: {}",
+                e
+            ))),
         );
     }
 

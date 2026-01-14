@@ -13,9 +13,7 @@
 
 pub mod digitizer;
 
-pub use digitizer::{
-    BoardConfig, CaenParameter, ChannelConfig, DigitizerConfig, FirmwareType,
-};
+pub use digitizer::{BoardConfig, CaenParameter, ChannelConfig, DigitizerConfig, FirmwareType};
 
 use serde::Deserialize;
 use std::path::Path;

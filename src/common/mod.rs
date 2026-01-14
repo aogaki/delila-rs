@@ -294,7 +294,10 @@ impl Message {
 #[derive(Debug, Clone, Copy)]
 pub enum MessageHeader {
     /// Data batch with source_id and sequence_number
-    Data { source_id: u32, sequence_number: u64 },
+    Data {
+        source_id: u32,
+        sequence_number: u64,
+    },
     /// End of stream
     EndOfStream { source_id: u32 },
     /// Heartbeat
@@ -513,11 +516,11 @@ mod tests {
     #[test]
     fn minimal_event_data_roundtrip() {
         let event = MinimalEventData::new(
-            1,      // module
-            2,      // channel
-            1000,   // energy
-            800,    // energy_short
-            123456789.0, // timestamp_ns
+            1,                                           // module
+            2,                                           // channel
+            1000,                                        // energy
+            800,                                         // energy_short
+            123456789.0,                                 // timestamp_ns
             flags::FLAG_PILEUP | flags::FLAG_OVER_RANGE, // flags
         );
 
@@ -532,7 +535,14 @@ mod tests {
     fn batch_roundtrip() {
         let mut batch = MinimalEventDataBatch::new(42, 1);
         batch.push(MinimalEventData::new(0, 0, 100, 80, 1000.0, 0));
-        batch.push(MinimalEventData::new(0, 1, 200, 160, 2000.0, flags::FLAG_PILEUP));
+        batch.push(MinimalEventData::new(
+            0,
+            1,
+            200,
+            160,
+            2000.0,
+            flags::FLAG_PILEUP,
+        ));
 
         let bytes = batch.to_msgpack().unwrap();
         let decoded = MinimalEventDataBatch::from_msgpack(&bytes).unwrap();
@@ -546,10 +556,8 @@ mod tests {
 
     #[test]
     fn flag_helpers() {
-        let event = MinimalEventData::new(
-            0, 0, 0, 0, 0.0,
-            flags::FLAG_PILEUP | flags::FLAG_OVER_RANGE,
-        );
+        let event =
+            MinimalEventData::new(0, 0, 0, 0, 0.0, flags::FLAG_PILEUP | flags::FLAG_OVER_RANGE);
 
         assert!(event.has_pileup());
         assert!(!event.has_trigger_lost());

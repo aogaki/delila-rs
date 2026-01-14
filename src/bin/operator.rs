@@ -95,9 +95,15 @@ fn load_components(config_file: &str) -> Vec<ComponentConfig> {
     // Try to read config file for component addresses
     // For now, use default addresses matching config.example.toml
     if std::path::Path::new(config_file).exists() {
-        info!("Config file {} exists, using default component addresses", config_file);
+        info!(
+            "Config file {} exists, using default component addresses",
+            config_file
+        );
     } else {
-        info!("Config file {} not found, using default addresses", config_file);
+        info!(
+            "Config file {} not found, using default addresses",
+            config_file
+        );
     }
 
     // Default component configuration

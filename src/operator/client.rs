@@ -65,7 +65,10 @@ impl ComponentClient {
 
     /// Get status of a single component
     pub async fn get_status(&self, config: &ComponentConfig) -> ComponentStatus {
-        match self.send_command(&config.address, &Command::GetStatus).await {
+        match self
+            .send_command(&config.address, &Command::GetStatus)
+            .await
+        {
             Ok(response) => ComponentStatus {
                 name: config.name.clone(),
                 address: config.address.clone(),
@@ -226,7 +229,9 @@ impl ComponentClient {
             let statuses = self.get_all_status(configs).await;
 
             // Check if all are in expected state
-            let all_ready = statuses.iter().all(|s| s.online && s.state == expected_state);
+            let all_ready = statuses
+                .iter()
+                .all(|s| s.online && s.state == expected_state);
             if all_ready {
                 return Ok(());
             }

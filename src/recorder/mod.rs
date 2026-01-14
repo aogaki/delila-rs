@@ -59,11 +59,11 @@ impl Default for RecorderConfig {
             command_address: "tcp://*:5580".to_string(),
             output_dir: PathBuf::from("./data"),
             max_file_size: 1024 * 1024 * 1024, // 1GB
-            max_file_duration_secs: 600,        // 10 minutes
+            max_file_duration_secs: 600,       // 10 minutes
             channel_capacity: 1000,
-            sort_margin_ratio: 0.05,            // 5% margin
+            sort_margin_ratio: 0.05, // 5% margin
             min_events_before_flush: 10000,
-            fsync_interval_batches: 0,          // HDD-friendly default
+            fsync_interval_batches: 0, // HDD-friendly default
         }
     }
 }
@@ -353,8 +353,12 @@ impl FileWriter {
 
             let bytes_written = 4 + data.len() as u64;
             self.current_file_size += bytes_written;
-            self.stats.written_bytes.fetch_add(bytes_written, Ordering::Relaxed);
-            self.stats.written_events.fetch_add(event_count, Ordering::Relaxed);
+            self.stats
+                .written_bytes
+                .fetch_add(bytes_written, Ordering::Relaxed);
+            self.stats
+                .written_events
+                .fetch_add(event_count, Ordering::Relaxed);
 
             // fsync if configured
             self.batches_since_fsync += 1;
@@ -430,10 +434,7 @@ impl CommandHandlerExt for RecorderCommandExt {
         let stats = self.stats.snapshot();
         Some(format!(
             "Received: {} events, Written: {} events, Files: {}, Dropped: {}",
-            stats.total_events,
-            stats.written_events,
-            stats.files_written,
-            stats.dropped_batches
+            stats.total_events, stats.written_events, stats.files_written, stats.dropped_batches
         ))
     }
 }
@@ -508,9 +509,10 @@ impl Recorder {
         // === Spawn Writer Task ===
         let writer_config = self.config.clone();
         let writer_stats = self.stats.clone();
-        let writer_handle = tokio::spawn(async move {
-            Self::writer_task(writer_rx, writer_config, writer_stats).await
-        });
+        let writer_handle =
+            tokio::spawn(
+                async move { Self::writer_task(writer_rx, writer_config, writer_stats).await },
+            );
 
         // === Spawn Sorter Task ===
         let sorter_config = self.config.clone();
@@ -518,7 +520,14 @@ impl Recorder {
         let sorter_state_rx = self.state_rx.clone();
         let sorter_writer_tx = writer_tx.clone();
         let sorter_handle = tokio::spawn(async move {
-            Self::sorter_task(recv_rx, sorter_writer_tx, sorter_config, sorter_stats, sorter_state_rx).await
+            Self::sorter_task(
+                recv_rx,
+                sorter_writer_tx,
+                sorter_config,
+                sorter_stats,
+                sorter_state_rx,
+            )
+            .await
         });
 
         // === Spawn Receiver Task ===
@@ -527,7 +536,14 @@ impl Recorder {
         let receiver_state_rx = self.state_rx.clone();
         let receiver_shutdown = shutdown.resubscribe();
         let receiver_handle = tokio::spawn(async move {
-            Self::receiver_task(socket, recv_tx, receiver_shutdown, receiver_stats, receiver_state_rx).await
+            Self::receiver_task(
+                socket,
+                recv_tx,
+                receiver_shutdown,
+                receiver_stats,
+                receiver_state_rx,
+            )
+            .await
         });
 
         // === Spawn Command Task ===
@@ -681,7 +697,8 @@ impl Recorder {
         _stats: Arc<AtomicStats>,
         mut state_rx: watch::Receiver<ComponentState>,
     ) {
-        let mut buffer = SortingBuffer::new(config.sort_margin_ratio, config.min_events_before_flush);
+        let mut buffer =
+            SortingBuffer::new(config.sort_margin_ratio, config.min_events_before_flush);
         let mut flush_interval = tokio::time::interval(Duration::from_millis(500));
 
         loop {
@@ -875,10 +892,16 @@ mod tests {
         });
 
         let path = writer.generate_filename();
-        assert_eq!(path.to_str().unwrap(), "/data/run0042_0000_CRIB2026.msgpack");
+        assert_eq!(
+            path.to_str().unwrap(),
+            "/data/run0042_0000_CRIB2026.msgpack"
+        );
 
         writer.file_sequence = 5;
         let path = writer.generate_filename();
-        assert_eq!(path.to_str().unwrap(), "/data/run0042_0005_CRIB2026.msgpack");
+        assert_eq!(
+            path.to_str().unwrap(),
+            "/data/run0042_0005_CRIB2026.msgpack"
+        );
     }
 }

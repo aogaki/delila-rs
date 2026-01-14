@@ -75,13 +75,13 @@ async fn main() -> anyhow::Result<()> {
         let (subscribe_addr, command_addr) = if let Some(ref recorder) = config.network.recorder {
             (
                 recorder.subscribe.clone(),
-                recorder.command.clone().unwrap_or_else(|| "tcp://*:5580".to_string()),
+                recorder
+                    .command
+                    .clone()
+                    .unwrap_or_else(|| "tcp://*:5580".to_string()),
             )
         } else if let Some(ref monitor) = config.network.monitor {
-            (
-                monitor.subscribe.clone(),
-                "tcp://*:5580".to_string(),
-            )
+            (monitor.subscribe.clone(), "tcp://*:5580".to_string())
         } else {
             (
                 "tcp://localhost:5557".to_string(),

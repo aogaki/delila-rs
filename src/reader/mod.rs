@@ -13,8 +13,8 @@ pub use caen::{CaenError, CaenHandle, EndpointHandle};
 pub use decoder::{DataType, DecodeResult, EventData, Psd2Config, Psd2Decoder, Waveform};
 
 use crate::common::{
-    ComponentSharedState, ComponentState, Message, MinimalEventData, MinimalEventDataBatch,
-    handle_command_simple, run_command_task,
+    handle_command_simple, run_command_task, ComponentSharedState, ComponentState, Message,
+    MinimalEventData, MinimalEventDataBatch,
 };
 use futures::SinkExt;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -106,10 +106,7 @@ impl ReaderConfig {
     /// Create ReaderConfig from Config and source ID
     ///
     /// Returns None if source_id is not found or source has no digitizer_url
-    pub fn from_config(
-        config: &crate::config::Config,
-        source_id: u32,
-    ) -> Option<Self> {
+    pub fn from_config(config: &crate::config::Config, source_id: u32) -> Option<Self> {
         let source = config.get_source(source_id)?;
         let url = source.digitizer_url.as_ref()?;
 
@@ -335,7 +332,9 @@ impl Reader {
             // Read data from digitizer
             match endpoint.read_data(config.read_timeout_ms, config.buffer_size) {
                 Ok(Some(raw)) => {
-                    metrics.bytes_read.fetch_add(raw.size as u64, Ordering::Relaxed);
+                    metrics
+                        .bytes_read
+                        .fetch_add(raw.size as u64, Ordering::Relaxed);
 
                     // Convert to decoder RawData and send
                     let decoder_raw = decoder::RawData::from(raw);
@@ -393,10 +392,14 @@ impl Reader {
                 Psd2Decoder::new(psd2_config)
             }
             FirmwareType::Psd1 => {
-                return Err(ReaderError::Config("PSD1 decoder not yet implemented".to_string()));
+                return Err(ReaderError::Config(
+                    "PSD1 decoder not yet implemented".to_string(),
+                ));
             }
             FirmwareType::Pha1 => {
-                return Err(ReaderError::Config("PHA1 decoder not yet implemented".to_string()));
+                return Err(ReaderError::Config(
+                    "PHA1 decoder not yet implemented".to_string(),
+                ));
             }
         };
 
@@ -405,9 +408,8 @@ impl Reader {
 
         // Heartbeat ticker
         let use_heartbeat = config.heartbeat_interval_ms > 0;
-        let mut heartbeat_ticker = interval(Duration::from_millis(
-            config.heartbeat_interval_ms.max(100),
-        ));
+        let mut heartbeat_ticker =
+            interval(Duration::from_millis(config.heartbeat_interval_ms.max(100)));
 
         loop {
             tokio::select! {

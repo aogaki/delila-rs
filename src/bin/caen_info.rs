@@ -122,16 +122,16 @@ fn test_parameter_setting(handle: &CaenHandle) {
     // Test 5: Global parameter - StartSource
     println!();
     println!("Test 5: Start Source (Global Enum)");
-    test_param_cycle(handle, "/par/StartSource", &["SWcmd", "EncodedClkIn", "SWcmd"]);
+    test_param_cycle(
+        handle,
+        "/par/StartSource",
+        &["SWcmd", "EncodedClkIn", "SWcmd"],
+    );
 
     // Test 6: Gate lengths
     println!();
     println!("Test 6: Gate Long Length (Numeric with unit)");
-    test_param_cycle(
-        handle,
-        "/ch/0/par/GateLongLengthT",
-        &["400", "800", "400"],
-    );
+    test_param_cycle(handle, "/ch/0/par/GateLongLengthT", &["400", "800", "400"]);
 }
 
 /// Helper function to test read-modify-verify cycle
@@ -158,7 +158,10 @@ fn test_param_cycle(handle: &CaenHandle, path: &str, values: &[&str]) {
                 println!("  [SET]   {} = {}", param_name, new_value);
             }
             Err(e) => {
-                println!("  [ERROR] Failed to set {} = {}: {}", param_name, new_value, e);
+                println!(
+                    "  [ERROR] Failed to set {} = {}: {}",
+                    param_name, new_value, e
+                );
                 continue;
             }
         }
@@ -169,10 +172,7 @@ fn test_param_cycle(handle: &CaenHandle, path: &str, values: &[&str]) {
                 if v == new_value {
                     println!("  [VERIFY] OK: {} == {}", param_name, v);
                 } else {
-                    println!(
-                        "  [VERIFY] MISMATCH: expected {}, got {}",
-                        new_value, v
-                    );
+                    println!("  [VERIFY] MISMATCH: expected {}, got {}", new_value, v);
                 }
             }
             Err(e) => {

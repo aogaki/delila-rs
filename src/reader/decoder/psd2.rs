@@ -207,10 +207,7 @@ impl Psd2Decoder {
         for i in 0..num_words.min(20) {
             // Limit to first 20 words
             let word = self.read_u64(&raw.data, i);
-            println!(
-                "Word {:3}: 0x{:016x} | {:064b}",
-                i, word, word
-            );
+            println!("Word {:3}: 0x{:016x} | {:064b}", i, word, word);
 
             // Decode header if first word
             if i == 0 {
@@ -260,9 +257,8 @@ impl Psd2Decoder {
             println!("[PSD2] Board fail bit set!");
         }
 
-        let aggregate_counter =
-            ((header >> constants::AGGREGATE_COUNTER_SHIFT) & constants::AGGREGATE_COUNTER_MASK)
-                as u16;
+        let aggregate_counter = ((header >> constants::AGGREGATE_COUNTER_SHIFT)
+            & constants::AGGREGATE_COUNTER_MASK) as u16;
 
         // Check counter continuity (only warn, don't fail)
         if aggregate_counter != 0
@@ -311,10 +307,10 @@ impl Psd2Decoder {
         let raw_timestamp = first_word & constants::TIMESTAMP_MASK;
 
         // Extract flags
-        let flags_low =
-            (second_word >> constants::FLAGS_LOW_PRIORITY_SHIFT) & constants::FLAGS_LOW_PRIORITY_MASK;
-        let flags_high =
-            (second_word >> constants::FLAGS_HIGH_PRIORITY_SHIFT) & constants::FLAGS_HIGH_PRIORITY_MASK;
+        let flags_low = (second_word >> constants::FLAGS_LOW_PRIORITY_SHIFT)
+            & constants::FLAGS_LOW_PRIORITY_MASK;
+        let flags_high = (second_word >> constants::FLAGS_HIGH_PRIORITY_SHIFT)
+            & constants::FLAGS_HIGH_PRIORITY_MASK;
         let flags = ((flags_high << 11) | flags_low) as u32;
 
         // Extract energies
@@ -377,7 +373,8 @@ impl Psd2Decoder {
 
         // Validate waveform header
         let check1 = (wf_header >> constants::WAVEFORM_CHECK1_SHIFT) & 0x1;
-        let check2 = (wf_header >> constants::WAVEFORM_CHECK2_SHIFT) & constants::WAVEFORM_CHECK2_MASK;
+        let check2 =
+            (wf_header >> constants::WAVEFORM_CHECK2_SHIFT) & constants::WAVEFORM_CHECK2_MASK;
         if check1 != 1 || check2 != 0 {
             if self.config.dump_enabled {
                 println!(
@@ -388,10 +385,10 @@ impl Psd2Decoder {
             return None;
         }
 
-        let time_resolution =
-            ((wf_header >> constants::TIME_RESOLUTION_SHIFT) & constants::TIME_RESOLUTION_MASK) as u8;
-        let trigger_threshold =
-            ((wf_header >> constants::TRIGGER_THRESHOLD_SHIFT) & constants::TRIGGER_THRESHOLD_MASK) as u16;
+        let time_resolution = ((wf_header >> constants::TIME_RESOLUTION_SHIFT)
+            & constants::TIME_RESOLUTION_MASK) as u8;
+        let trigger_threshold = ((wf_header >> constants::TRIGGER_THRESHOLD_SHIFT)
+            & constants::TRIGGER_THRESHOLD_MASK) as u16;
 
         // Read waveform size word
         let size_word = self.read_u64(data, *word_index);
@@ -430,7 +427,8 @@ impl Psd2Decoder {
                 let sample = ((word >> shift) & 0xFFFFFFFF) as u32;
 
                 let ap1 = (sample & constants::ANALOG_PROBE_MASK) as i16;
-                let ap2 = ((sample >> constants::ANALOG_PROBE2_SHIFT) & constants::ANALOG_PROBE_MASK) as i16;
+                let ap2 = ((sample >> constants::ANALOG_PROBE2_SHIFT)
+                    & constants::ANALOG_PROBE_MASK) as i16;
                 let dp1 = ((sample >> constants::DIGITAL_PROBE1_SHIFT) & 0x1) as u8;
                 let dp2 = ((sample >> constants::DIGITAL_PROBE2_SHIFT) & 0x1) as u8;
                 let dp3 = ((sample >> constants::DIGITAL_PROBE3_SHIFT) & 0x1) as u8;

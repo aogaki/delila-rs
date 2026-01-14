@@ -336,7 +336,14 @@ impl DataSink {
         let atomic_stats_for_recv = self.atomic_stats.clone();
         let state_rx_for_recv = self.state_rx.clone();
         let recv_handle = tokio::spawn(async move {
-            Self::receiver_task(socket, proc_tx, shutdown_for_recv, atomic_stats_for_recv, state_rx_for_recv).await
+            Self::receiver_task(
+                socket,
+                proc_tx,
+                shutdown_for_recv,
+                atomic_stats_for_recv,
+                state_rx_for_recv,
+            )
+            .await
         });
 
         // Spawn processor task
