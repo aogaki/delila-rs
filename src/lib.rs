@@ -7,5 +7,7 @@ pub mod config;
 pub mod data_sink;
 pub mod data_source_emulator;
 pub mod merger;
+pub mod monitor;
 pub mod operator;
 pub mod reader;
+pub mod recorder;

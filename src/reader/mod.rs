@@ -12,15 +12,16 @@ pub mod decoder;
 pub use caen::{CaenError, CaenHandle, EndpointHandle};
 pub use decoder::{DataType, DecodeResult, EventData, Psd2Config, Psd2Decoder, Waveform};
 
-use crate::common::command::{Command, CommandResponse, ComponentState, RunConfig};
-use crate::common::{Message, MinimalEventData, MinimalEventDataBatch};
+use crate::common::{
+    ComponentSharedState, ComponentState, Message, MinimalEventData, MinimalEventDataBatch,
+    handle_command_simple, run_command_task,
+};
 use futures::SinkExt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
 use tmq::publish;
-use tmq::request_reply;
 use tmq::Context;
 use tokio::sync::{mpsc, watch, Mutex};
 use tokio::time::interval;
@@ -127,21 +128,6 @@ impl ReaderConfig {
     }
 }
 
-/// Shared state between tasks
-struct SharedState {
-    state: ComponentState,
-    run_config: Option<RunConfig>,
-}
-
-impl SharedState {
-    fn new() -> Self {
-        Self {
-            state: ComponentState::Idle,
-            run_config: None,
-        }
-    }
-}
-
 /// Metrics for monitoring
 #[derive(Debug, Default)]
 pub struct ReaderMetrics {
@@ -163,7 +149,7 @@ pub struct ReaderMetrics {
 pub struct Reader {
     config: ReaderConfig,
     data_socket: publish::Publish,
-    shared_state: Arc<Mutex<SharedState>>,
+    shared_state: Arc<Mutex<ComponentSharedState>>,
     state_rx: watch::Receiver<ComponentState>,
     state_tx: watch::Sender<ComponentState>,
     metrics: Arc<ReaderMetrics>,
@@ -187,7 +173,7 @@ impl Reader {
         Ok(Self {
             config,
             data_socket,
-            shared_state: Arc::new(Mutex::new(SharedState::new())),
+            shared_state: Arc::new(Mutex::new(ComponentSharedState::new())),
             state_rx,
             state_tx,
             metrics: Arc::new(ReaderMetrics::default()),
@@ -252,174 +238,6 @@ impl Reader {
     async fn send_eos(&mut self) -> Result<(), ReaderError> {
         let eos = Message::eos(self.config.source_id);
         self.publish_message(&eos).await
-    }
-
-    /// Handle incoming command (5-state machine)
-    fn handle_command(
-        state: &mut SharedState,
-        state_tx: &watch::Sender<ComponentState>,
-        cmd: Command,
-    ) -> CommandResponse {
-        let current = state.state;
-
-        match cmd {
-            Command::Configure(run_config) => {
-                if !current.can_transition_to(ComponentState::Configured) {
-                    return CommandResponse::error(
-                        current,
-                        format!("Cannot configure from {} state", current),
-                    );
-                }
-                let run_number = run_config.run_number;
-                state.run_config = Some(run_config);
-                state.state = ComponentState::Configured;
-                let _ = state_tx.send(ComponentState::Configured);
-                info!(run_number, "Reader configured");
-                CommandResponse::success_with_run(ComponentState::Configured, "Configured", run_number)
-            }
-
-            Command::Arm => {
-                if !current.can_transition_to(ComponentState::Armed) {
-                    return CommandResponse::error(
-                        current,
-                        format!("Cannot arm from {} state", current),
-                    );
-                }
-                state.state = ComponentState::Armed;
-                let _ = state_tx.send(ComponentState::Armed);
-                info!("Reader armed");
-                let run_number = state.run_config.as_ref().map(|c| c.run_number).unwrap_or(0);
-                CommandResponse::success_with_run(ComponentState::Armed, "Armed", run_number)
-            }
-
-            Command::Start => {
-                if !current.can_transition_to(ComponentState::Running) {
-                    return CommandResponse::error(
-                        current,
-                        format!("Cannot start from {} state", current),
-                    );
-                }
-                state.state = ComponentState::Running;
-                let _ = state_tx.send(ComponentState::Running);
-                info!("Reader started");
-                let run_number = state.run_config.as_ref().map(|c| c.run_number).unwrap_or(0);
-                CommandResponse::success_with_run(ComponentState::Running, "Started", run_number)
-            }
-
-            Command::Stop => {
-                if current != ComponentState::Running {
-                    return CommandResponse::error(current, "Not running");
-                }
-                state.state = ComponentState::Configured;
-                let _ = state_tx.send(ComponentState::Configured);
-                info!("Reader stopped");
-                let run_number = state.run_config.as_ref().map(|c| c.run_number).unwrap_or(0);
-                CommandResponse::success_with_run(ComponentState::Configured, "Stopped", run_number)
-            }
-
-            Command::Reset => {
-                state.state = ComponentState::Idle;
-                state.run_config = None;
-                let _ = state_tx.send(ComponentState::Idle);
-                info!("Reader reset");
-                CommandResponse::success(ComponentState::Idle, "Reset to Idle")
-            }
-
-            Command::GetStatus => {
-                let msg = if let Some(ref cfg) = state.run_config {
-                    format!("State: {}, Run: {}", state.state, cfg.run_number)
-                } else {
-                    format!("State: {}", state.state)
-                };
-                let mut resp = CommandResponse::success(state.state, msg);
-                resp.run_number = state.run_config.as_ref().map(|c| c.run_number);
-                resp
-            }
-        }
-    }
-
-    /// Command handler task using tmq REQ/REP pattern
-    async fn command_task(
-        command_address: String,
-        shared_state: Arc<Mutex<SharedState>>,
-        state_tx: watch::Sender<ComponentState>,
-        mut shutdown: tokio::sync::broadcast::Receiver<()>,
-    ) {
-        let context = Context::new();
-
-        let receiver = match request_reply::reply(&context).bind(&command_address) {
-            Ok(r) => r,
-            Err(e) => {
-                warn!(error = %e, "Failed to bind command socket");
-                return;
-            }
-        };
-
-        info!(address = %command_address, "Command task started");
-
-        let mut current_receiver = receiver;
-
-        loop {
-            tokio::select! {
-                biased;
-
-                _ = shutdown.recv() => {
-                    info!("Command task received shutdown signal");
-                    break;
-                }
-
-                recv_result = current_receiver.recv() => {
-                    match recv_result {
-                        Ok((mut multipart, sender)) => {
-                            let response = if let Some(frame) = multipart.pop_front() {
-                                match Command::from_json(&frame) {
-                                    Ok(cmd) => {
-                                        info!(command = %cmd, "Received command");
-                                        let mut state = shared_state.lock().await;
-                                        Self::handle_command(&mut state, &state_tx, cmd)
-                                    }
-                                    Err(e) => {
-                                        warn!(error = %e, "Invalid command");
-                                        let state = shared_state.lock().await;
-                                        CommandResponse::error(state.state, format!("Invalid: {}", e))
-                                    }
-                                }
-                            } else {
-                                let state = shared_state.lock().await;
-                                CommandResponse::error(state.state, "Empty message")
-                            };
-
-                            let resp_bytes = match response.to_json() {
-                                Ok(b) => b,
-                                Err(e) => {
-                                    warn!(error = %e, "Failed to serialize response");
-                                    break;
-                                }
-                            };
-
-                            let resp_msg: tmq::Multipart =
-                                vec![tmq::Message::from(resp_bytes.as_slice())].into();
-
-                            match sender.send(resp_msg).await {
-                                Ok(next_receiver) => {
-                                    current_receiver = next_receiver;
-                                }
-                                Err(e) => {
-                                    warn!(error = %e, "Failed to send response");
-                                    break;
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            warn!(error = %e, "Command receive error");
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        info!("Command task stopped");
     }
 
     /// ReadLoop task - runs in spawn_blocking to avoid blocking tokio runtime
@@ -710,14 +528,22 @@ impl Reader {
         let read_shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let read_shutdown_clone = read_shutdown.clone();
 
-        // Spawn command handler task
+        // Spawn command handler task using common infrastructure
         let command_address = self.config.command_address.clone();
         let shared_state = self.shared_state.clone();
         let state_tx = self.state_tx.clone();
         let shutdown_for_cmd = shutdown.resubscribe();
 
         let cmd_handle = tokio::spawn(async move {
-            Self::command_task(command_address, shared_state, state_tx, shutdown_for_cmd).await;
+            run_command_task(
+                command_address,
+                shared_state,
+                state_tx,
+                shutdown_for_cmd,
+                |state, tx, cmd| handle_command_simple(state, tx, cmd, "Reader"),
+                "Reader",
+            )
+            .await;
         });
 
         // Spawn ReadLoop task (blocking)

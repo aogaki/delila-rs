@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DELILA Monitor</title>
+    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #1a1a2e;
+            color: #eee;
+            min-height: 100vh;
+        }
+        .header {
+            background: #16213e;
+            padding: 1rem 2rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid #0f3460;
+        }
+        .header h1 {
+            font-size: 1.5rem;
+            color: #e94560;
+        }
+        .status-bar {
+            display: flex;
+            gap: 2rem;
+            align-items: center;
+        }
+        .status-item {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        .status-label {
+            font-size: 0.75rem;
+            color: #888;
+            text-transform: uppercase;
+        }
+        .status-value {
+            font-size: 1.25rem;
+            font-weight: bold;
+            color: #00d9ff;
+        }
+        .status-value.state-idle { color: #888; }
+        .status-value.state-configured { color: #ffa500; }
+        .status-value.state-armed { color: #ffff00; }
+        .status-value.state-running { color: #00ff00; }
+        .status-value.state-error { color: #ff0000; }
+
+        .main-content {
+            display: flex;
+            height: calc(100vh - 70px);
+        }
+        .sidebar {
+            width: 250px;
+            background: #16213e;
+            border-right: 1px solid #0f3460;
+            overflow-y: auto;
+            padding: 1rem;
+        }
+        .sidebar h2 {
+            font-size: 1rem;
+            color: #888;
+            margin-bottom: 1rem;
+            text-transform: uppercase;
+        }
+        .channel-list {
+            list-style: none;
+        }
+        .channel-item {
+            padding: 0.5rem;
+            margin-bottom: 0.25rem;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: background 0.2s;
+            display: flex;
+            justify-content: space-between;
+        }
+        .channel-item:hover {
+            background: #0f3460;
+        }
+        .channel-item.selected {
+            background: #e94560;
+        }
+        .channel-name {
+            font-weight: 500;
+        }
+        .channel-counts {
+            color: #888;
+            font-size: 0.875rem;
+        }
+
+        .plot-area {
+            flex: 1;
+            padding: 1rem;
+            display: flex;
+            flex-direction: column;
+        }
+        .plot-controls {
+            display: flex;
+            gap: 1rem;
+            margin-bottom: 1rem;
+            align-items: center;
+        }
+        .btn {
+            padding: 0.5rem 1rem;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.875rem;
+            transition: background 0.2s;
+        }
+        .btn-primary {
+            background: #e94560;
+            color: white;
+        }
+        .btn-primary:hover {
+            background: #c73e54;
+        }
+        .btn-secondary {
+            background: #0f3460;
+            color: white;
+        }
+        .btn-secondary:hover {
+            background: #1a4a7a;
+        }
+        .checkbox-label {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            cursor: pointer;
+        }
+        #histogram-plot {
+            flex: 1;
+            background: #0f0f23;
+            border-radius: 8px;
+        }
+        .no-data {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100%;
+            color: #888;
+            font-size: 1.25rem;
+        }
+
+        /* Auto-refresh indicator */
+        .refresh-indicator {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: #00ff00;
+            animation: pulse 1s infinite;
+        }
+        .refresh-indicator.paused {
+            background: #888;
+            animation: none;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>DELILA Monitor</h1>
+        <div class="status-bar">
+            <div class="status-item">
+                <span class="status-label">State</span>
+                <span class="status-value" id="status-state">-</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">Events</span>
+                <span class="status-value" id="status-events">0</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">Rate</span>
+                <span class="status-value" id="status-rate">0</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">Channels</span>
+                <span class="status-value" id="status-channels">0</span>
+            </div>
+        </div>
+    </div>
+
+    <div class="main-content">
+        <div class="sidebar">
+            <h2>Channels</h2>
+            <ul class="channel-list" id="channel-list">
+                <li class="channel-item" style="color: #888;">No data yet</li>
+            </ul>
+        </div>
+
+        <div class="plot-area">
+            <div class="plot-controls">
+                <button class="btn btn-primary" onclick="clearHistograms()">Clear All</button>
+                <label class="checkbox-label">
+                    <input type="checkbox" id="log-scale" onchange="updatePlot()">
+                    Log Scale
+                </label>
+                <label class="checkbox-label">
+                    <input type="checkbox" id="auto-refresh" checked onchange="toggleAutoRefresh()">
+                    Auto Refresh
+                </label>
+                <div class="refresh-indicator" id="refresh-indicator"></div>
+            </div>
+            <div id="histogram-plot">
+                <div class="no-data">Select a channel to view histogram</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let selectedChannel = null;
+        let currentHistogram = null;
+        let autoRefreshEnabled = true;
+        let refreshInterval = null;
+
+        // Format large numbers
+        function formatNumber(num) {
+            if (num >= 1e9) return (num / 1e9).toFixed(2) + 'G';
+            if (num >= 1e6) return (num / 1e6).toFixed(2) + 'M';
+            if (num >= 1e3) return (num / 1e3).toFixed(2) + 'K';
+            return num.toString();
+        }
+
+        // Format rate
+        function formatRate(rate) {
+            if (rate >= 1e6) return (rate / 1e6).toFixed(2) + ' MHz';
+            if (rate >= 1e3) return (rate / 1e3).toFixed(2) + ' kHz';
+            return rate.toFixed(0) + ' Hz';
+        }
+
+        // Update status bar
+        async function updateStatus() {
+            try {
+                const response = await fetch('/api/status');
+                const data = await response.json();
+
+                const stateEl = document.getElementById('status-state');
+                stateEl.textContent = data.state;
+                stateEl.className = 'status-value state-' + data.state.toLowerCase();
+
+                document.getElementById('status-events').textContent = formatNumber(data.total_events);
+                document.getElementById('status-rate').textContent = formatRate(data.event_rate);
+                document.getElementById('status-channels').textContent = data.num_channels;
+            } catch (e) {
+                console.error('Failed to fetch status:', e);
+            }
+        }
+
+        // Update channel list
+        async function updateChannelList() {
+            try {
+                const response = await fetch('/api/histograms');
+                const data = await response.json();
+
+                const list = document.getElementById('channel-list');
+
+                if (data.channels.length === 0) {
+                    list.innerHTML = '<li class="channel-item" style="color: #888;">No data yet</li>';
+                    return;
+                }
+
+                list.innerHTML = data.channels.map(ch => {
+                    const key = `${ch.module_id}-${ch.channel_id}`;
+                    const isSelected = selectedChannel === key;
+                    return `
+                        <li class="channel-item ${isSelected ? 'selected' : ''}"
+                            onclick="selectChannel(${ch.module_id}, ${ch.channel_id})">
+                            <span class="channel-name">M${ch.module_id} Ch${ch.channel_id}</span>
+                            <span class="channel-counts">${formatNumber(ch.total_counts)}</span>
+                        </li>
+                    `;
+                }).join('');
+            } catch (e) {
+                console.error('Failed to fetch channel list:', e);
+            }
+        }
+
+        // Select a channel
+        async function selectChannel(moduleId, channelId) {
+            selectedChannel = `${moduleId}-${channelId}`;
+            await fetchAndPlotHistogram(moduleId, channelId);
+            updateChannelList(); // Update selection highlight
+        }
+
+        // Fetch and plot histogram
+        async function fetchAndPlotHistogram(moduleId, channelId) {
+            try {
+                const response = await fetch(`/api/histograms/${moduleId}/${channelId}`);
+                if (!response.ok) {
+                    throw new Error('Histogram not found');
+                }
+                currentHistogram = await response.json();
+                updatePlot();
+            } catch (e) {
+                console.error('Failed to fetch histogram:', e);
+                document.getElementById('histogram-plot').innerHTML =
+                    '<div class="no-data">Failed to load histogram</div>';
+            }
+        }
+
+        // Update the plot
+        function updatePlot() {
+            if (!currentHistogram) return;
+
+            const hist = currentHistogram;
+            const useLogScale = document.getElementById('log-scale').checked;
+
+            // Create x-axis values (bin centers)
+            const binWidth = (hist.config.max_value - hist.config.min_value) / hist.config.num_bins;
+            const x = [];
+            for (let i = 0; i < hist.bins.length; i++) {
+                x.push(hist.config.min_value + (i + 0.5) * binWidth);
+            }
+
+            const trace = {
+                x: x,
+                y: hist.bins,
+                type: 'bar',
+                marker: {
+                    color: '#e94560',
+                    line: {
+                        color: '#e94560',
+                        width: 0
+                    }
+                },
+                hovertemplate: 'Channel: %{x:.0f}<br>Counts: %{y}<extra></extra>'
+            };
+
+            const layout = {
+                title: {
+                    text: `Module ${hist.module_id} Channel ${hist.channel_id} - ${formatNumber(hist.total_counts)} counts`,
+                    font: { color: '#eee', size: 16 }
+                },
+                paper_bgcolor: '#0f0f23',
+                plot_bgcolor: '#0f0f23',
+                xaxis: {
+                    title: 'Energy (ADC)',
+                    color: '#888',
+                    gridcolor: '#333',
+                    zerolinecolor: '#333'
+                },
+                yaxis: {
+                    title: 'Counts',
+                    type: useLogScale ? 'log' : 'linear',
+                    color: '#888',
+                    gridcolor: '#333',
+                    zerolinecolor: '#333'
+                },
+                margin: { t: 50, r: 30, b: 50, l: 60 },
+                bargap: 0
+            };
+
+            const config = {
+                responsive: true,
+                displayModeBar: true,
+                modeBarButtonsToRemove: ['lasso2d', 'select2d']
+            };
+
+            Plotly.newPlot('histogram-plot', [trace], layout, config);
+        }
+
+        // Clear all histograms
+        async function clearHistograms() {
+            try {
+                await fetch('/api/histograms/clear', { method: 'POST' });
+                currentHistogram = null;
+                document.getElementById('histogram-plot').innerHTML =
+                    '<div class="no-data">Histograms cleared</div>';
+                updateChannelList();
+                updateStatus();
+            } catch (e) {
+                console.error('Failed to clear histograms:', e);
+            }
+        }
+
+        // Toggle auto-refresh
+        function toggleAutoRefresh() {
+            autoRefreshEnabled = document.getElementById('auto-refresh').checked;
+            const indicator = document.getElementById('refresh-indicator');
+
+            if (autoRefreshEnabled) {
+                indicator.classList.remove('paused');
+                startAutoRefresh();
+            } else {
+                indicator.classList.add('paused');
+                if (refreshInterval) {
+                    clearInterval(refreshInterval);
+                    refreshInterval = null;
+                }
+            }
+        }
+
+        // Start auto-refresh
+        function startAutoRefresh() {
+            if (refreshInterval) {
+                clearInterval(refreshInterval);
+            }
+
+            refreshInterval = setInterval(async () => {
+                await updateStatus();
+                await updateChannelList();
+
+                // Refresh current histogram if one is selected
+                if (selectedChannel) {
+                    const [moduleId, channelId] = selectedChannel.split('-').map(Number);
+                    await fetchAndPlotHistogram(moduleId, channelId);
+                }
+            }, 500); // 500ms refresh rate
+        }
+
+        // Initialize
+        document.addEventListener('DOMContentLoaded', () => {
+            updateStatus();
+            updateChannelList();
+            startAutoRefresh();
+        });
+    </script>
+</body>
+</html>

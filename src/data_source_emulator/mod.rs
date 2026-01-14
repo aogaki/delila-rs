@@ -12,15 +12,16 @@ use std::time::Duration;
 
 use futures::SinkExt;
 use rand::Rng;
+use rand_distr::{Distribution, Normal};
 use thiserror::Error;
-use tmq::{publish, request_reply, Context};
+use tmq::{publish, Context};
 use tokio::sync::{watch, Mutex};
 use tokio::time::interval;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use crate::common::{
-    flags, Command, CommandResponse, ComponentState, Message, MinimalEventData,
-    MinimalEventDataBatch, RunConfig,
+    flags, ComponentSharedState, ComponentState, Message, MinimalEventData,
+    MinimalEventDataBatch, handle_command_simple, run_command_task,
 };
 
 /// Emulator configuration
@@ -72,21 +73,6 @@ pub enum EmulatorError {
     Json(#[from] serde_json::Error),
 }
 
-/// Shared state between main task and command task
-struct SharedState {
-    state: ComponentState,
-    run_config: Option<RunConfig>,
-}
-
-impl SharedState {
-    fn new() -> Self {
-        Self {
-            state: ComponentState::Idle,
-            run_config: None,
-        }
-    }
-}
-
 /// Emulator data source
 ///
 /// Generates random event data and publishes via ZeroMQ.
@@ -94,7 +80,7 @@ impl SharedState {
 pub struct Emulator {
     config: EmulatorConfig,
     data_socket: publish::Publish,
-    shared_state: Arc<Mutex<SharedState>>,
+    shared_state: Arc<Mutex<ComponentSharedState>>,
     state_rx: watch::Receiver<ComponentState>,
     state_tx: watch::Sender<ComponentState>,
     sequence_number: u64,
@@ -119,7 +105,7 @@ impl Emulator {
         Ok(Self {
             config,
             data_socket,
-            shared_state: Arc::new(Mutex::new(SharedState::new())),
+            shared_state: Arc::new(Mutex::new(ComponentSharedState::new())),
             state_rx,
             state_tx,
             sequence_number: 0,
@@ -133,9 +119,10 @@ impl Emulator {
         *self.state_rx.borrow()
     }
 
-    /// Generate a batch of random events
+    /// Generate a batch of random events with Gaussian energy distribution
     ///
-    /// Module number is set to source_id (each emulator = one module)
+    /// Energy distribution: mean = module * 1000 + channel * 50, sigma = 50
+    /// This creates distinct peaks for each channel, making histograms easier to verify.
     fn generate_batch(&mut self) -> MinimalEventDataBatch {
         let mut rng = rand::thread_rng();
         let mut batch = MinimalEventDataBatch::with_capacity(
@@ -149,8 +136,19 @@ impl Emulator {
 
         for _ in 0..self.config.events_per_batch {
             let channel = rng.gen_range(0..self.config.channels_per_module);
-            let energy: u16 = rng.gen_range(100..4000);
-            let energy_short: u16 = (energy as f32 * rng.gen_range(0.6..0.9)) as u16;
+
+            // Gaussian energy distribution: mean = module*1000 + channel*50, sigma = 50
+            let mean = (module as f64) * 1000.0 + (channel as f64) * 50.0 + 500.0;
+            let sigma = 50.0;
+            let normal = Normal::new(mean, sigma).unwrap();
+            let energy_f64 = normal.sample(&mut rng);
+            // Clamp to valid u16 range
+            let energy: u16 = energy_f64.clamp(0.0, 65535.0) as u16;
+
+            // Short gate energy: ~70-80% of long gate with some noise
+            let short_ratio = 0.75 + rng.gen_range(-0.05..0.05);
+            let energy_short: u16 = ((energy as f64) * short_ratio).clamp(0.0, 65535.0) as u16;
+
             self.timestamp_ns += rng.gen_range(10.0..1000.0);
 
             let flags = if rng.gen_ratio(1, 100) {
@@ -213,185 +211,6 @@ impl Emulator {
         self.publish_message(&hb).await
     }
 
-    /// Handle incoming command (5-state machine)
-    fn handle_command(
-        state: &mut SharedState,
-        state_tx: &watch::Sender<ComponentState>,
-        cmd: Command,
-    ) -> CommandResponse {
-        let current = state.state;
-
-        match cmd {
-            Command::Configure(run_config) => {
-                if !current.can_transition_to(ComponentState::Configured) {
-                    return CommandResponse::error(
-                        current,
-                        format!("Cannot configure from {} state", current),
-                    );
-                }
-                let run_number = run_config.run_number;
-                state.run_config = Some(run_config);
-                state.state = ComponentState::Configured;
-                let _ = state_tx.send(ComponentState::Configured);
-                info!(run_number, "Emulator configured");
-                CommandResponse::success_with_run(ComponentState::Configured, "Configured", run_number)
-            }
-
-            Command::Arm => {
-                if !current.can_transition_to(ComponentState::Armed) {
-                    return CommandResponse::error(
-                        current,
-                        format!("Cannot arm from {} state", current),
-                    );
-                }
-                state.state = ComponentState::Armed;
-                let _ = state_tx.send(ComponentState::Armed);
-                info!("Emulator armed");
-                let run_number = state.run_config.as_ref().map(|c| c.run_number).unwrap_or(0);
-                CommandResponse::success_with_run(ComponentState::Armed, "Armed", run_number)
-            }
-
-            Command::Start => {
-                if !current.can_transition_to(ComponentState::Running) {
-                    return CommandResponse::error(
-                        current,
-                        format!("Cannot start from {} state", current),
-                    );
-                }
-                state.state = ComponentState::Running;
-                let _ = state_tx.send(ComponentState::Running);
-                info!("Emulator started");
-                let run_number = state.run_config.as_ref().map(|c| c.run_number).unwrap_or(0);
-                CommandResponse::success_with_run(ComponentState::Running, "Started", run_number)
-            }
-
-            Command::Stop => {
-                if current != ComponentState::Running {
-                    return CommandResponse::error(current, "Not running");
-                }
-                // Stop returns to Configured for quick restart
-                state.state = ComponentState::Configured;
-                let _ = state_tx.send(ComponentState::Configured);
-                info!("Emulator stopped");
-                let run_number = state.run_config.as_ref().map(|c| c.run_number).unwrap_or(0);
-                CommandResponse::success_with_run(ComponentState::Configured, "Stopped", run_number)
-            }
-
-            Command::Reset => {
-                state.state = ComponentState::Idle;
-                state.run_config = None;
-                let _ = state_tx.send(ComponentState::Idle);
-                info!("Emulator reset");
-                CommandResponse::success(ComponentState::Idle, "Reset to Idle")
-            }
-
-            Command::GetStatus => {
-                let msg = if let Some(ref cfg) = state.run_config {
-                    format!("State: {}, Run: {}", state.state, cfg.run_number)
-                } else {
-                    format!("State: {}", state.state)
-                };
-                let mut resp = CommandResponse::success(state.state, msg);
-                resp.run_number = state.run_config.as_ref().map(|c| c.run_number);
-                resp
-            }
-        }
-    }
-
-    /// Command handler task using tmq REQ/REP pattern
-    ///
-    /// tmq's REP socket uses a state machine pattern:
-    /// recv() returns (Multipart, RequestSender)
-    /// send() on RequestSender returns RequestReceiver for next cycle
-    async fn command_task(
-        command_address: String,
-        shared_state: Arc<Mutex<SharedState>>,
-        state_tx: watch::Sender<ComponentState>,
-        mut shutdown: tokio::sync::broadcast::Receiver<()>,
-    ) {
-        let context = Context::new();
-
-        // Bind REP socket
-        let receiver = match request_reply::reply(&context).bind(&command_address) {
-            Ok(r) => r,
-            Err(e) => {
-                warn!(error = %e, "Failed to bind command socket");
-                return;
-            }
-        };
-
-        info!(address = %command_address, "Command task started");
-
-        // REP socket state machine: must recv then send alternately
-        let mut current_receiver = receiver;
-
-        loop {
-            tokio::select! {
-                biased;
-
-                _ = shutdown.recv() => {
-                    info!("Command task received shutdown signal");
-                    break;
-                }
-
-                // Receive command
-                recv_result = current_receiver.recv() => {
-                    match recv_result {
-                        Ok((mut multipart, sender)) => {
-                            // Process command
-                            let response = if let Some(frame) = multipart.pop_front() {
-                                match Command::from_json(&frame) {
-                                    Ok(cmd) => {
-                                        info!(command = %cmd, "Received command");
-                                        let mut state = shared_state.lock().await;
-                                        Self::handle_command(&mut state, &state_tx, cmd)
-                                    }
-                                    Err(e) => {
-                                        warn!(error = %e, "Invalid command");
-                                        let state = shared_state.lock().await;
-                                        CommandResponse::error(state.state, format!("Invalid: {}", e))
-                                    }
-                                }
-                            } else {
-                                let state = shared_state.lock().await;
-                                CommandResponse::error(state.state, "Empty message")
-                            };
-
-                            // Send response
-                            let resp_bytes = match response.to_json() {
-                                Ok(b) => b,
-                                Err(e) => {
-                                    warn!(error = %e, "Failed to serialize response");
-                                    // Can't continue without sending - break out
-                                    break;
-                                }
-                            };
-
-                            let resp_msg: tmq::Multipart =
-                                vec![tmq::Message::from(resp_bytes.as_slice())].into();
-
-                            match sender.send(resp_msg).await {
-                                Ok(next_receiver) => {
-                                    current_receiver = next_receiver;
-                                }
-                                Err(e) => {
-                                    warn!(error = %e, "Failed to send response");
-                                    break;
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            warn!(error = %e, "Command receive error");
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        info!("Command task stopped");
-    }
-
     /// Run the emulator with command control
     ///
     /// Spawns command task in separate tokio task.
@@ -418,14 +237,22 @@ impl Emulator {
             "Emulator ready, waiting for commands"
         );
 
-        // Spawn command handler task
+        // Spawn command handler task using common infrastructure
         let command_address = self.config.command_address.clone();
         let shared_state = self.shared_state.clone();
         let state_tx = self.state_tx.clone();
         let shutdown_for_cmd = shutdown.resubscribe();
 
         let cmd_handle = tokio::spawn(async move {
-            Self::command_task(command_address, shared_state, state_tx, shutdown_for_cmd).await;
+            run_command_task(
+                command_address,
+                shared_state,
+                state_tx,
+                shutdown_for_cmd,
+                |state, tx, cmd| handle_command_simple(state, tx, cmd, "Emulator"),
+                "Emulator",
+            )
+            .await;
         });
 
         // Main data generation loop

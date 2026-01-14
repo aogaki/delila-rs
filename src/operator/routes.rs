@@ -1,18 +1,22 @@
 //! REST API routes for DAQ control
 
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::{
-    extract::State,
+    extract::{Path, State},
     http::StatusCode,
-    routing::{get, post},
+    routing::{get, post, put},
     Json, Router,
 };
+use tokio::sync::RwLock;
 use tower_http::cors::{Any, CorsLayer};
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
 use crate::common::{ComponentMetrics, ComponentState, RunConfig};
+use crate::config::DigitizerConfig;
 
 use super::{
     ApiResponse, CommandResult, ComponentClient, ComponentConfig, ComponentStatus,
@@ -24,6 +28,10 @@ pub struct AppState {
     pub client: ComponentClient,
     pub components: Vec<ComponentConfig>,
     pub config: OperatorConfig,
+    /// Digitizer configurations (keyed by digitizer_id)
+    pub digitizer_configs: RwLock<HashMap<u32, DigitizerConfig>>,
+    /// Directory for storing digitizer config files
+    pub config_dir: PathBuf,
 }
 
 /// OpenAPI documentation
@@ -37,6 +45,10 @@ pub struct AppState {
         stop,
         reset,
         run_start,
+        list_digitizers,
+        get_digitizer,
+        update_digitizer,
+        save_digitizer,
     ),
     components(schemas(
         SystemStatus,
@@ -47,9 +59,11 @@ pub struct AppState {
         ConfigureRequest,
         ApiResponse,
         CommandResult,
+        DigitizerConfig,
     )),
     tags(
-        (name = "DAQ Control", description = "DAQ system control endpoints")
+        (name = "DAQ Control", description = "DAQ system control endpoints"),
+        (name = "Digitizer Config", description = "Digitizer configuration endpoints")
     ),
     info(
         title = "DELILA DAQ Operator API",
@@ -69,10 +83,24 @@ pub fn create_router_with_config(
     components: Vec<ComponentConfig>,
     config: OperatorConfig,
 ) -> Router {
+    create_router_full(components, config, PathBuf::from("./config/digitizers"))
+}
+
+/// Create the axum router with full configuration including config directory
+pub fn create_router_full(
+    components: Vec<ComponentConfig>,
+    config: OperatorConfig,
+    config_dir: PathBuf,
+) -> Router {
+    // Load existing digitizer configs from disk
+    let digitizer_configs = load_digitizer_configs(&config_dir).unwrap_or_default();
+
     let state = Arc::new(AppState {
         client: ComponentClient::new(),
         components,
         config,
+        digitizer_configs: RwLock::new(digitizer_configs),
+        config_dir,
     });
 
     let cors = CorsLayer::new()
@@ -81,7 +109,7 @@ pub fn create_router_with_config(
         .allow_headers(Any);
 
     Router::new()
-        // API routes
+        // DAQ Control API routes
         .route("/api/status", get(get_status))
         .route("/api/configure", post(configure))
         .route("/api/arm", post(arm))
@@ -90,10 +118,39 @@ pub fn create_router_with_config(
         .route("/api/reset", post(reset))
         // Two-phase synchronized run control
         .route("/api/run/start", post(run_start))
+        // Digitizer configuration routes
+        .route("/api/digitizers", get(list_digitizers))
+        .route("/api/digitizers/{id}", get(get_digitizer))
+        .route("/api/digitizers/{id}", put(update_digitizer))
+        .route("/api/digitizers/{id}/save", post(save_digitizer))
         // Swagger UI
         .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
         .layer(cors)
         .with_state(state)
+}
+
+/// Load digitizer configurations from JSON files in the config directory
+fn load_digitizer_configs(config_dir: &PathBuf) -> std::io::Result<HashMap<u32, DigitizerConfig>> {
+    let mut configs = HashMap::new();
+
+    if !config_dir.exists() {
+        return Ok(configs);
+    }
+
+    for entry in std::fs::read_dir(config_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+
+        if path.extension().map_or(false, |ext| ext == "json") {
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                if let Ok(config) = serde_json::from_str::<DigitizerConfig>(&content) {
+                    configs.insert(config.digitizer_id, config);
+                }
+            }
+        }
+    }
+
+    Ok(configs)
 }
 
 /// Get system and component status
@@ -355,4 +412,170 @@ async fn run_start(
             );
         }
     }
+}
+
+// =============================================================================
+// Digitizer Configuration Endpoints
+// =============================================================================
+
+/// List all digitizer configurations
+#[utoipa::path(
+    get,
+    path = "/api/digitizers",
+    tag = "Digitizer Config",
+    responses(
+        (status = 200, description = "List of digitizer configurations", body = Vec<DigitizerConfig>)
+    )
+)]
+async fn list_digitizers(State(state): State<Arc<AppState>>) -> Json<Vec<DigitizerConfig>> {
+    let configs = state.digitizer_configs.read().await;
+    let mut list: Vec<DigitizerConfig> = configs.values().cloned().collect();
+    list.sort_by_key(|c| c.digitizer_id);
+    Json(list)
+}
+
+/// Get a specific digitizer configuration
+#[utoipa::path(
+    get,
+    path = "/api/digitizers/{id}",
+    tag = "Digitizer Config",
+    params(
+        ("id" = u32, Path, description = "Digitizer ID")
+    ),
+    responses(
+        (status = 200, description = "Digitizer configuration", body = DigitizerConfig),
+        (status = 404, description = "Digitizer not found", body = ApiResponse)
+    )
+)]
+async fn get_digitizer(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<u32>,
+) -> Result<Json<DigitizerConfig>, (StatusCode, Json<ApiResponse>)> {
+    let configs = state.digitizer_configs.read().await;
+
+    configs
+        .get(&id)
+        .cloned()
+        .map(Json)
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ApiResponse::error(format!("Digitizer {} not found", id))),
+            )
+        })
+}
+
+/// Update a digitizer configuration (in memory)
+///
+/// Updates the configuration in memory. Use POST /api/digitizers/{id}/save to persist to disk.
+#[utoipa::path(
+    put,
+    path = "/api/digitizers/{id}",
+    tag = "Digitizer Config",
+    params(
+        ("id" = u32, Path, description = "Digitizer ID")
+    ),
+    request_body = DigitizerConfig,
+    responses(
+        (status = 200, description = "Configuration updated", body = ApiResponse),
+        (status = 400, description = "Invalid configuration", body = ApiResponse)
+    )
+)]
+async fn update_digitizer(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<u32>,
+    Json(config): Json<DigitizerConfig>,
+) -> (StatusCode, Json<ApiResponse>) {
+    // Validate that the path ID matches the config ID
+    if config.digitizer_id != id {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error(format!(
+                "Path ID {} does not match config digitizer_id {}",
+                id, config.digitizer_id
+            ))),
+        );
+    }
+
+    let mut configs = state.digitizer_configs.write().await;
+    configs.insert(id, config);
+
+    (
+        StatusCode::OK,
+        Json(ApiResponse::success(format!(
+            "Digitizer {} configuration updated (not yet saved to disk)",
+            id
+        ))),
+    )
+}
+
+/// Save a digitizer configuration to disk
+#[utoipa::path(
+    post,
+    path = "/api/digitizers/{id}/save",
+    tag = "Digitizer Config",
+    params(
+        ("id" = u32, Path, description = "Digitizer ID")
+    ),
+    responses(
+        (status = 200, description = "Configuration saved", body = ApiResponse),
+        (status = 404, description = "Digitizer not found", body = ApiResponse),
+        (status = 500, description = "Failed to save", body = ApiResponse)
+    )
+)]
+async fn save_digitizer(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<u32>,
+) -> (StatusCode, Json<ApiResponse>) {
+    let configs = state.digitizer_configs.read().await;
+
+    let config = match configs.get(&id) {
+        Some(c) => c.clone(),
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ApiResponse::error(format!("Digitizer {} not found", id))),
+            );
+        }
+    };
+    drop(configs); // Release read lock
+
+    // Ensure config directory exists
+    if let Err(e) = std::fs::create_dir_all(&state.config_dir) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse::error(format!(
+                "Failed to create config directory: {}",
+                e
+            ))),
+        );
+    }
+
+    // Save to file
+    let file_path = state.config_dir.join(format!("digitizer_{}.json", id));
+    let json = match serde_json::to_string_pretty(&config) {
+        Ok(j) => j,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(format!("Failed to serialize config: {}", e))),
+            );
+        }
+    };
+
+    if let Err(e) = std::fs::write(&file_path, json) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse::error(format!("Failed to write config file: {}", e))),
+        );
+    }
+
+    (
+        StatusCode::OK,
+        Json(ApiResponse::success(format!(
+            "Digitizer {} configuration saved to {}",
+            id,
+            file_path.display()
+        ))),
+    )
 }

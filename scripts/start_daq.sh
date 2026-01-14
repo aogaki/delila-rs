@@ -9,6 +9,7 @@ BINARY_DIR="./target/release"
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
 echo -e "${GREEN}=== DELILA DAQ Startup ===${NC}"
@@ -70,6 +71,11 @@ echo "  Starting data_sink..."
 $BINARY_DIR/data_sink --config "$CONFIG_FILE" &
 sleep 0.3
 
+# Start operator (Web UI)
+echo "  Starting operator (Web UI)..."
+$BINARY_DIR/operator --config "$CONFIG_FILE" &
+sleep 0.5
+
 echo ""
 echo -e "${GREEN}All components started.${NC}"
 echo ""
@@ -85,5 +91,8 @@ done
 echo "  Merger:     tcp://localhost:5570"
 echo "  DataSink:   tcp://localhost:5580"
 echo ""
-echo -e "${YELLOW}Use ./scripts/daq_ctl.sh to control components${NC}"
+echo -e "${CYAN}=== Web UI ===${NC}"
+echo -e "  Swagger UI: ${YELLOW}http://localhost:8080/swagger-ui/${NC}"
+echo ""
+echo -e "${YELLOW}Use ./scripts/daq_ctl.sh to control components (CLI)${NC}"
 echo -e "${YELLOW}Use ./scripts/stop_daq.sh to stop all components${NC}"

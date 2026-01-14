@@ -103,6 +103,9 @@ pub struct ConfigureRequest {
     /// Optional comment
     #[serde(default)]
     pub comment: String,
+    /// Experiment name (used in output filenames)
+    #[serde(default)]
+    pub exp_name: String,
 }
 
 impl From<ConfigureRequest> for RunConfig {
@@ -110,6 +113,7 @@ impl From<ConfigureRequest> for RunConfig {
         RunConfig {
             run_number: req.run_number,
             comment: req.comment,
+            exp_name: req.exp_name,
         }
     }
 }

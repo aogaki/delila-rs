@@ -1,12 +1,12 @@
-//! DataSink binary - subscribes to event data via ZeroMQ
+//! Monitor binary - real-time histogram display via web browser
 //!
 //! Usage:
-//!   cargo run --bin data_sink                            # Use defaults
-//!   cargo run --bin data_sink -- --config config.toml    # Use config file
-//!   cargo run --bin data_sink -- --address tcp://localhost:5557
+//!   cargo run --bin monitor                            # Use defaults
+//!   cargo run --bin monitor -- --config config.toml    # Use config file
+//!   cargo run --bin monitor -- --address tcp://localhost:5557 --port 8080
 
 use delila_rs::config::Config;
-use delila_rs::data_sink::{DataSink, DataSinkConfig};
+use delila_rs::monitor::{Monitor, MonitorConfig, HistogramConfig};
 use tokio::sync::broadcast;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -22,6 +22,7 @@ async fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let mut config_path: Option<String> = None;
     let mut address: Option<String> = None;
+    let mut port: Option<u16> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -44,19 +45,31 @@ async fn main() -> anyhow::Result<()> {
                     std::process::exit(1);
                 }
             }
+            "--port" | "-p" => {
+                if i + 1 < args.len() {
+                    port = Some(args[i + 1].parse().expect("Invalid port number"));
+                    i += 2;
+                } else {
+                    eprintln!("Error: --port requires a port number");
+                    std::process::exit(1);
+                }
+            }
             "--help" | "-h" => {
-                println!("DataSink - subscribes to event data via ZeroMQ");
+                println!("Monitor - real-time histogram display via web browser");
                 println!();
-                println!("Usage: data_sink [OPTIONS]");
+                println!("Usage: monitor [OPTIONS]");
                 println!();
                 println!("Options:");
                 println!("  --config, -c <FILE>   Load configuration from TOML file");
-                println!("  --address, -a <ADDR>  ZMQ address to connect to");
+                println!("  --address, -a <ADDR>  ZMQ address to connect to (default: tcp://localhost:5557)");
+                println!("  --port, -p <PORT>     HTTP server port (default: 8080)");
                 println!("  --help, -h            Show this help message");
                 println!();
                 println!("Examples:");
-                println!("  data_sink --config config.toml");
-                println!("  data_sink --address tcp://localhost:5557");
+                println!("  monitor --config config.toml");
+                println!("  monitor --address tcp://localhost:5557 --port 8080");
+                println!();
+                println!("Web UI: http://localhost:<port>/");
                 return Ok(());
             }
             _ => {
@@ -67,42 +80,38 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Build configuration
-    let sink_config = if let Some(path) = config_path {
+    let monitor_config = if let Some(path) = config_path {
         // Load from config file
         let config = Config::load(&path)?;
 
-        // Try recorder config first (for file writing), then monitor config
-        let (subscribe_addr, command_addr) = if let Some(ref recorder) = config.network.recorder {
-            (
-                recorder.subscribe.clone(),
-                recorder.command.clone().unwrap_or_else(|| "tcp://*:5580".to_string()),
-            )
-        } else if let Some(ref monitor) = config.network.monitor {
+        let (subscribe_addr, http_port) = if let Some(ref monitor) = config.network.monitor {
             (
                 monitor.subscribe.clone(),
-                "tcp://*:5580".to_string(),
+                monitor.http_port,
             )
         } else {
             (
                 "tcp://localhost:5557".to_string(),
-                "tcp://*:5580".to_string(),
+                8081,
             )
         };
 
         info!(config_file = %path, "Loaded configuration");
 
-        DataSinkConfig {
-            address: address.unwrap_or(subscribe_addr),
-            command_address: command_addr,
-            stats_interval_secs: 1,
+        MonitorConfig {
+            subscribe_address: address.unwrap_or(subscribe_addr),
+            command_address: "tcp://*:5590".to_string(),
+            http_port: port.unwrap_or(http_port),
+            histogram_config: HistogramConfig::default(),
             channel_capacity: 1000,
         }
     } else {
         // Use defaults with CLI overrides
-        DataSinkConfig {
-            address: address.unwrap_or_else(|| "tcp://localhost:5555".to_string()),
-            command_address: "tcp://*:5580".to_string(),
-            stats_interval_secs: 1,
+        MonitorConfig {
+            subscribe_address: address.unwrap_or_else(|| "tcp://localhost:5557".to_string()),
+            command_address: "tcp://*:5590".to_string(),
+            http_port: port.unwrap_or(8081),
+            histogram_config: HistogramConfig::default(),
             channel_capacity: 1000,
         }
     };
@@ -120,14 +129,21 @@ async fn main() -> anyhow::Result<()> {
         let _ = shutdown_tx_clone.send(());
     });
 
-    // Create and run data sink
-    let mut sink = DataSink::new(sink_config.clone()).await?;
+    // Create and run monitor
+    let mut monitor = Monitor::new(monitor_config.clone()).await?;
 
-    println!("DataSink running. Connecting to {}", sink_config.address);
-    println!("Press Ctrl+C to stop.");
+    println!("========================================");
+    println!("       DELILA Monitor Started");
+    println!("========================================");
+    println!();
+    println!("  Subscribing to: {}", monitor_config.subscribe_address);
+    println!("  Web UI:         http://localhost:{}/", monitor_config.http_port);
+    println!();
+    println!("  Press Ctrl+C to stop.");
+    println!("========================================");
 
-    sink.run(shutdown_rx).await?;
+    monitor.run(shutdown_rx).await?;
 
-    println!("DataSink stopped.");
+    println!("Monitor stopped.");
     Ok(())
 }

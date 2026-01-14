@@ -103,6 +103,9 @@ pub struct RunConfig {
     /// Optional description/comment
     #[serde(default)]
     pub comment: String,
+    /// Experiment name (used in output filenames)
+    #[serde(default)]
+    pub exp_name: String,
 }
 
 /// Commands sent from controller to components
@@ -258,6 +261,7 @@ mod tests {
         let cmd = Command::Configure(RunConfig {
             run_number: 123,
             comment: "Test run".to_string(),
+            exp_name: "TestExp".to_string(),
         });
         let bytes = cmd.to_json().unwrap();
         let decoded = Command::from_json(&bytes).unwrap();

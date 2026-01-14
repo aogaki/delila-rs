@@ -1,0 +1,30 @@
+# Test configuration for Monitor development
+# Single emulator -> Merger -> Monitor
+
+[network]
+cluster_name = "test-cluster"
+
+[[network.sources]]
+id = 0
+name = "test-emulator"
+bind = "tcp://*:5555"
+command = "tcp://*:5560"
+
+[network.merger]
+subscribe = ["tcp://localhost:5555"]
+publish = "tcp://*:5557"
+command = "tcp://*:5570"
+channel_capacity = 1000
+
+[network.monitor]
+subscribe = "tcp://localhost:5557"
+http_port = 8081
+
+[settings]
+source = "file"
+
+[settings.file]
+events_per_batch = 1000
+batch_interval_ms = 100  # Slow down for testing
+num_modules = 2
+channels_per_module = 16

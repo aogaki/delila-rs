@@ -2,6 +2,7 @@
 //!
 //! Supports loading configuration from:
 //! - TOML files (network topology, infrastructure)
+//! - JSON files (digitizer settings)
 //! - MongoDB (operational settings) - future
 //!
 //! # Example
@@ -9,6 +10,12 @@
 //! let config = Config::load("config.toml")?;
 //! let merger_net = config.network.merger.as_ref().unwrap();
 //! ```
+
+pub mod digitizer;
+
+pub use digitizer::{
+    BoardConfig, CaenParameter, ChannelConfig, DigitizerConfig, FirmwareType,
+};
 
 use serde::Deserialize;
 use std::path::Path;
@@ -167,10 +174,26 @@ pub struct RecorderNetworkConfig {
     /// Output directory for data files
     #[serde(default = "default_output_dir")]
     pub output_dir: String,
+
+    /// Maximum file size in MB (default: 1024 = 1GB)
+    #[serde(default = "default_max_file_size_mb")]
+    pub max_file_size_mb: u64,
+
+    /// Maximum file duration in seconds (default: 600 = 10 minutes)
+    #[serde(default = "default_max_file_duration_sec")]
+    pub max_file_duration_sec: u64,
 }
 
 fn default_output_dir() -> String {
     "./data".to_string()
+}
+
+fn default_max_file_size_mb() -> u64 {
+    1024 // 1GB
+}
+
+fn default_max_file_duration_sec() -> u64 {
+    600 // 10 minutes
 }
 
 /// Monitor network configuration
@@ -185,7 +208,7 @@ pub struct MonitorNetworkConfig {
 }
 
 fn default_http_port() -> u16 {
-    8080
+    8081
 }
 
 // =============================================================================

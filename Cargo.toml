@@ -30,6 +30,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Random (for emulator)
 rand = "0.8"
+rand_distr = "0.4"
 
 # High-performance synchronization primitives
 parking_lot = "0.12"
@@ -42,6 +43,7 @@ tower-http = { version = "0.5", features = ["cors"] }
 # Swagger / OpenAPI
 utoipa = { version = "4", features = ["axum_extras"] }
 utoipa-swagger-ui = { version = "7", features = ["axum"] }
+bytes = "1.11.0"
 
 [build-dependencies]
 bindgen = "0.70"
@@ -73,3 +75,15 @@ path = "src/bin/operator.rs"
 [[bin]]
 name = "caen_info"
 path = "src/bin/caen_info.rs"
+
+[[bin]]
+name = "monitor"
+path = "src/bin/monitor.rs"
+
+[[bin]]
+name = "recorder"
+path = "src/bin/recorder.rs"
+
+[[bin]]
+name = "storage_bench"
+path = "src/bin/storage_bench.rs"

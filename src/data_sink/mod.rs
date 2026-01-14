@@ -1,23 +1,28 @@
 //! Data sink - receives and processes event data via ZeroMQ
 //!
-//! Architecture:
-//! - Main task: SUB socket for receiving data (with sequence tracking)
+//! Architecture (Lock-Free):
+//! - Receiver task: SUB socket → mpsc channel (non-blocking)
+//! - Processor task: mpsc channel → stats update + console output
 //! - Command task: REP socket for control commands
 //!
 //! This module provides a data consumer that subscribes to event data
 //! and outputs statistics to the console.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use thiserror::Error;
-use tmq::{request_reply, subscribe, Context};
-use tokio::sync::{watch, Mutex};
+use tmq::{subscribe, Context};
+use tokio::sync::{mpsc, watch};
 use tracing::{debug, info, warn};
 
-use crate::common::{Command, CommandResponse, ComponentMetrics, ComponentState, Message, MinimalEventDataBatch, RunConfig};
+use crate::common::{
+    handle_command, run_command_task, CommandHandlerExt, ComponentSharedState, ComponentState,
+    Message, MinimalEventDataBatch,
+};
 
 /// DataSink configuration
 #[derive(Debug, Clone)]
@@ -28,6 +33,8 @@ pub struct DataSinkConfig {
     pub command_address: String,
     /// Statistics output interval in seconds
     pub stats_interval_secs: u64,
+    /// Internal channel capacity
+    pub channel_capacity: usize,
 }
 
 impl Default for DataSinkConfig {
@@ -36,6 +43,7 @@ impl Default for DataSinkConfig {
             address: "tcp://localhost:5555".to_string(),
             command_address: "tcp://*:5580".to_string(),
             stats_interval_secs: 1,
+            channel_capacity: 1000,
         }
     }
 }
@@ -115,7 +123,10 @@ pub struct DataSinkStats {
 
 impl DataSinkStats {
     fn update(&mut self, batch: &MinimalEventDataBatch) {
-        self.sources.entry(batch.source_id).or_default().update(batch);
+        self.sources
+            .entry(batch.source_id)
+            .or_default()
+            .update(batch);
         self.total_batches += 1;
         self.total_events += batch.len() as u64;
         self.events_since_last_report += batch.len() as u64;
@@ -164,24 +175,76 @@ impl DataSinkStats {
     }
 }
 
-/// Shared state between main task and command task
-struct SharedState {
-    state: ComponentState,
-    stats: DataSinkStats,
-    start_time: Option<Instant>,
-    last_report_time: Option<Instant>,
-    run_config: Option<RunConfig>,
+/// Atomic counters for hot-path statistics (lock-free)
+struct AtomicStats {
+    received_batches: AtomicU64,
+    processed_batches: AtomicU64,
+    dropped_batches: AtomicU64,
+    eos_received: AtomicU64,
 }
 
-impl SharedState {
+impl AtomicStats {
     fn new() -> Self {
         Self {
-            state: ComponentState::Idle,
-            stats: DataSinkStats::default(),
-            start_time: None,
-            last_report_time: None,
-            run_config: None,
+            received_batches: AtomicU64::new(0),
+            processed_batches: AtomicU64::new(0),
+            dropped_batches: AtomicU64::new(0),
+            eos_received: AtomicU64::new(0),
         }
+    }
+
+    #[inline]
+    fn record_received(&self) {
+        self.received_batches.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline]
+    fn record_processed(&self) {
+        self.processed_batches.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline]
+    fn record_drop(&self) {
+        self.dropped_batches.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline]
+    fn record_eos(&self) {
+        self.eos_received.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn snapshot(&self) -> (u64, u64, u64, u64) {
+        (
+            self.received_batches.load(Ordering::Relaxed),
+            self.processed_batches.load(Ordering::Relaxed),
+            self.dropped_batches.load(Ordering::Relaxed),
+            self.eos_received.load(Ordering::Relaxed),
+        )
+    }
+}
+
+/// Message type for internal channel
+enum ProcessorMessage {
+    Data(MinimalEventDataBatch),
+    Eos { source_id: u32 },
+}
+
+/// Command handler extension for DataSink
+struct DataSinkCommandExt {
+    atomic_stats: Arc<AtomicStats>,
+}
+
+impl CommandHandlerExt for DataSinkCommandExt {
+    fn component_name(&self) -> &'static str {
+        "DataSink"
+    }
+
+    fn status_details(&self) -> Option<String> {
+        let (recv, proc, drop, eos) = self.atomic_stats.snapshot();
+        Some(format!(
+            "Received: {}, Processed: {}, Dropped: {}, EOS: {}",
+            recv, proc, drop, eos
+        ))
     }
 }
 
@@ -192,7 +255,8 @@ impl SharedState {
 /// Uses async/await instead of blocking recv().
 pub struct DataSink {
     config: DataSinkConfig,
-    shared_state: Arc<Mutex<SharedState>>,
+    shared_state: Arc<tokio::sync::Mutex<ComponentSharedState>>,
+    atomic_stats: Arc<AtomicStats>,
     state_rx: watch::Receiver<ComponentState>,
     state_tx: watch::Sender<ComponentState>,
 }
@@ -210,7 +274,8 @@ impl DataSink {
 
         Ok(Self {
             config,
-            shared_state: Arc::new(Mutex::new(SharedState::new())),
+            shared_state: Arc::new(tokio::sync::Mutex::new(ComponentSharedState::new())),
+            atomic_stats: Arc::new(AtomicStats::new()),
             state_rx,
             state_tx,
         })
@@ -221,261 +286,21 @@ impl DataSink {
         *self.state_rx.borrow()
     }
 
-    /// Handle incoming command (5-state machine)
-    fn handle_command(
-        state: &mut SharedState,
-        state_tx: &watch::Sender<ComponentState>,
-        cmd: Command,
-    ) -> CommandResponse {
-        let current = state.state;
-
-        match cmd {
-            Command::Configure(run_config) => {
-                if !current.can_transition_to(ComponentState::Configured) {
-                    return CommandResponse::error(
-                        current,
-                        format!("Cannot configure from {} state", current),
-                    );
-                }
-                let run_number = run_config.run_number;
-                state.run_config = Some(run_config);
-                state.state = ComponentState::Configured;
-                let _ = state_tx.send(ComponentState::Configured);
-                info!(run_number, "DataSink configured");
-                CommandResponse::success_with_run(ComponentState::Configured, "Configured", run_number)
-            }
-
-            Command::Arm => {
-                if !current.can_transition_to(ComponentState::Armed) {
-                    return CommandResponse::error(
-                        current,
-                        format!("Cannot arm from {} state", current),
-                    );
-                }
-                state.state = ComponentState::Armed;
-                let _ = state_tx.send(ComponentState::Armed);
-                info!("DataSink armed");
-                let run_number = state.run_config.as_ref().map(|c| c.run_number).unwrap_or(0);
-                CommandResponse::success_with_run(ComponentState::Armed, "Armed", run_number)
-            }
-
-            Command::Start => {
-                if !current.can_transition_to(ComponentState::Running) {
-                    return CommandResponse::error(
-                        current,
-                        format!("Cannot start from {} state", current),
-                    );
-                }
-                state.state = ComponentState::Running;
-                state.start_time = Some(Instant::now());
-                state.last_report_time = Some(Instant::now());
-                let _ = state_tx.send(ComponentState::Running);
-                info!("DataSink started");
-                let run_number = state.run_config.as_ref().map(|c| c.run_number).unwrap_or(0);
-                CommandResponse::success_with_run(ComponentState::Running, "Started", run_number)
-            }
-
-            Command::Stop => {
-                if current != ComponentState::Running {
-                    return CommandResponse::error(current, "Not running");
-                }
-                // Print final statistics before stopping
-                let total_elapsed = state.start_time
-                    .map(|t| t.elapsed().as_secs_f64())
-                    .unwrap_or(0.0);
-                let event_rate = if total_elapsed > 0.0 {
-                    state.stats.total_events as f64 / total_elapsed
-                } else {
-                    0.0
-                };
-                let batch_rate = if total_elapsed > 0.0 {
-                    state.stats.total_batches as f64 / total_elapsed
-                } else {
-                    0.0
-                };
-
-                println!();
-                println!("========== Final Statistics ==========");
-                println!("Duration:     {:.2} s", total_elapsed);
-                println!("Total Events: {}", state.stats.total_events);
-                println!("Total Batches: {}", state.stats.total_batches);
-                println!("Event Rate:   {:.0} events/s ({:.2} MHz)", event_rate, event_rate / 1_000_000.0);
-                println!("Batch Rate:   {:.0} batches/s", batch_rate);
-                println!("Gaps:         {} ({} missing sequences)", state.stats.total_gaps(), state.stats.total_missing());
-                println!("Sources:      {}", state.stats.sources.len());
-                println!("=======================================");
-
-                // Stop returns to Configured for quick restart
-                state.state = ComponentState::Configured;
-                let _ = state_tx.send(ComponentState::Configured);
-                info!(
-                    total_events = state.stats.total_events,
-                    event_rate = event_rate,
-                    duration_secs = total_elapsed,
-                    "DataSink stopped"
-                );
-                let run_number = state.run_config.as_ref().map(|c| c.run_number).unwrap_or(0);
-                CommandResponse::success_with_run(
-                    ComponentState::Configured,
-                    format!(
-                        "Stopped. Events: {}, Rate: {:.0}/s, Duration: {:.2}s",
-                        state.stats.total_events, event_rate, total_elapsed
-                    ),
-                    run_number,
-                )
-            }
-
-            Command::Reset => {
-                state.state = ComponentState::Idle;
-                state.run_config = None;
-                state.stats = DataSinkStats::default();
-                state.start_time = None;
-                state.last_report_time = None;
-                let _ = state_tx.send(ComponentState::Idle);
-                info!("DataSink reset");
-                CommandResponse::success(ComponentState::Idle, "Reset to Idle")
-            }
-
-            Command::GetStatus => {
-                let stats = &state.stats;
-                let run_number = state.run_config.as_ref().map(|c| c.run_number);
-
-                // Calculate rates
-                let elapsed = state.start_time
-                    .map(|t| t.elapsed().as_secs_f64())
-                    .unwrap_or(0.0);
-                let event_rate = if elapsed > 0.0 {
-                    stats.total_events as f64 / elapsed
-                } else {
-                    0.0
-                };
-
-                let msg = format!(
-                    "State: {}, Events: {}, Batches: {}, Gaps: {}, Missing: {}",
-                    state.state,
-                    stats.total_events,
-                    stats.total_batches,
-                    stats.total_gaps(),
-                    stats.total_missing()
-                );
-
-                let metrics = ComponentMetrics {
-                    events_processed: stats.total_events,
-                    bytes_transferred: 0, // Not tracked currently
-                    queue_size: 0,
-                    queue_max: 0,
-                    event_rate,
-                    data_rate: 0.0,
-                };
-
-                let mut resp = CommandResponse::success(state.state, msg);
-                resp.run_number = run_number;
-                resp.metrics = Some(metrics);
-                resp
-            }
-        }
-    }
-
-    /// Command handler task using tmq REQ/REP pattern
-    async fn command_task(
-        command_address: String,
-        shared_state: Arc<Mutex<SharedState>>,
-        state_tx: watch::Sender<ComponentState>,
-        mut shutdown: tokio::sync::broadcast::Receiver<()>,
-    ) {
-        let context = Context::new();
-
-        // Bind REP socket
-        let receiver = match request_reply::reply(&context).bind(&command_address) {
-            Ok(r) => r,
-            Err(e) => {
-                warn!(error = %e, "Failed to bind command socket");
-                return;
-            }
-        };
-
-        info!(address = %command_address, "DataSink command task started");
-
-        let mut current_receiver = receiver;
-
-        loop {
-            tokio::select! {
-                biased;
-
-                _ = shutdown.recv() => {
-                    info!("DataSink command task received shutdown signal");
-                    break;
-                }
-
-                recv_result = current_receiver.recv() => {
-                    match recv_result {
-                        Ok((mut multipart, sender)) => {
-                            let response = if let Some(frame) = multipart.pop_front() {
-                                match Command::from_json(&frame) {
-                                    Ok(cmd) => {
-                                        info!(command = %cmd, "DataSink received command");
-                                        let mut state = shared_state.lock().await;
-                                        Self::handle_command(&mut state, &state_tx, cmd)
-                                    }
-                                    Err(e) => {
-                                        warn!(error = %e, "Invalid command");
-                                        let state = shared_state.lock().await;
-                                        CommandResponse::error(state.state, format!("Invalid: {}", e))
-                                    }
-                                }
-                            } else {
-                                let state = shared_state.lock().await;
-                                CommandResponse::error(state.state, "Empty message")
-                            };
-
-                            let resp_bytes = match response.to_json() {
-                                Ok(b) => b,
-                                Err(e) => {
-                                    warn!(error = %e, "Failed to serialize response");
-                                    break;
-                                }
-                            };
-
-                            let resp_msg: tmq::Multipart =
-                                vec![tmq::Message::from(resp_bytes.as_slice())].into();
-
-                            match sender.send(resp_msg).await {
-                                Ok(next_receiver) => {
-                                    current_receiver = next_receiver;
-                                }
-                                Err(e) => {
-                                    warn!(error = %e, "Failed to send response");
-                                    break;
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            warn!(error = %e, "Command receive error");
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        info!("DataSink command task stopped");
-    }
-
     /// Run the data sink loop
     pub async fn run(
         &mut self,
         mut shutdown: tokio::sync::broadcast::Receiver<()>,
     ) -> Result<(), DataSinkError> {
-        let stats_interval = Duration::from_secs(self.config.stats_interval_secs);
+        // Create channel for receiver → processor
+        let (proc_tx, proc_rx) = mpsc::channel::<ProcessorMessage>(self.config.channel_capacity);
 
         // Create SUB socket
         let context = Context::new();
-        let mut socket = subscribe(&context)
+        let socket = subscribe(&context)
             .connect(&self.config.address)?
             .subscribe(b"")?;
 
         info!(address = %self.config.address, "DataSink connected to upstream");
-
         info!(
             state = %self.state(),
             "DataSink ready, waiting for commands"
@@ -486,14 +311,70 @@ impl DataSink {
         let shared_state = self.shared_state.clone();
         let state_tx = self.state_tx.clone();
         let shutdown_for_cmd = shutdown.resubscribe();
+        let atomic_stats_for_cmd = self.atomic_stats.clone();
 
         let cmd_handle = tokio::spawn(async move {
-            Self::command_task(command_address, shared_state, state_tx, shutdown_for_cmd).await;
+            run_command_task(
+                command_address,
+                shared_state,
+                state_tx,
+                shutdown_for_cmd,
+                move |state, tx, cmd| {
+                    let mut ext = DataSinkCommandExt {
+                        atomic_stats: atomic_stats_for_cmd.clone(),
+                    };
+                    handle_command(state, tx, cmd, Some(&mut ext))
+                },
+                "DataSink",
+            )
+            .await;
         });
 
-        // Main data loop
-        let mut state_rx = self.state_rx.clone();
+        // Spawn receiver task
+        let shutdown_for_recv = shutdown.resubscribe();
+        let atomic_stats_for_recv = self.atomic_stats.clone();
+        let state_rx_for_recv = self.state_rx.clone();
+        let recv_handle = tokio::spawn(async move {
+            Self::receiver_task(socket, proc_tx, shutdown_for_recv, atomic_stats_for_recv, state_rx_for_recv).await
+        });
 
+        // Spawn processor task
+        let atomic_stats_for_proc = self.atomic_stats.clone();
+        let stats_interval_secs = self.config.stats_interval_secs;
+        let proc_handle = tokio::spawn(async move {
+            Self::processor_task(proc_rx, atomic_stats_for_proc, stats_interval_secs).await
+        });
+
+        // Wait for shutdown signal
+        let _ = shutdown.recv().await;
+        info!("DataSink received shutdown signal");
+
+        // Wait for tasks to complete
+        let _ = recv_handle.await;
+        let _ = proc_handle.await;
+        let _ = cmd_handle.await;
+
+        // Log final stats
+        let (recv, proc, drop, eos) = self.atomic_stats.snapshot();
+        info!(
+            received = recv,
+            processed = proc,
+            dropped = drop,
+            eos = eos,
+            "DataSink stopped"
+        );
+
+        Ok(())
+    }
+
+    /// Receiver task: SUB → channel (non-blocking)
+    async fn receiver_task(
+        mut socket: subscribe::Subscribe,
+        tx: mpsc::Sender<ProcessorMessage>,
+        mut shutdown: tokio::sync::broadcast::Receiver<()>,
+        atomic_stats: Arc<AtomicStats>,
+        mut state_rx: watch::Receiver<ComponentState>,
+    ) {
         loop {
             let is_running = *state_rx.borrow() == ComponentState::Running;
 
@@ -501,13 +382,13 @@ impl DataSink {
                 biased;
 
                 _ = shutdown.recv() => {
-                    info!("DataSink received shutdown signal");
+                    info!("DataSink receiver task shutting down");
                     break;
                 }
 
                 _ = state_rx.changed() => {
                     let current = *state_rx.borrow();
-                    info!(state = %current, "DataSink state changed");
+                    info!(state = %current, "DataSink receiver state changed");
                     continue;
                 }
 
@@ -517,6 +398,7 @@ impl DataSink {
                             if let Some(data) = multipart.into_iter().next() {
                                 match Message::from_msgpack(&data) {
                                     Ok(Message::Data(batch)) => {
+                                        atomic_stats.record_received();
                                         debug!(
                                             seq = batch.sequence_number,
                                             events = batch.len(),
@@ -524,38 +406,26 @@ impl DataSink {
                                             "Received batch"
                                         );
 
-                                        let should_report = {
-                                            let mut state = self.shared_state.lock().await;
-                                            state.stats.update(&batch);
-
-                                            // Check if should report
-                                            state.last_report_time
-                                                .map(|t| t.elapsed() >= stats_interval)
-                                                .unwrap_or(false)
-                                        };
-
-                                        if should_report {
-                                            let mut state = self.shared_state.lock().await;
-                                            let total_elapsed = state.start_time
-                                                .map(|t| t.elapsed().as_secs_f64())
-                                                .unwrap_or(1.0);
-                                            let interval_elapsed = state.last_report_time
-                                                .map(|t| t.elapsed().as_secs_f64())
-                                                .unwrap_or(1.0);
-                                            let report = state.stats.report(total_elapsed, interval_elapsed);
-                                            state.last_report_time = Some(Instant::now());
-                                            println!("{}", report);
+                                        // Non-blocking send to processor
+                                        match tx.try_send(ProcessorMessage::Data(batch)) {
+                                            Ok(()) => {}
+                                            Err(mpsc::error::TrySendError::Full(_)) => {
+                                                atomic_stats.record_drop();
+                                                warn!("Processor channel full, dropped batch");
+                                            }
+                                            Err(mpsc::error::TrySendError::Closed(_)) => {
+                                                info!("Processor channel closed, exiting");
+                                                break;
+                                            }
                                         }
                                     }
                                     Ok(Message::EndOfStream { source_id }) => {
+                                        atomic_stats.record_eos();
                                         info!(source_id = source_id, "Received EOS from upstream");
-                                        let mut state = self.shared_state.lock().await;
-                                        state.stats.record_eos();
-                                        // Don't break - continue receiving from other sources
+                                        let _ = tx.try_send(ProcessorMessage::Eos { source_id });
                                     }
                                     Ok(Message::Heartbeat(hb)) => {
                                         debug!(source_id = hb.source_id, counter = hb.counter, "Received heartbeat");
-                                        // Heartbeats are received but not processed as data
                                     }
                                     Err(e) => {
                                         warn!(error = %e, "Failed to deserialize message");
@@ -574,23 +444,50 @@ impl DataSink {
                 }
             }
         }
+    }
 
-        // Wait for command task
-        let _ = cmd_handle.await;
+    /// Processor task: channel → stats + console output
+    async fn processor_task(
+        mut rx: mpsc::Receiver<ProcessorMessage>,
+        atomic_stats: Arc<AtomicStats>,
+        stats_interval_secs: u64,
+    ) {
+        let mut stats = DataSinkStats::default();
+        let start_time = Instant::now();
+        let mut last_report_time = Instant::now();
+        let stats_interval = Duration::from_secs(stats_interval_secs);
+
+        while let Some(msg) = rx.recv().await {
+            match msg {
+                ProcessorMessage::Data(batch) => {
+                    stats.update(&batch);
+                    atomic_stats.record_processed();
+
+                    // Check if should report
+                    if last_report_time.elapsed() >= stats_interval {
+                        let total_elapsed = start_time.elapsed().as_secs_f64();
+                        let interval_elapsed = last_report_time.elapsed().as_secs_f64();
+                        let report = stats.report(total_elapsed, interval_elapsed);
+                        last_report_time = Instant::now();
+                        println!("{}", report);
+                    }
+                }
+                ProcessorMessage::Eos { source_id } => {
+                    stats.record_eos();
+                    info!(source_id = source_id, "Processed EOS");
+                }
+            }
+        }
 
         // Final stats report
-        let state = self.shared_state.lock().await;
-        let total_elapsed = state.start_time
-            .map(|t| t.elapsed().as_secs_f64())
-            .unwrap_or(0.0);
-
+        let total_elapsed = start_time.elapsed().as_secs_f64();
         let event_rate = if total_elapsed > 0.0 {
-            state.stats.total_events as f64 / total_elapsed
+            stats.total_events as f64 / total_elapsed
         } else {
             0.0
         };
         let batch_rate = if total_elapsed > 0.0 {
-            state.stats.total_batches as f64 / total_elapsed
+            stats.total_batches as f64 / total_elapsed
         } else {
             0.0
         };
@@ -598,30 +495,28 @@ impl DataSink {
         println!();
         println!("========== Final Statistics ==========");
         println!("Duration:     {:.2} s", total_elapsed);
-        println!("Total Events: {}", state.stats.total_events);
-        println!("Total Batches: {}", state.stats.total_batches);
-        println!("Event Rate:   {:.0} events/s ({:.2} MHz)", event_rate, event_rate / 1_000_000.0);
+        println!("Total Events: {}", stats.total_events);
+        println!("Total Batches: {}", stats.total_batches);
+        println!(
+            "Event Rate:   {:.0} events/s ({:.2} MHz)",
+            event_rate,
+            event_rate / 1_000_000.0
+        );
         println!("Batch Rate:   {:.0} batches/s", batch_rate);
-        println!("Gaps:         {} ({} missing sequences)", state.stats.total_gaps(), state.stats.total_missing());
-        println!("Sources:      {}", state.stats.sources.len());
+        println!(
+            "Gaps:         {} ({} missing sequences)",
+            stats.total_gaps(),
+            stats.total_missing()
+        );
+        println!("Sources:      {}", stats.sources.len());
         println!("=======================================");
 
-        info!(
-            total_batches = state.stats.total_batches,
-            total_events = state.stats.total_events,
-            event_rate = event_rate,
-            gaps = state.stats.total_gaps(),
-            missing = state.stats.total_missing(),
-            eos = state.stats.eos_received,
-            "DataSink stopped"
-        );
-
-        Ok(())
+        info!("Processor task completed");
     }
 
-    /// Get current statistics
-    pub async fn stats(&self) -> DataSinkStats {
-        self.shared_state.lock().await.stats.clone()
+    /// Get current statistics snapshot
+    pub fn stats_snapshot(&self) -> (u64, u64, u64, u64) {
+        self.atomic_stats.snapshot()
     }
 }
 
@@ -684,5 +579,20 @@ mod tests {
         assert_eq!(stats.sources.len(), 2);
         assert_eq!(stats.total_gaps(), 2);
         assert_eq!(stats.total_missing(), 12); // 3 + 9
+    }
+
+    #[test]
+    fn atomic_stats() {
+        let stats = AtomicStats::new();
+        stats.record_received();
+        stats.record_received();
+        stats.record_processed();
+        stats.record_drop();
+
+        let (recv, proc, drop, eos) = stats.snapshot();
+        assert_eq!(recv, 2);
+        assert_eq!(proc, 1);
+        assert_eq!(drop, 1);
+        assert_eq!(eos, 0);
     }
 }

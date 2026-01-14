@@ -93,6 +93,112 @@ delila-rs/
 
 **Decision Criteria:** "Is this architecture really necessary? Can it be solved in a simpler way?"
 
+## Component Architecture Principles (MANDATORY)
+
+**全コンポーネントは以下のアーキテクチャに従うこと。違反は許容しない。**
+
+### Lock-Free Task Separation
+
+各コンポーネントは独立したタスクに分離し、mpscチャンネルで接続する。
+**タスク間で直接Mutexを共有してブロックしてはならない。**
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        Component                                 │
+│                                                                  │
+│  ┌──────────┐   mpsc    ┌──────────┐   mpsc    ┌──────────┐    │
+│  │ Receiver │ ────────► │  Main    │ ────────► │ Sender   │    │
+│  │ (ZMQ)    │  channel  │  Logic   │  channel  │ (ZMQ/IO) │    │
+│  └──────────┘           └──────────┘           └──────────┘    │
+│       │                      │                      │           │
+│       │ 高速                 │ 処理                 │ 遅い可能性│
+│       │ ブロック禁止         │ ソート等             │ fsync等   │
+│       ▼                      ▼                      ▼           │
+│  ┌──────────┐           ┌──────────┐                           │
+│  │ Command  │◄─────────►│ State    │ (watch channel)           │
+│  │ (ZMQ REP)│           │ (shared) │                           │
+│  └──────────┘           └──────────┘                           │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### 必須ルール
+
+1. **Receiver Task**: ZMQソケットからの受信専用。処理をせずチャンネルに送るだけ。
+   - `try_send()` を使用し、チャンネルがfullでもブロックしない
+   - ブロック禁止（データ損失よりも受信継続を優先）
+
+2. **Main Logic Task**: データ処理（ソート、集計等）
+   - 重い処理はここで行う
+   - 入力・出力ともにmpscチャンネル経由
+
+3. **Sender/Writer Task**: ZMQ送信またはファイル書き込み
+   - fsync等の遅い操作はここで吸収
+   - 上流をブロックしない
+
+4. **Command Task**: 既存の`run_command_task()`を使用
+   - 状態変更は`watch::Sender`経由で通知
+   - 統計取得は`Arc<AtomicU64>`等のlock-free構造を使用
+
+### 禁止事項
+
+```rust
+// ❌ 禁止: 受信ループ内でMutexロック
+msg = socket.next() => {
+    let mut state = self.state.lock().unwrap();  // ブロック！
+    state.process(msg);
+}
+
+// ❌ 禁止: 書き込み完了を待ってから次の受信
+for msg in receiver {
+    file.write_all(&msg)?;
+    file.sync_data()?;  // fsyncが受信をブロック！
+}
+```
+
+### 推奨パターン
+
+```rust
+// ✅ 推奨: タスク分離 + チャンネル
+let (tx, rx) = mpsc::channel(1000);
+
+// Receiver task
+tokio::spawn(async move {
+    while let Some(msg) = socket.next().await {
+        let _ = tx.try_send(msg);  // Non-blocking
+    }
+});
+
+// Writer task
+tokio::spawn(async move {
+    while let Some(msg) = rx.recv().await {
+        file.write_all(&msg)?;
+        // fsyncはここでブロックしてもReceiverに影響なし
+    }
+});
+```
+
+### 統計・状態共有
+
+```rust
+// ✅ Lock-free counters for hot path
+struct Stats {
+    received: AtomicU64,
+    sent: AtomicU64,
+}
+
+// ✅ watch channel for state broadcast
+let (state_tx, state_rx) = watch::channel(ComponentState::Idle);
+
+// ✅ DashMap for per-key stats (lock per entry, not global)
+let per_source: DashMap<u32, SourceStats> = DashMap::new();
+```
+
+### 参照実装
+
+- **Merger** (`src/merger/mod.rs`): Receiver/Senderタスク分離の例
+- **Recorder** (`src/recorder/mod.rs`): Receiver/Sorter/Writerの3タスク分離の例
+
 ## Coding Standards
 
 ### 1. Safety & FFI
@@ -212,25 +318,48 @@ Short-term goals are tracked in the `TODO/` directory.
 
 ```
 TODO/
-├── 01_task.md           # Current tasks (numbered for priority)
+├── CURRENT.md           # 現在のスプリント概要（必ず読む）
+├── 01_task.md           # アクティブなタスク
 ├── 02_another_task.md
-└── archive/             # Completed tasks
-    ├── phase1_emulator/ # Archived by milestone
-    │   ├── 01_xxx.md
-    │   └── 02_yyy.md
+└── archive/             # 完了済み（通常は読まない）
+    ├── phase1_emulator/
     └── phase2_driver/
+```
+
+### セッション開始時に必ず読むファイル
+
+1. `TODO/CURRENT.md` - 現在のスプリント概要と優先度
+2. `docs/` 内の設計ドキュメント
+
+**注意:** `TODO/archive/` は参照が必要な場合のみ読む。
+
+### CURRENT.md の形式
+
+```markdown
+# Current Sprint (更新日: YYYY-MM-DD)
+
+## 優先度高
+- [ ] タスク名 → `TODO/XX_filename.md`
+
+## 優先度中
+- [ ] タスク名 → `TODO/YY_filename.md`
+
+## 最近完了
+- [x] タスク名 (完了日) → `TODO/archive/...`
 ```
 
 ### Workflow
 1. Create TODO files in `TODO/` for current sprint goals
-2. **When implementation is complete:**
+2. **CURRENT.md を常に最新に保つ**
+3. **When implementation is complete:**
    - Update the TODO file with `**Status: COMPLETED** (date)`
    - Mark all tasks as `[x]` (completed)
    - Add "Implementation Summary" section with files modified and key decisions
    - Add "Test Results" section if applicable
-3. When a milestone is complete, create appropriately named directory in `TODO/archive/`
-4. Move completed TODO files to the archive directory
-5. Create new TODO files for the next sprint
+   - CURRENT.md の該当タスクを「最近完了」に移動
+4. When a milestone is complete, create appropriately named directory in `TODO/archive/`
+5. Move completed TODO files to the archive directory
+6. Create new TODO files for the next sprint
 
 **IMPORTANT:** Always update TODO files immediately after completing implementation. Do not leave stale unchecked items.
 
@@ -272,6 +401,19 @@ Architecture and design decisions:
 - `src/reader/caen/` - CAEN FFI bindings (handle.rs, error.rs, wrapper.c)
 - `src/reader/decoder/` - Data decoders (psd2.rs, common.rs)
 - `src/config/mod.rs` - Configuration management
+
+## Benchmark & Design Decision Documentation
+
+ベンチマークや性能測定を行った場合:
+1. 測定結果を関連するTODOファイルまたは設計ドキュメントに記録する
+2. 以下を含める:
+   - 測定日
+   - 測定条件（ハードウェア、パラメータ）
+   - 結果のテーブル
+   - 結論と設計への影響
+3. 将来の論文執筆時に引用可能な形式で記録する
+
+例: `TODO/09_timestamp_sorting_design.md` にストレージベンチマーク結果を記録
 
 ## Notes
 

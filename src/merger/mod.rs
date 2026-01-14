@@ -1,10 +1,10 @@
 //! Merger - receives from multiple upstream sources and forwards downstream
 //!
-//! Architecture:
-//! - Receiver task: SUB socket → mpsc channel (with sequence tracking)
-//! - Sender task: mpsc channel → PUB socket
+//! Architecture (Zero-Copy):
+//! - Receiver task: SUB socket → mpsc channel (raw bytes, header-only parsing)
+//! - Sender task: mpsc channel → PUB socket (direct byte forwarding)
 //! - Command task: REP socket for control commands
-//! - Decoupled to prevent send blocking from affecting receive
+//! - NO serialization/deserialization on the hot path
 //!
 //! Performance: Uses AtomicU64 for hot-path counters to avoid mutex contention
 
@@ -12,14 +12,18 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use bytes::Bytes;
 use dashmap::DashMap;
 use futures::{SinkExt, StreamExt};
 use thiserror::Error;
-use tmq::{publish, request_reply, subscribe, AsZmqSocket, Context};
+use tmq::{publish, subscribe, AsZmqSocket, Context};
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, info, warn};
 
-use crate::common::{Command, CommandResponse, ComponentMetrics, ComponentState, Message, RunConfig};
+use crate::common::{
+    handle_command, run_command_task, CommandHandlerExt, ComponentSharedState, ComponentState,
+    MessageHeader,
+};
 
 /// Merger configuration
 #[derive(Debug, Clone)]
@@ -40,7 +44,7 @@ impl Default for MergerConfig {
             sub_addresses: vec!["tcp://localhost:5555".to_string()],
             pub_address: "tcp://*:5556".to_string(),
             command_address: "tcp://*:5570".to_string(),
-            channel_capacity: 1000,
+            channel_capacity: 10000,
         }
     }
 }
@@ -172,22 +176,19 @@ impl MergerStats {
     }
 }
 
-/// Shared state between tasks
-struct SharedState {
+/// Extended state for Merger (statistics and sequence tracking)
+struct MergerExtState {
     // Sequence tracking per source (lock-free concurrent map)
     source_stats: DashMap<u32, SourceStats>,
     // Hot-path counters (lock-free)
     atomic_stats: AtomicStats,
-    // Run configuration (protected by parking_lot Mutex for infrequent access)
-    run_config: parking_lot::Mutex<Option<RunConfig>>,
 }
 
-impl SharedState {
+impl MergerExtState {
     fn new() -> Self {
         Self {
             source_stats: DashMap::new(),
             atomic_stats: AtomicStats::new(),
-            run_config: parking_lot::Mutex::new(None),
         }
     }
 
@@ -207,12 +208,45 @@ impl SharedState {
             sources,
         }
     }
+
+    fn clear(&self) {
+        self.source_stats.clear();
+    }
+}
+
+/// Command handler extension for Merger with custom GetStatus
+struct MergerCommandExt {
+    ext_state: Arc<MergerExtState>,
+}
+
+impl CommandHandlerExt for MergerCommandExt {
+    fn component_name(&self) -> &'static str {
+        "Merger"
+    }
+
+    fn on_reset(&mut self) -> Result<(), String> {
+        self.ext_state.clear();
+        Ok(())
+    }
+
+    fn status_details(&self) -> Option<String> {
+        let stats = self.ext_state.get_stats();
+        Some(format!(
+            "Received: {}, Sent: {}, Dropped: {}, Gaps: {}, Missing: {}",
+            stats.received_batches,
+            stats.sent_batches,
+            stats.dropped_batches,
+            stats.total_gaps(),
+            stats.total_missing()
+        ))
+    }
 }
 
 /// Merger component
 pub struct Merger {
     config: MergerConfig,
-    shared_state: Arc<SharedState>,
+    shared_state: Arc<tokio::sync::Mutex<ComponentSharedState>>,
+    ext_state: Arc<MergerExtState>,
     state_rx: watch::Receiver<ComponentState>,
     state_tx: watch::Sender<ComponentState>,
 }
@@ -223,7 +257,8 @@ impl Merger {
         let (state_tx, state_rx) = watch::channel(ComponentState::Idle);
         Self {
             config,
-            shared_state: Arc::new(SharedState::new()),
+            shared_state: Arc::new(tokio::sync::Mutex::new(ComponentSharedState::new())),
+            ext_state: Arc::new(MergerExtState::new()),
             state_rx,
             state_tx,
         }
@@ -234,192 +269,13 @@ impl Merger {
         *self.state_rx.borrow()
     }
 
-    /// Handle incoming command (5-state machine)
-    fn handle_command(
-        shared_state: &Arc<SharedState>,
-        state_tx: &watch::Sender<ComponentState>,
-        cmd: Command,
-    ) -> CommandResponse {
-        let current = *state_tx.borrow();
-
-        match cmd {
-            Command::Configure(run_config) => {
-                if !current.can_transition_to(ComponentState::Configured) {
-                    return CommandResponse::error(
-                        current,
-                        format!("Cannot configure from {} state", current),
-                    );
-                }
-                let run_number = run_config.run_number;
-                *shared_state.run_config.lock() = Some(run_config);
-                let _ = state_tx.send(ComponentState::Configured);
-                info!(run_number, "Merger configured");
-                CommandResponse::success_with_run(ComponentState::Configured, "Configured", run_number)
-            }
-
-            Command::Arm => {
-                if !current.can_transition_to(ComponentState::Armed) {
-                    return CommandResponse::error(
-                        current,
-                        format!("Cannot arm from {} state", current),
-                    );
-                }
-                let _ = state_tx.send(ComponentState::Armed);
-                info!("Merger armed");
-                let run_number = shared_state.run_config.lock().as_ref().map(|c| c.run_number).unwrap_or(0);
-                CommandResponse::success_with_run(ComponentState::Armed, "Armed", run_number)
-            }
-
-            Command::Start => {
-                if !current.can_transition_to(ComponentState::Running) {
-                    return CommandResponse::error(
-                        current,
-                        format!("Cannot start from {} state", current),
-                    );
-                }
-                let _ = state_tx.send(ComponentState::Running);
-                info!("Merger started");
-                let run_number = shared_state.run_config.lock().as_ref().map(|c| c.run_number).unwrap_or(0);
-                CommandResponse::success_with_run(ComponentState::Running, "Started", run_number)
-            }
-
-            Command::Stop => {
-                if current != ComponentState::Running {
-                    return CommandResponse::error(current, "Not running");
-                }
-                let _ = state_tx.send(ComponentState::Configured);
-                info!("Merger stopped");
-                let run_number = shared_state.run_config.lock().as_ref().map(|c| c.run_number).unwrap_or(0);
-                CommandResponse::success_with_run(ComponentState::Configured, "Stopped", run_number)
-            }
-
-            Command::Reset => {
-                *shared_state.run_config.lock() = None;
-                // Clear stats on reset
-                shared_state.source_stats.clear();
-                let _ = state_tx.send(ComponentState::Idle);
-                info!("Merger reset");
-                CommandResponse::success(ComponentState::Idle, "Reset to Idle")
-            }
-
-            Command::GetStatus => {
-                let stats = shared_state.get_stats();
-                let run_config = shared_state.run_config.lock();
-                let run_number = run_config.as_ref().map(|c| c.run_number);
-                let msg = format!(
-                    "State: {}, Received: {}, Sent: {}, Dropped: {}, Gaps: {}, Missing: {}",
-                    current,
-                    stats.received_batches,
-                    stats.sent_batches,
-                    stats.dropped_batches,
-                    stats.total_gaps(),
-                    stats.total_missing()
-                );
-
-                let metrics = ComponentMetrics {
-                    events_processed: stats.received_batches, // batches, not events
-                    bytes_transferred: 0,
-                    queue_size: 0,
-                    queue_max: 0,
-                    event_rate: 0.0, // Would need time tracking to calculate
-                    data_rate: 0.0,
-                };
-
-                let mut resp = CommandResponse::success(current, msg);
-                resp.run_number = run_number;
-                resp.metrics = Some(metrics);
-                resp
-            }
-        }
-    }
-
-    /// Command handler task using tmq REQ/REP pattern
-    async fn command_task(
-        command_address: String,
-        shared_state: Arc<SharedState>,
-        state_tx: watch::Sender<ComponentState>,
-        mut shutdown: tokio::sync::broadcast::Receiver<()>,
-    ) {
-        let context = Context::new();
-
-        let receiver = match request_reply::reply(&context).bind(&command_address) {
-            Ok(r) => r,
-            Err(e) => {
-                warn!(error = %e, "Failed to bind command socket");
-                return;
-            }
-        };
-
-        info!(address = %command_address, "Merger command task started");
-
-        let mut current_receiver = receiver;
-
-        loop {
-            tokio::select! {
-                biased;
-
-                _ = shutdown.recv() => {
-                    info!("Merger command task received shutdown signal");
-                    break;
-                }
-
-                recv_result = current_receiver.recv() => {
-                    match recv_result {
-                        Ok((mut multipart, sender)) => {
-                            let response = if let Some(frame) = multipart.pop_front() {
-                                match Command::from_json(&frame) {
-                                    Ok(cmd) => {
-                                        info!(command = %cmd, "Merger received command");
-                                        Self::handle_command(&shared_state, &state_tx, cmd)
-                                    }
-                                    Err(e) => {
-                                        warn!(error = %e, "Invalid command");
-                                        CommandResponse::error(ComponentState::Idle, format!("Invalid: {}", e))
-                                    }
-                                }
-                            } else {
-                                CommandResponse::error(ComponentState::Idle, "Empty message")
-                            };
-
-                            let resp_bytes = match response.to_json() {
-                                Ok(b) => b,
-                                Err(e) => {
-                                    warn!(error = %e, "Failed to serialize response");
-                                    break;
-                                }
-                            };
-
-                            let resp_msg: tmq::Multipart =
-                                vec![tmq::Message::from(resp_bytes.as_slice())].into();
-
-                            match sender.send(resp_msg).await {
-                                Ok(next_receiver) => {
-                                    current_receiver = next_receiver;
-                                }
-                                Err(e) => {
-                                    warn!(error = %e, "Failed to send response");
-                                    break;
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            warn!(error = %e, "Command receive error");
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        info!("Merger command task stopped");
-    }
-
     /// Run the merger
     pub async fn run(
         &mut self,
         mut shutdown: tokio::sync::broadcast::Receiver<()>,
     ) -> Result<(), MergerError> {
-        let (tx, rx) = mpsc::channel::<Message>(self.config.channel_capacity);
+        // Use larger channel for zero-copy (raw bytes are cheap)
+        let (tx, rx) = mpsc::channel::<Bytes>(self.config.channel_capacity);
 
         let context = Context::new();
 
@@ -445,28 +301,43 @@ impl Merger {
 
         info!(state = %self.state(), "Merger ready, waiting for commands");
 
-        // Spawn command handler task
+        // Spawn command handler task using common infrastructure
         let command_address = self.config.command_address.clone();
         let shared_state = self.shared_state.clone();
         let state_tx = self.state_tx.clone();
         let shutdown_for_cmd = shutdown.resubscribe();
+        let ext_state_for_cmd = self.ext_state.clone();
 
         let cmd_handle = tokio::spawn(async move {
-            Self::command_task(command_address, shared_state, state_tx, shutdown_for_cmd).await;
+            run_command_task(
+                command_address,
+                shared_state,
+                state_tx,
+                shutdown_for_cmd,
+                move |state, tx, cmd| {
+                    let mut ext = MergerCommandExt {
+                        ext_state: ext_state_for_cmd.clone(),
+                    };
+                    handle_command(state, tx, cmd, Some(&mut ext))
+                },
+                "Merger",
+            )
+            .await;
         });
 
-        // Spawn receiver task
+        // Spawn receiver task (zero-copy: passes raw bytes)
         let shutdown_rx = shutdown.resubscribe();
-        let shared_state_for_recv = self.shared_state.clone();
+        let ext_state_for_recv = self.ext_state.clone();
         let state_rx_for_recv = self.state_rx.clone();
         let receiver_handle = tokio::spawn(async move {
-            Self::receiver_task(sub_socket, tx, shutdown_rx, shared_state_for_recv, state_rx_for_recv).await
+            Self::receiver_task(sub_socket, tx, shutdown_rx, ext_state_for_recv, state_rx_for_recv)
+                .await
         });
 
-        // Spawn sender task
-        let shared_state_for_send = self.shared_state.clone();
+        // Spawn sender task (zero-copy: forwards raw bytes)
+        let ext_state_for_send = self.ext_state.clone();
         let sender_handle = tokio::spawn(async move {
-            Self::sender_task(rx, pub_socket, shared_state_for_send).await
+            Self::sender_task(rx, pub_socket, ext_state_for_send).await
         });
 
         // Wait for shutdown signal
@@ -479,7 +350,7 @@ impl Merger {
         let _ = cmd_handle.await;
 
         // Log final stats
-        let stats = self.shared_state.get_stats();
+        let stats = self.ext_state.get_stats();
         info!(
             received = stats.received_batches,
             sent = stats.sent_batches,
@@ -493,12 +364,12 @@ impl Merger {
         Ok(())
     }
 
-    /// Receiver task: SUB → channel (with sequence tracking)
+    /// Receiver task: SUB → channel (zero-copy with header-only parsing)
     async fn receiver_task(
         mut socket: subscribe::Subscribe,
-        tx: mpsc::Sender<Message>,
+        tx: mpsc::Sender<Bytes>,
         mut shutdown: tokio::sync::broadcast::Receiver<()>,
-        shared_state: Arc<SharedState>,
+        ext_state: Arc<MergerExtState>,
         mut state_rx: watch::Receiver<ComponentState>,
     ) {
         loop {
@@ -522,44 +393,45 @@ impl Merger {
                     match msg {
                         Some(Ok(multipart)) => {
                             if let Some(data) = multipart.into_iter().next() {
-                                match Message::from_msgpack(&data) {
-                                    Ok(message) => {
-                                        // Update sequence tracking (needs lock, but less frequent)
-                                        match &message {
-                                            Message::Data(batch) => {
-                                                shared_state.atomic_stats.record_received();
-                                                // Update per-source sequence tracking (lock-free per entry)
-                                                shared_state.source_stats
-                                                    .entry(batch.source_id)
-                                                    .or_default()
-                                                    .update(batch.sequence_number);
-                                            }
-                                            Message::EndOfStream { .. } => {
-                                                shared_state.atomic_stats.record_eos();
-                                            }
-                                            Message::Heartbeat(_) => {
-                                                // Heartbeats are forwarded but not counted as data
-                                                debug!("Received heartbeat");
-                                            }
-                                        }
+                                // Zero-copy: convert to Bytes (reference counted)
+                                let raw_bytes: Bytes = Bytes::copy_from_slice(&data);
 
-                                        // Try to send without blocking
-                                        match tx.try_send(message) {
-                                            Ok(()) => {
-                                                debug!("Receiver forwarded message");
-                                            }
-                                            Err(mpsc::error::TrySendError::Full(_)) => {
-                                                shared_state.atomic_stats.record_drop();
-                                                warn!("Channel full, dropped message");
-                                            }
-                                            Err(mpsc::error::TrySendError::Closed(_)) => {
-                                                info!("Channel closed, receiver exiting");
-                                                break;
-                                            }
-                                        }
+                                // Lightweight header parsing (no full deserialization)
+                                match MessageHeader::parse(&raw_bytes) {
+                                    Some(MessageHeader::Data { source_id, sequence_number }) => {
+                                        ext_state.atomic_stats.record_received();
+                                        // Update per-source sequence tracking
+                                        ext_state.source_stats
+                                            .entry(source_id)
+                                            .or_default()
+                                            .update(sequence_number);
+                                        debug!(source = source_id, seq = sequence_number, "Received data");
                                     }
-                                    Err(e) => {
-                                        warn!(error = %e, "Failed to deserialize message");
+                                    Some(MessageHeader::EndOfStream { source_id }) => {
+                                        ext_state.atomic_stats.record_eos();
+                                        info!(source = source_id, "Received EOS");
+                                    }
+                                    Some(MessageHeader::Heartbeat { source_id }) => {
+                                        debug!(source = source_id, "Received heartbeat");
+                                    }
+                                    None => {
+                                        warn!("Failed to parse message header");
+                                        continue;
+                                    }
+                                }
+
+                                // Try to send raw bytes without blocking
+                                match tx.try_send(raw_bytes) {
+                                    Ok(()) => {
+                                        debug!("Receiver forwarded message");
+                                    }
+                                    Err(mpsc::error::TrySendError::Full(_)) => {
+                                        ext_state.atomic_stats.record_drop();
+                                        warn!("Channel full, dropped message");
+                                    }
+                                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                                        info!("Channel closed, receiver exiting");
+                                        break;
                                     }
                                 }
                             }
@@ -577,28 +449,23 @@ impl Merger {
         }
     }
 
-    /// Sender task: channel → PUB
+    /// Sender task: channel → PUB (zero-copy: direct byte forwarding)
     async fn sender_task(
-        mut rx: mpsc::Receiver<Message>,
+        mut rx: mpsc::Receiver<Bytes>,
         mut socket: publish::Publish,
-        shared_state: Arc<SharedState>,
+        ext_state: Arc<MergerExtState>,
     ) {
-        while let Some(message) = rx.recv().await {
-            match message.to_msgpack() {
-                Ok(bytes) => {
-                    let msg: tmq::Multipart = vec![tmq::Message::from(bytes.as_slice())].into();
-                    match socket.send(msg).await {
-                        Ok(()) => {
-                            shared_state.atomic_stats.record_sent();
-                            debug!("Sender forwarded message");
-                        }
-                        Err(e) => {
-                            warn!(error = %e, "Failed to send message");
-                        }
-                    }
+        while let Some(raw_bytes) = rx.recv().await {
+            // Zero-copy: directly send raw bytes to ZMQ
+            let bytes_slice: &[u8] = raw_bytes.as_ref();
+            let msg: tmq::Multipart = vec![tmq::Message::from(bytes_slice)].into();
+            match socket.send(msg).await {
+                Ok(()) => {
+                    ext_state.atomic_stats.record_sent();
+                    debug!("Sender forwarded message");
                 }
                 Err(e) => {
-                    warn!(error = %e, "Failed to serialize message");
+                    warn!(error = %e, "Failed to send message");
                 }
             }
         }
@@ -608,7 +475,7 @@ impl Merger {
 
     /// Get current statistics
     pub fn stats(&self) -> MergerStats {
-        self.shared_state.get_stats()
+        self.ext_state.get_stats()
     }
 }
 
@@ -620,7 +487,7 @@ mod tests {
     fn default_config() {
         let config = MergerConfig::default();
         assert_eq!(config.pub_address, "tcp://*:5556");
-        assert_eq!(config.channel_capacity, 1000);
+        assert_eq!(config.channel_capacity, 10000);
     }
 
     #[test]

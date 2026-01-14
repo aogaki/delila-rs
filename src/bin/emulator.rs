@@ -25,6 +25,8 @@ async fn main() -> anyhow::Result<()> {
     let mut batches: Option<u64> = None;
     let mut source_id: Option<u32> = None;
     let mut address: Option<String> = None;
+    let mut interval_ms: Option<u64> = None;
+    let mut events_per_batch: Option<usize> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -65,6 +67,24 @@ async fn main() -> anyhow::Result<()> {
                     std::process::exit(1);
                 }
             }
+            "--interval" | "-i" => {
+                if i + 1 < args.len() {
+                    interval_ms = Some(args[i + 1].parse().expect("interval must be a number"));
+                    i += 2;
+                } else {
+                    eprintln!("Error: --interval requires a number");
+                    std::process::exit(1);
+                }
+            }
+            "--events" | "-e" => {
+                if i + 1 < args.len() {
+                    events_per_batch = Some(args[i + 1].parse().expect("events must be a number"));
+                    i += 2;
+                } else {
+                    eprintln!("Error: --events requires a number");
+                    std::process::exit(1);
+                }
+            }
             "--help" | "-h" => {
                 println!("Emulator - publishes dummy event data via ZeroMQ");
                 println!();
@@ -75,11 +95,14 @@ async fn main() -> anyhow::Result<()> {
                 println!("  --source-id, -s <ID>  Source ID (selects config from file) [default: 0]");
                 println!("  --batches, -b <N>     Run for N batches then send EOS and exit");
                 println!("  --address, -a <ADDR>  Override ZMQ bind address");
+                println!("  --interval, -i <MS>   Batch interval in milliseconds [default: 100]");
+                println!("  --events, -e <N>      Events per batch [default: 100]");
                 println!("  --help, -h            Show this help message");
                 println!();
                 println!("Examples:");
                 println!("  emulator --config config.toml --source-id 1");
                 println!("  emulator --batches 100");
+                println!("  emulator --interval 10 --events 1000  # High rate: 100kHz");
                 return Ok(());
             }
             _ => {
@@ -138,8 +161,8 @@ async fn main() -> anyhow::Result<()> {
             address: address.unwrap_or_else(|| "tcp://*:5555".to_string()),
             command_address: format!("tcp://*:{}", 5560 + sid as u16),
             source_id: sid,
-            events_per_batch: 100,
-            batch_interval_ms: 100,
+            events_per_batch: events_per_batch.unwrap_or(100),
+            batch_interval_ms: interval_ms.unwrap_or(100),
             heartbeat_interval_ms: 1000, // 1Hz heartbeat
             num_modules: 2,
             channels_per_module: 16,
