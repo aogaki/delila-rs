@@ -115,8 +115,12 @@ fn load_components(config_file: &str) -> Vec<ComponentConfig> {
             address: "tcp://localhost:5570".to_string(),
         },
         ComponentConfig {
-            name: "DataSink".to_string(),
+            name: "Recorder".to_string(),
             address: "tcp://localhost:5580".to_string(),
+        },
+        ComponentConfig {
+            name: "Monitor".to_string(),
+            address: "tcp://localhost:5590".to_string(),
         },
     ]
 }
