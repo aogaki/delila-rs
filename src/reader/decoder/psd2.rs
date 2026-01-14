@@ -678,7 +678,7 @@ mod tests {
         // - bits 62-56: channel = 5
         // - bits 47-0: timestamp (coarse) = 500
         data[8] = 0x05; // channel=5 in bits 62-56 (shifted)
-        // timestamp = 500 in low 6 bytes
+                        // timestamp = 500 in low 6 bytes
         data[13] = 0x00;
         data[14] = 0x01;
         data[15] = 0xF4; // 500 = 0x1F4
@@ -737,7 +737,7 @@ mod tests {
 
     #[test]
     fn test_aggregate_counter_tracking() {
-        let mut decoder = Psd2Decoder::with_defaults();
+        let decoder = Psd2Decoder::with_defaults();
         assert_eq!(decoder.last_aggregate_counter, 0);
     }
 

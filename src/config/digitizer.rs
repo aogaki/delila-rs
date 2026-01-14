@@ -492,8 +492,10 @@ mod tests {
         config.channel_defaults.trigger_threshold = Some(500);
 
         // Add override for channel 0
-        let mut ch0_override = ChannelConfig::default();
-        ch0_override.trigger_threshold = Some(1000);
+        let ch0_override = ChannelConfig {
+            trigger_threshold: Some(1000),
+            ..Default::default()
+        };
         config.channel_overrides.insert(0, ch0_override);
 
         // Serialize to JSON
@@ -523,8 +525,10 @@ mod tests {
         config.channel_defaults.trigger_threshold = Some(500);
 
         // Override only trigger threshold for channel 0
-        let mut override_config = ChannelConfig::default();
-        override_config.trigger_threshold = Some(1000);
+        let override_config = ChannelConfig {
+            trigger_threshold: Some(1000),
+            ..Default::default()
+        };
         config.channel_overrides.insert(0, override_config);
 
         // Channel 0 should have overridden threshold but default offset

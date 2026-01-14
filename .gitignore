@@ -3,3 +3,6 @@
 .vscode
 .claude
 .serena
+
+# Data output files
+/data/
