@@ -1,6 +1,6 @@
 # Current Sprint - TODO Index
 
-**Updated:** 2026-01-14
+**Updated:** 2026-01-15
 
 このファイルは現在のスプリントの概要を示すインデックスです。
 Claudeセッション開始時に必ず読み込まれます。
@@ -11,7 +11,7 @@ Claudeセッション開始時に必ず読み込まれます。
 
 | Priority | File | Status | Summary |
 |----------|------|--------|---------|
-| 1 | [09_timestamp_sorting_design.md](09_timestamp_sorting_design.md) | **Phase 1完了** | タイムスタンプソートとファイル書き出し |
+| 1 | [09_timestamp_sorting_design.md](09_timestamp_sorting_design.md) | **Phase 2完了** | タイムスタンプソートとファイル書き出し |
 | 2 | [07_digitizer_config_design.md](07_digitizer_config_design.md) | 作業中 | デジタイザ設定のWeb UI設計 |
 | 3 | [08_monitor_component.md](08_monitor_component.md) | **完了** | Monitorコンポーネント実装 |
 
@@ -25,17 +25,30 @@ Claudeセッション開始時に必ず読み込まれます。
 - [x] Recorderをlock-freeタスク分離アーキテクチャに修正
   - Receiver task: ZMQ SUB → mpsc channel (non-blocking)
   - Sorter task: バッファリング + ソート
-  - Writer task: File I/O (fsync)
-- [x] fsync設定 (`fsync_interval_batches`, デフォルト0=HDD向け)
-- [x] CLI引数 `--fsync` 追加
+  - Writer task: File I/O
+- [x] unbounded channelでデータ欠損防止
 
-### Phase 2: ファイルヘッダー/フッター (次のタスク)
-- MsgPack形式のメタデータ
-- xxHash64チェックサム
+### Phase 2: ファイルヘッダー/フッター ✅ 完了 (2026-01-14)
+- [x] `FileHeader` struct - MsgPack形式のメタデータ
+- [x] `FileFooter` struct - 固定64バイト、xxHash64チェックサム
+- [x] `ChecksumCalculator` - データブロックのチェックサム計算
+- [x] ファイル拡張子を `.msgpack` → `.delila` に変更
+- [x] シーケンス番号リセット (Start時にEmulator/Reader/Mergerでリセット)
+- [x] 中間fsync削除 (バッチ単位書き込みでは意味がないため)
+
+### Phase 2.5: Start/Stop順序制御 ✅ 完了 (2026-01-15)
+- [x] `pipeline_order` フィールドを設定に追加
+  - Sources: デフォルト 1 (upstream)
+  - Merger: デフォルト 2 (middle)
+  - Recorder/Monitor: デフォルト 3 (downstream)
+- [x] Operator の `start_all`: pipeline_order 降順 (下流→上流)
+- [x] Operator の `stop_all`: pipeline_order 昇順 (上流→下流)
+- [x] 設定ファイルから `pipeline_order` を読み込み
 
 ### Phase 3: 高度な機能 (将来)
-- クラッシュリカバリ
+- クラッシュリカバリツール
 - イベント数ベースローテーション
+- EOS (End Of Stream) ベースの停止制御
 
 ---
 
@@ -47,7 +60,9 @@ Claudeセッション開始時に必ず読み込まれます。
 | Margin ratio | 5% | 50Mイベント中2.5M、十分な余裕 |
 | Header format | MsgPack | データ本体と一貫性 |
 | Checksum | xxHash64 | CRC64より高速、十分な衝突耐性 |
-| fsync interval | 5 batches | NVMe: 37.6M evt/s、HDD: 8.1M evt/s |
+| Intermediate fsync | 削除 | バッチ単位書き込みでは効果なし |
+| Channel type | unbounded | データ欠損よりメモリ使用を優先 |
+| Start/Stop order | pipeline_order | 上流から停止、下流から開始 |
 
 ---
 

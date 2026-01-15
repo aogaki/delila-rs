@@ -268,13 +268,25 @@ struct FileFooter {
 - 衝突耐性も十分
 - Rustでは `xxhash-rust` クレートが利用可能
 
-### fsync戦略: 5〜10バッチ毎
+### fsync戦略: ファイルクローズ時のみ (2026-01-15更新)
 
-以下のベンチマーク結果に基づく（2026-01-14実施）。
+**再検討の結果:**
+
+現在のRecorder設計では:
+1. SortingBufferが一定量（10,000イベント以上）溜まったらソート
+2. ソート済みバッチをWriter taskに送信
+3. Writer taskはバッチ単位でシリアライズ + 書き込み
+
+この**バッチ単位の書き込み**では:
+- 中間fsyncは「直近1バッチ分の保護」にしかならない
+- クラッシュ時に失われるのはSortingBuffer内 + 最新バッチ程度
+- fsyncのオーバーヘッドに見合わない
+
+**結論:** 中間fsyncは削除。ファイルクローズ時のみ `sync_data()` を実行。
 
 ---
 
-## ストレージベンチマーク結果
+## ストレージベンチマーク結果 (参考: 2026-01-14実施)
 
 **測定条件:**
 - バッチサイズ: 1.1MB (50,000イベント × 22バイト)
@@ -287,8 +299,6 @@ struct FileFooter {
 | fsync なし | 4507.1 MB/s | 0.24 ms | 204.9M evt/s | OK | OK |
 | fsync 毎バッチ | 219.4 MB/s | 5.01 ms | 10.0M evt/s | OK | NG |
 | fsync 5バッチ毎 | 826.8 MB/s | 1.33 ms | 37.6M evt/s | OK | OK |
-| fsync 10バッチ毎 | 1390.5 MB/s | 0.79 ms | 63.2M evt/s | OK | OK |
-| fsync 20バッチ毎 | 2031.9 MB/s | 0.54 ms | 92.4M evt/s | OK | OK |
 
 ### USB HDD (/Volumes/Data20TB)
 
@@ -296,13 +306,97 @@ struct FileFooter {
 |--------|-------------|-----------|-----------|------|-------|
 | fsync なし | 297.4 MB/s | 3.70 ms | 13.5M evt/s | OK | OK |
 | fsync 毎バッチ | 36.9 MB/s | 29.80 ms | 1.7M evt/s | **NG** | NG |
-| fsync 5バッチ毎 | 178.2 MB/s | 6.17 ms | 8.1M evt/s | OK | NG |
-| fsync 10バッチ毎 | 121.4 MB/s | 9.06 ms | 5.5M evt/s | OK | NG |
-| fsync 20バッチ毎 | 160.0 MB/s | 6.87 ms | 7.3M evt/s | OK | NG |
 
-### 結論
+※ 現在の実装ではfsyncなしモード相当（クローズ時のみsync）
 
-- **NVMe SSD**: fsync 5バッチ毎で10MHz対応可能
-- **USB HDD**: fsync 5バッチ毎で2MHz対応可能、10MHzはfsyncなし以外NG
-- **推奨デフォルト**: `fsync_interval_batches = 5`（約5.5MB毎）
-- **最大データ消失**: クラッシュ時 ≈ 5バッチ = 25万イベント
+---
+
+## Phase 2 実装完了 (2026-01-14)
+
+### ファイルフォーマット v2 (`*.delila`)
+
+```
+┌─────────────────────────────────────────┐
+│  Header                                  │
+│  - Magic: "DELILA02" (8 bytes)          │
+│  - Length prefix: u32 LE (4 bytes)      │
+│  - MsgPack: FileHeader struct           │
+├─────────────────────────────────────────┤
+│  Data Block 1                           │
+│  - Length prefix: u32 LE (4 bytes)      │
+│  - MsgPack: MinimalEventDataBatch       │
+├─────────────────────────────────────────┤
+│  Data Block 2 ...                       │
+├─────────────────────────────────────────┤
+│  Footer (固定 64 bytes)                  │
+│  - Magic: "DLEND002" (8 bytes)          │
+│  - data_checksum: u64 (xxHash64)        │
+│  - total_events: u64                    │
+│  - data_bytes: u64                      │
+│  - first_event_time_ns: f64             │
+│  - last_event_time_ns: f64              │
+│  - file_end_time_ns: u64                │
+│  - write_complete: u8 (1=complete)      │
+│  - reserved: 7 bytes                    │
+└─────────────────────────────────────────┘
+```
+
+### 実装ファイル
+
+- `src/recorder/format.rs`: FileHeader, FileFooter, ChecksumCalculator
+- `src/recorder/mod.rs`: FileWriter更新（ヘッダ/フッタ書き込み）
+
+### FileHeader 構造体
+
+```rust
+pub struct FileHeader {
+    pub version: u32,              // FORMAT_VERSION = 2
+    pub run_number: u32,
+    pub exp_name: String,
+    pub file_sequence: u32,
+    pub file_start_time_ns: u64,   // Unix timestamp (ns)
+    pub comment: String,
+    pub sort_margin_ratio: f64,
+    pub is_sorted: bool,
+    pub source_ids: Vec<u32>,
+    pub metadata: HashMap<String, String>,
+}
+```
+
+### FileFooter 構造体 (固定64バイト)
+
+| オフセット | サイズ | フィールド | 説明 |
+|-----------|--------|----------|------|
+| 0 | 8 | magic | "DLEND002" |
+| 8 | 8 | data_checksum | xxHash64 of data blocks |
+| 16 | 8 | total_events | イベント総数 |
+| 24 | 8 | data_bytes | データブロック総バイト数 |
+| 32 | 8 | first_event_time_ns | 最初のイベント時刻 |
+| 40 | 8 | last_event_time_ns | 最後のイベント時刻 |
+| 48 | 8 | file_end_time_ns | ファイル完了時刻 |
+| 56 | 1 | write_complete | 1=正常完了, 0=クラッシュ |
+| 57 | 7 | reserved | 将来拡張用 |
+
+### チェックサム計算
+
+```rust
+pub struct ChecksumCalculator {
+    state: u64,
+    bytes_processed: u64,
+}
+```
+
+- 各データブロック（長さプレフィックス + MsgPackデータ）を更新
+- xxHash64のブロックハッシュをXOR + ローテーションで結合
+- 最終値 = state ^ bytes_processed
+
+### クラッシュ検出
+
+1. Footerの `write_complete` フラグが0 → 不完全ファイル
+2. Footerの magic が不正 → ファイル破損
+3. チェックサム不一致 → データ破損
+
+### 今後の拡張
+
+- Phase 3: クラッシュリカバリツール実装
+- Phase 3: イベント数ベースローテーション

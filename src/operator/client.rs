@@ -187,19 +187,27 @@ impl ComponentClient {
         results
     }
 
-    /// Start all components
+    /// Start all components in pipeline order (descending: downstream first)
     pub async fn start_all(&self, configs: &[ComponentConfig]) -> Vec<CommandResult> {
+        // Sort by pipeline_order descending (downstream first, then upstream)
+        let mut sorted: Vec<_> = configs.iter().collect();
+        sorted.sort_by(|a, b| b.pipeline_order.cmp(&a.pipeline_order));
+
         let mut results = Vec::with_capacity(configs.len());
-        for config in configs {
+        for config in sorted {
             results.push(self.start(config).await);
         }
         results
     }
 
-    /// Stop all components
+    /// Stop all components in pipeline order (ascending: upstream first)
     pub async fn stop_all(&self, configs: &[ComponentConfig]) -> Vec<CommandResult> {
+        // Sort by pipeline_order ascending (upstream first, then downstream)
+        let mut sorted: Vec<_> = configs.iter().collect();
+        sorted.sort_by(|a, b| a.pipeline_order.cmp(&b.pipeline_order));
+
         let mut results = Vec::with_capacity(configs.len());
-        for config in configs {
+        for config in sorted {
             results.push(self.stop(config).await);
         }
         results

@@ -6,10 +6,21 @@
 //! - Writer task: mpsc channel → File I/O (handles fsync)
 //! - Command task: ZMQ REP socket for control commands
 //!
-//! File naming: run{XXXX}_{YYYY}_{ExpName}.msgpack
+//! File naming: run{XXXX}_{YYYY}_{ExpName}.delila
 //!   - XXXX: Run number (4 digits, zero-padded)
 //!   - YYYY: File sequence within run (4 digits)
 //!   - ExpName: Experiment name from RunConfig
+//!
+//! File format (v2):
+//! - Header: Magic "DELILA02" + length (4 bytes) + MsgPack metadata
+//! - Data blocks: length (4 bytes LE) + MsgPack batch (repeated)
+//! - Footer: Fixed 64 bytes with magic "DLEND002", checksums, completion flag
+
+mod format;
+
+pub use format::{
+    ChecksumCalculator, FileFooter, FileFormatError, FileHeader, FOOTER_SIZE, FORMAT_VERSION,
+};
 
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
@@ -48,8 +59,6 @@ pub struct RecorderConfig {
     pub sort_margin_ratio: f64,
     /// Minimum events before flush (default: 10000)
     pub min_events_before_flush: usize,
-    /// fsync interval in batches (0 = only at file close, default: 0 for HDD)
-    pub fsync_interval_batches: usize,
 }
 
 impl Default for RecorderConfig {
@@ -63,7 +72,6 @@ impl Default for RecorderConfig {
             channel_capacity: 1000,
             sort_margin_ratio: 0.05, // 5% margin
             min_events_before_flush: 10000,
-            fsync_interval_batches: 0, // HDD-friendly default
         }
     }
 }
@@ -230,8 +238,13 @@ struct FileWriter {
     file_sequence: u32,
     current_file_size: u64,
     current_file_start: Option<Instant>,
-    batches_since_fsync: usize,
     stats: Arc<AtomicStats>,
+    /// Checksum calculator for current file
+    checksum: ChecksumCalculator,
+    /// Footer accumulating statistics for current file
+    footer: FileFooter,
+    /// Header size for current file (needed for data_bytes calculation)
+    header_size: u64,
 }
 
 impl FileWriter {
@@ -243,8 +256,10 @@ impl FileWriter {
             file_sequence: 0,
             current_file_size: 0,
             current_file_start: None,
-            batches_since_fsync: 0,
             stats,
+            checksum: ChecksumCalculator::new(),
+            footer: FileFooter::new(),
+            header_size: 0,
         }
     }
 
@@ -257,7 +272,7 @@ impl FileWriter {
         };
 
         let filename = format!(
-            "run{:04}_{:04}_{}.msgpack",
+            "run{:04}_{:04}_{}.delila",
             run_config.run_number, self.file_sequence, exp_name
         );
 
@@ -271,16 +286,39 @@ impl FileWriter {
 
         let path = self.generate_filename();
         let file = File::create(&path)?;
-        self.writer = Some(BufWriter::with_capacity(64 * 1024, file));
+        let mut writer = BufWriter::with_capacity(64 * 1024, file);
 
-        self.current_file_size = 0;
+        // Reset checksum and footer for new file
+        self.checksum.reset();
+        self.footer = FileFooter::new();
+
+        // Create and write header
+        let run_config = self.run_config.as_ref().expect("RunConfig not set");
+        let mut header = FileHeader::new(
+            run_config.run_number,
+            run_config.exp_name.clone(),
+            self.file_sequence,
+        );
+        header.comment = run_config.comment.clone();
+        header.sort_margin_ratio = self.config.sort_margin_ratio;
+        header.is_sorted = true;
+
+        let header_bytes = header
+            .to_bytes()
+            .map_err(|e| RecorderError::Io(std::io::Error::other(e.to_string())))?;
+        writer.write_all(&header_bytes)?;
+
+        self.header_size = header_bytes.len() as u64;
+        self.current_file_size = self.header_size;
         self.current_file_start = Some(Instant::now());
-        self.batches_since_fsync = 0;
+
+        self.writer = Some(writer);
 
         info!(
             path = %path.display(),
             sequence = self.file_sequence,
-            "Opened new data file"
+            header_size = self.header_size,
+            "Opened new data file with header"
         );
 
         Ok(())
@@ -288,6 +326,14 @@ impl FileWriter {
 
     fn close_file(&mut self) -> Result<(), RecorderError> {
         if let Some(mut writer) = self.writer.take() {
+            // Finalize and write footer
+            self.footer.data_checksum = self.checksum.finalize();
+            self.footer.data_bytes = self.checksum.bytes_processed();
+            self.footer.finalize();
+
+            let footer_bytes = self.footer.to_bytes();
+            writer.write_all(&footer_bytes)?;
+
             writer.flush()?;
             // Final fsync on close
             writer.get_ref().sync_data()?;
@@ -295,8 +341,10 @@ impl FileWriter {
             self.file_sequence += 1;
 
             info!(
-                size_mb = self.current_file_size as f64 / 1_000_000.0,
-                "Closed data file"
+                size_mb = (self.current_file_size + FOOTER_SIZE as u64) as f64 / 1_000_000.0,
+                events = self.footer.total_events,
+                checksum = format!("{:016x}", self.footer.data_checksum),
+                "Closed data file with footer"
             );
         }
         self.current_file_start = None;
@@ -304,7 +352,8 @@ impl FileWriter {
     }
 
     fn needs_rotation(&self) -> bool {
-        if self.current_file_size >= self.config.max_file_size {
+        // Account for footer size in rotation check
+        if self.current_file_size + FOOTER_SIZE as u64 >= self.config.max_file_size {
             return true;
         }
 
@@ -332,6 +381,12 @@ impl FileWriter {
             self.open_new_file()?;
         }
 
+        // Update timestamp range for footer
+        if let (Some(first), Some(last)) = (events.first(), events.last()) {
+            self.footer
+                .update_timestamp_range(first.timestamp_ns, last.timestamp_ns);
+        }
+
         // Create a batch for serialization
         let batch = MinimalEventDataBatch {
             source_id: 0, // Recorder-generated batch
@@ -351,25 +406,20 @@ impl FileWriter {
             writer.write_all(&len_bytes)?;
             writer.write_all(&data)?;
 
+            // Update checksum with data block (length prefix + data)
+            self.checksum.update(&len_bytes);
+            self.checksum.update(&data);
+
             let bytes_written = 4 + data.len() as u64;
             self.current_file_size += bytes_written;
+            self.footer.total_events += event_count;
+
             self.stats
                 .written_bytes
                 .fetch_add(bytes_written, Ordering::Relaxed);
             self.stats
                 .written_events
                 .fetch_add(event_count, Ordering::Relaxed);
-
-            // fsync if configured
-            self.batches_since_fsync += 1;
-            if self.config.fsync_interval_batches > 0
-                && self.batches_since_fsync >= self.config.fsync_interval_batches
-            {
-                writer.flush()?;
-                writer.get_ref().sync_data()?;
-                self.batches_since_fsync = 0;
-                debug!("fsync completed");
-            }
         }
 
         debug!(
@@ -460,7 +510,6 @@ impl Recorder {
             output_dir = %config.output_dir.display(),
             max_file_size_mb = config.max_file_size / 1_000_000,
             max_duration_sec = config.max_file_duration_secs,
-            fsync_interval = config.fsync_interval_batches,
             sort_margin = format!("{}%", config.sort_margin_ratio * 100.0),
             "Recorder created"
         );
@@ -809,7 +858,6 @@ mod tests {
         let config = RecorderConfig::default();
         assert_eq!(config.max_file_size, 1024 * 1024 * 1024);
         assert_eq!(config.max_file_duration_secs, 600);
-        assert_eq!(config.fsync_interval_batches, 0); // HDD-friendly default
         assert!((config.sort_margin_ratio - 0.05).abs() < f64::EPSILON);
     }
 
@@ -894,14 +942,14 @@ mod tests {
         let path = writer.generate_filename();
         assert_eq!(
             path.to_str().unwrap(),
-            "/data/run0042_0000_CRIB2026.msgpack"
+            "/data/run0042_0000_CRIB2026.delila"
         );
 
         writer.file_sequence = 5;
         let path = writer.generate_filename();
         assert_eq!(
             path.to_str().unwrap(),
-            "/data/run0042_0005_CRIB2026.msgpack"
+            "/data/run0042_0005_CRIB2026.delila"
         );
     }
 }

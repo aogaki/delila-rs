@@ -13,12 +13,6 @@ use tokio::sync::broadcast;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
-/// Parse fsync interval from string (supports "0" for HDD, "5" for SSD, etc.)
-fn parse_fsync_interval(s: &str) -> Result<usize, String> {
-    s.parse::<usize>()
-        .map_err(|_| format!("Invalid fsync interval: {}", s))
-}
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Initialize tracing (logging)
@@ -31,7 +25,6 @@ async fn main() -> anyhow::Result<()> {
     let mut config_path: Option<String> = None;
     let mut address: Option<String> = None;
     let mut output_dir: Option<String> = None;
-    let mut fsync_interval: Option<usize> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -63,25 +56,8 @@ async fn main() -> anyhow::Result<()> {
                     std::process::exit(1);
                 }
             }
-            "--fsync" | "-f" => {
-                if i + 1 < args.len() {
-                    match parse_fsync_interval(&args[i + 1]) {
-                        Ok(interval) => {
-                            fsync_interval = Some(interval);
-                            i += 2;
-                        }
-                        Err(e) => {
-                            eprintln!("Error: {}", e);
-                            std::process::exit(1);
-                        }
-                    }
-                } else {
-                    eprintln!("Error: --fsync requires an interval value");
-                    std::process::exit(1);
-                }
-            }
             "--help" | "-h" => {
-                println!("Recorder - writes event data to MsgPack files");
+                println!("Recorder - writes event data to DELILA files");
                 println!();
                 println!("Usage: recorder [OPTIONS]");
                 println!();
@@ -89,14 +65,9 @@ async fn main() -> anyhow::Result<()> {
                 println!("  --config, -c <FILE>   Load configuration from TOML file");
                 println!("  --address, -a <ADDR>  ZMQ address to connect to (default: tcp://localhost:5557)");
                 println!("  --output, -o <DIR>    Output directory (default: ./data)");
-                println!(
-                    "  --fsync, -f <N>       fsync every N batches (0=file close only, default: 0)"
-                );
-                println!("                        HDD: 0 (file close only)");
-                println!("                        SSD: 5 (every 5 batches)");
                 println!("  --help, -h            Show this help message");
                 println!();
-                println!("File naming: run{{XXXX}}_{{YYYY}}_{{ExpName}}.msgpack");
+                println!("File naming: run{{XXXX}}_{{YYYY}}_{{ExpName}}.delila");
                 println!("  XXXX: Run number (4 digits)");
                 println!("  YYYY: File sequence (4 digits)");
                 println!("  ExpName: From Configure command");
@@ -142,18 +113,14 @@ async fn main() -> anyhow::Result<()> {
 
         info!(config_file = %path, "Loaded configuration");
 
-        let mut config = RecorderConfig {
+        RecorderConfig {
             subscribe_address: address.unwrap_or(subscribe_addr),
             command_address: command_addr,
             output_dir: PathBuf::from(output_dir.unwrap_or(out_dir)),
             max_file_size: max_size_mb * 1024 * 1024,
             max_file_duration_secs: max_duration_sec,
             ..Default::default()
-        };
-        if let Some(interval) = fsync_interval {
-            config.fsync_interval_batches = interval;
         }
-        config
     } else {
         // Use defaults with CLI overrides
         RecorderConfig {
@@ -162,7 +129,6 @@ async fn main() -> anyhow::Result<()> {
             output_dir: PathBuf::from(output_dir.unwrap_or_else(|| "./data".to_string())),
             max_file_size: 1024 * 1024 * 1024, // 1GB
             max_file_duration_secs: 600,       // 10 minutes
-            fsync_interval_batches: fsync_interval.unwrap_or(0),
             ..Default::default()
         }
     };
@@ -200,15 +166,6 @@ async fn main() -> anyhow::Result<()> {
     println!(
         "  Sort margin:    {}%",
         recorder_config.sort_margin_ratio * 100.0
-    );
-    println!(
-        "  fsync interval: {} batches {}",
-        recorder_config.fsync_interval_batches,
-        if recorder_config.fsync_interval_batches == 0 {
-            "(file close only)"
-        } else {
-            ""
-        }
     );
     println!();
     println!("  Press Ctrl+C to stop.");

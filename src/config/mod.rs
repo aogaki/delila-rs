@@ -121,6 +121,14 @@ pub struct SourceNetworkConfig {
     /// ADC time step in nanoseconds (default: 2.0 for 500 MHz)
     #[serde(default)]
     pub time_step_ns: Option<f64>,
+
+    /// Pipeline order for Start/Stop sequencing (1 = upstream, default: 1)
+    #[serde(default = "default_source_pipeline_order")]
+    pub pipeline_order: u32,
+}
+
+fn default_source_pipeline_order() -> u32 {
+    1 // Sources are upstream
 }
 
 impl SourceNetworkConfig {
@@ -150,13 +158,13 @@ pub struct MergerNetworkConfig {
     #[serde(default)]
     pub command: Option<String>,
 
-    /// Internal channel capacity
-    #[serde(default = "default_channel_capacity")]
-    pub channel_capacity: usize,
+    /// Pipeline order for Start/Stop sequencing (default: 2)
+    #[serde(default = "default_merger_pipeline_order")]
+    pub pipeline_order: u32,
 }
 
-fn default_channel_capacity() -> usize {
-    1000
+fn default_merger_pipeline_order() -> u32 {
+    2 // Merger is in the middle
 }
 
 /// Recorder network configuration
@@ -180,6 +188,10 @@ pub struct RecorderNetworkConfig {
     /// Maximum file duration in seconds (default: 600 = 10 minutes)
     #[serde(default = "default_max_file_duration_sec")]
     pub max_file_duration_sec: u64,
+
+    /// Pipeline order for Start/Stop sequencing (default: 3)
+    #[serde(default = "default_sink_pipeline_order")]
+    pub pipeline_order: u32,
 }
 
 fn default_output_dir() -> String {
@@ -194,15 +206,27 @@ fn default_max_file_duration_sec() -> u64 {
     600 // 10 minutes
 }
 
+fn default_sink_pipeline_order() -> u32 {
+    3 // Sinks (Recorder/Monitor) are downstream
+}
+
 /// Monitor network configuration
 #[derive(Debug, Clone, Deserialize)]
 pub struct MonitorNetworkConfig {
     /// ZMQ address to subscribe to
     pub subscribe: String,
 
+    /// ZMQ bind address for commands (e.g., "tcp://*:5590")
+    #[serde(default)]
+    pub command: Option<String>,
+
     /// HTTP server port for web UI
     #[serde(default = "default_http_port")]
     pub http_port: u16,
+
+    /// Pipeline order for Start/Stop sequencing (default: 3)
+    #[serde(default = "default_sink_pipeline_order")]
+    pub pipeline_order: u32,
 }
 
 fn default_http_port() -> u16 {
@@ -378,7 +402,6 @@ bind = "tcp://*:5556"
 [network.merger]
 subscribe = ["tcp://localhost:5555", "tcp://localhost:5556"]
 publish = "tcp://*:5557"
-channel_capacity = 2000
 
 [network.recorder]
 subscribe = "tcp://localhost:5557"
@@ -407,7 +430,6 @@ batch_interval_ms = 50
         let merger = config.network.merger.as_ref().unwrap();
         assert_eq!(merger.subscribe.len(), 2);
         assert_eq!(merger.publish, "tcp://*:5557");
-        assert_eq!(merger.channel_capacity, 2000);
 
         // Recorder
         let recorder = config.network.recorder.as_ref().unwrap();

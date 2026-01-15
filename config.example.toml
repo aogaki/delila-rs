@@ -23,6 +23,7 @@ id = 0
 name = "emulator-0"
 bind = "tcp://*:5555"
 command = "tcp://*:5560"
+pipeline_order = 1        # Upstream (data source), Start: last, Stop: first
 
 # Example: Real digitizer source
 [[network.sources]]
@@ -33,24 +34,28 @@ command = "tcp://*:5561"
 digitizer_url = "dig2://172.18.4.56"  # CAEN dig2 protocol URL
 module_id = 0                         # Event tagging (default: same as id)
 time_step_ns = 2.0                    # ADC time step: 500MHz=2.0, 250MHz=4.0
+pipeline_order = 1                    # Upstream (data source)
 
 # Merger: receives from all sources, publishes merged stream
 [network.merger]
 subscribe = ["tcp://localhost:5555", "tcp://localhost:5556"]
 publish = "tcp://*:5557"
 command = "tcp://*:5570"  # Command port for Start/Stop control
-channel_capacity = 1000   # internal buffer size
+pipeline_order = 2        # Middle layer
 
 # Recorder: writes data to disk
 [network.recorder]
 subscribe = "tcp://localhost:5557"
 command = "tcp://*:5580"  # Command port for Start/Stop control
 output_dir = "./data"
+pipeline_order = 3        # Downstream (data sink), Start: first, Stop: last
 
 # Monitor: web interface for live monitoring
 [network.monitor]
 subscribe = "tcp://localhost:5557"
+command = "tcp://*:5590"  # Command port for Start/Stop control
 http_port = 8080
+pipeline_order = 3        # Downstream (data sink)
 
 # =============================================================================
 # Control System

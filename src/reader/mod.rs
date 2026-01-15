@@ -475,6 +475,10 @@ impl Reader {
                                 }
                                 DataType::Start => {
                                     info!("Received START signal from digitizer");
+                                    // Reset sequence number on Start
+                                    sequence_number = 0;
+                                    heartbeat_counter = 0;
+                                    info!("Sequence number reset to 0 on Start");
                                 }
                                 DataType::Stop => {
                                     info!("Received STOP signal from digitizer");

@@ -34,8 +34,6 @@ pub struct MergerConfig {
     pub pub_address: String,
     /// ZMQ bind address for commands (e.g., "tcp://*:5570")
     pub command_address: String,
-    /// Internal channel capacity (bounded buffer)
-    pub channel_capacity: usize,
 }
 
 impl Default for MergerConfig {
@@ -44,7 +42,6 @@ impl Default for MergerConfig {
             sub_addresses: vec!["tcp://localhost:5555".to_string()],
             pub_address: "tcp://*:5556".to_string(),
             command_address: "tcp://*:5570".to_string(),
-            channel_capacity: 10000,
         }
     }
 }
@@ -153,6 +150,13 @@ impl AtomicStats {
             self.eos_received.load(Ordering::Relaxed),
         )
     }
+
+    fn clear(&self) {
+        self.received_batches.store(0, Ordering::Relaxed);
+        self.sent_batches.store(0, Ordering::Relaxed);
+        self.dropped_batches.store(0, Ordering::Relaxed);
+        self.eos_received.store(0, Ordering::Relaxed);
+    }
 }
 
 /// Merger statistics (for reporting)
@@ -225,8 +229,15 @@ impl CommandHandlerExt for MergerCommandExt {
         "Merger"
     }
 
+    fn on_start(&mut self) -> Result<(), String> {
+        self.ext_state.clear();
+        self.ext_state.atomic_stats.clear();
+        Ok(())
+    }
+
     fn on_reset(&mut self) -> Result<(), String> {
         self.ext_state.clear();
+        self.ext_state.atomic_stats.clear();
         Ok(())
     }
 
@@ -485,7 +496,6 @@ mod tests {
     fn default_config() {
         let config = MergerConfig::default();
         assert_eq!(config.pub_address, "tcp://*:5556");
-        assert_eq!(config.channel_capacity, 10000);
         assert_eq!(config.command_address, "tcp://*:5570");
     }
 
@@ -495,10 +505,8 @@ mod tests {
             sub_addresses: vec!["tcp://localhost:6000".to_string()],
             pub_address: "tcp://*:6001".to_string(),
             command_address: "tcp://*:6002".to_string(),
-            channel_capacity: 5000,
         };
         assert_eq!(config.sub_addresses.len(), 1);
-        assert_eq!(config.channel_capacity, 5000);
     }
 
     #[test]

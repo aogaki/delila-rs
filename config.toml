@@ -30,7 +30,6 @@ time_step_ns = 2.0
 subscribe = ["tcp://localhost:5555", "tcp://localhost:5556"]
 publish = "tcp://*:5557"
 command = "tcp://*:5570"
-channel_capacity = 1000
 
 # Recorder: writes data to disk
 [network.recorder]

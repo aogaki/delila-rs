@@ -458,7 +458,70 @@ struct JobStatus {
 }
 ```
 
-## 8. Configuration Example
+## 8. Pipeline Ordering for Start/Stop
+
+### Problem
+
+Data pipelines require careful ordering during Start and Stop:
+- **Start**: Downstream components (Recorder, Monitor) must be ready before upstream (Sources) begin sending data
+- **Stop**: Upstream components (Sources) must stop first to ensure all data flows through before downstream closes
+
+### Solution: `pipeline_order` Field
+
+Each component has a `pipeline_order` field indicating its position in the data flow:
+
+| pipeline_order | Component Type | Position |
+|----------------|---------------|----------|
+| 1 | Source (Reader/Emulator) | Upstream |
+| 2 | Merger | Middle |
+| 3 | Recorder, Monitor | Downstream |
+
+### Ordering Behavior
+
+```
+Start Order: DESCENDING (downstream first)
+  3 → 2 → 1
+  Recorder → Merger → Sources
+
+Stop Order: ASCENDING (upstream first)
+  1 → 2 → 3
+  Sources → Merger → Recorder
+```
+
+### Implementation
+
+```rust
+/// Start all components in pipeline order (descending: downstream first)
+pub async fn start_all(&self, configs: &[ComponentConfig]) -> Vec<CommandResult> {
+    let mut sorted: Vec<_> = configs.iter().collect();
+    sorted.sort_by(|a, b| b.pipeline_order.cmp(&a.pipeline_order));
+    // Send Start command to each in order
+}
+
+/// Stop all components in pipeline order (ascending: upstream first)
+pub async fn stop_all(&self, configs: &[ComponentConfig]) -> Vec<CommandResult> {
+    let mut sorted: Vec<_> = configs.iter().collect();
+    sorted.sort_by(|a, b| a.pipeline_order.cmp(&b.pipeline_order));
+    // Send Stop command to each in order
+}
+```
+
+### Why This Matters
+
+Without proper ordering:
+- **Wrong Start order**: Recorder might miss initial data
+- **Wrong Stop order**: Data in transit when upstream stops may be lost
+
+Example of data loss with wrong Stop order:
+```
+❌ Wrong: Stop Recorder first
+   Source sends data → Merger forwards → Recorder already stopped = DATA LOST
+
+✅ Correct: Stop Source first
+   Source stops → Merger flushes → Recorder receives all → Recorder stops
+```
+
+## 9. Configuration Example
 
 ### TOML Configuration
 
@@ -471,56 +534,63 @@ start_timeout_ms = 5000
 stop_timeout_ms = 30000
 command_retry_count = 3
 
-[[components]]
-component_id = "emulator_daq01_0"
-component_type = "emulator"
-data_address = "tcp://daq01:5555"
-status_address = "tcp://daq01:5556"
-command_address = "tcp://daq01:5557"
-start_order = 1
+[[network.sources]]
+id = 0
+name = "emulator-0"
+bind = "tcp://*:5555"
+command = "tcp://*:5560"
+pipeline_order = 1        # Upstream (data source)
 
-[[components]]
-component_id = "emulator_daq02_0"
-component_type = "emulator"
-data_address = "tcp://daq02:5555"
-status_address = "tcp://daq02:5556"
-command_address = "tcp://daq02:5557"
-start_order = 1
+[[network.sources]]
+id = 1
+name = "emulator-1"
+bind = "tcp://*:5556"
+command = "tcp://*:5561"
+pipeline_order = 1        # Upstream (data source)
 
-[[components]]
-component_id = "merger_merger01_0"
-component_type = "merger"
-data_address = "tcp://merger01:5560"
-status_address = "tcp://merger01:5561"
-command_address = "tcp://merger01:5562"
-start_order = 2
+[network.merger]
+subscribe = ["tcp://localhost:5555", "tcp://localhost:5556"]
+publish = "tcp://*:5557"
+command = "tcp://*:5570"
+pipeline_order = 2        # Middle layer
 
-[[components]]
-component_id = "recorder_storage01_0"
-component_type = "recorder"
-data_address = ""  # No output
-status_address = "tcp://storage01:5566"
-command_address = "tcp://storage01:5567"
-start_order = 3
+[network.recorder]
+subscribe = "tcp://localhost:5557"
+command = "tcp://*:5580"
+output_dir = "./data"
+pipeline_order = 3        # Downstream (data sink)
+
+[network.monitor]
+subscribe = "tcp://localhost:5557"
+command = "tcp://*:5590"
+http_port = 8080
+pipeline_order = 3        # Downstream (data sink)
 ```
 
-## 9. Typical Run Sequence
+## 10. Typical Run Sequence
 
 ```
-1. Operator starts, loads configuration
+1. Operator starts, loads configuration (including pipeline_order)
 2. Operator registers all components
 3. User requests "Start Run 123"
 4. Operator: Configure all → wait for Configured
 5. Operator: Arm all → wait for Armed (SYNC POINT)
-6. Operator: Start all → wait for Running
+6. Operator: Start all (descending pipeline_order: downstream first)
+   - Recorder starts (order 3)
+   - Monitor starts (order 3)
+   - Merger starts (order 2)
+   - Sources start (order 1)
 7. Components stream data with heartbeats
 8. User requests "Stop Run"
-9. Operator: Stop all (graceful) → wait for Configured
-10. Components send EndOfStream, flush buffers
-11. Run complete
+9. Operator: Stop all (ascending pipeline_order: upstream first)
+   - Sources stop (order 1) → send EndOfStream
+   - Merger stops (order 2) → forwards EndOfStream
+   - Recorder stops (order 3) → flushes buffers
+   - Monitor stops (order 3)
+10. All data written, run complete
 ```
 
-## 10. Summary
+## 11. Summary
 
 | Aspect | Design Choice | Rationale |
 |--------|---------------|-----------|
@@ -530,6 +600,7 @@ start_order = 3
 | Command Channel | REQ/REP | Synchronous control with feedback |
 | Heartbeat | Sender + Monitor | Detect failures without polling |
 | Start Sync | Two-phase commit | Hardware synchronization |
+| Pipeline Ordering | `pipeline_order` field | Ensures data integrity at Start/Stop |
 | Error Recovery | Reset to Idle | Clean slate approach |
 | Component ID | type_host_index | Unique, descriptive naming |
 
@@ -539,3 +610,4 @@ This architecture provides:
 - **Scalability**: PUB/SUB handles many subscribers
 - **Recoverability**: Reset clears errors cleanly
 - **Observability**: Status channel provides real-time metrics
+- **Data Integrity**: Pipeline ordering prevents data loss during Start/Stop

@@ -173,6 +173,10 @@ impl ApiResponse {
 pub struct ComponentConfig {
     pub name: String,
     pub address: String,
+    /// Pipeline order: position in data flow (1 = upstream/source, higher = downstream)
+    /// - Start: descending order (downstream first, then upstream)
+    /// - Stop: ascending order (upstream first, then downstream)
+    pub pipeline_order: u32,
 }
 
 /// Operator configuration with timeouts
@@ -401,9 +405,11 @@ mod tests {
         let config = ComponentConfig {
             name: "Merger".to_string(),
             address: "tcp://localhost:5570".to_string(),
+            pipeline_order: 2,
         };
         assert_eq!(config.name, "Merger");
         assert!(config.address.contains("5570"));
+        assert_eq!(config.pipeline_order, 2);
     }
 
     #[test]

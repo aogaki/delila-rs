@@ -276,6 +276,13 @@ impl Emulator {
                     _ = state_rx.changed() => {
                         let current = *state_rx.borrow();
                         info!(state = %current, "State changed");
+                        // Reset sequence number on Start
+                        if current == ComponentState::Running {
+                            self.sequence_number = 0;
+                            self.timestamp_ns = 0.0;
+                            self.heartbeat_counter = 0;
+                            info!("Sequence number reset to 0 on Start");
+                        }
                     }
 
                     _ = ticker.tick(), if *state_rx.borrow() == ComponentState::Running => {
@@ -302,6 +309,13 @@ impl Emulator {
                     _ = state_rx.changed() => {
                         let current = *state_rx.borrow();
                         info!(state = %current, "State changed");
+                        // Reset sequence number on Start
+                        if current == ComponentState::Running {
+                            self.sequence_number = 0;
+                            self.timestamp_ns = 0.0;
+                            self.heartbeat_counter = 0;
+                            info!("Sequence number reset to 0 on Start");
+                        }
                         continue;
                     }
 

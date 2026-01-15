@@ -110,7 +110,6 @@ async fn main() -> Result<()> {
             command_address: merger_net
                 .command
                 .unwrap_or_else(|| "tcp://*:5570".to_string()),
-            channel_capacity: merger_net.channel_capacity,
         }
     } else {
         // Use defaults with CLI overrides
@@ -122,7 +121,6 @@ async fn main() -> Result<()> {
             sub_addresses,
             pub_address: pub_address.unwrap_or_else(|| "tcp://*:5556".to_string()),
             command_address: "tcp://*:5570".to_string(),
-            channel_capacity: 1000,
         }
     };
 
