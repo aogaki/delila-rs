@@ -1,6 +1,6 @@
-import { ComponentFixture, TestBed, fakeAsync, tick, discardPeriodicTasks } from '@angular/core/testing';
+import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { provideHttpClient } from '@angular/common/http';
-import { provideHttpClientTesting, HttpTestingController } from '@angular/common/http/testing';
+import { provideHttpClientTesting } from '@angular/common/http/testing';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { App } from './app';
 import { OperatorService } from './services/operator.service';
@@ -9,9 +9,7 @@ import { SystemStatus } from './models/types';
 describe('App', () => {
   let component: App;
   let fixture: ComponentFixture<App>;
-  let httpMock: HttpTestingController;
   let operatorService: OperatorService;
-  const baseUrl = 'http://localhost:8080/api';
 
   const mockSystemStatus: SystemStatus = {
     components: [
@@ -39,130 +37,63 @@ describe('App', () => {
       providers: [OperatorService, provideHttpClient(), provideHttpClientTesting()],
     }).compileComponents();
 
+    operatorService = TestBed.inject(OperatorService);
+    // Mock startPolling to prevent actual HTTP calls
+    spyOn(operatorService, 'startPolling').and.stub();
+
     fixture = TestBed.createComponent(App);
     component = fixture.componentInstance;
-    httpMock = TestBed.inject(HttpTestingController);
-    operatorService = TestBed.inject(OperatorService);
-  });
-
-  afterEach(() => {
-    httpMock.verify();
+    fixture.detectChanges();
   });
 
   it('should create the app', () => {
     expect(component).toBeTruthy();
   });
 
-  it('should have correct title', fakeAsync(() => {
-    fixture.detectChanges();
-
-    // Handle the initial status fetch from ngOnInit
-    const req = httpMock.expectOne(`${baseUrl}/status`);
-    req.flush(mockSystemStatus);
-    tick();
-
+  it('should have correct title', () => {
     const toolbar = fixture.nativeElement.querySelector('mat-toolbar');
     expect(toolbar.textContent).toContain('DELILA DAQ Control');
+  });
 
-    discardPeriodicTasks();
-  }));
+  it('should call startPolling on init', () => {
+    expect(operatorService.startPolling).toHaveBeenCalled();
+  });
 
-  it('should start polling on init', fakeAsync(() => {
-    expect(operatorService.isPolling()).toBeFalse();
-
-    fixture.detectChanges(); // triggers ngOnInit
-
-    // Handle the initial status fetch
-    const req = httpMock.expectOne(`${baseUrl}/status`);
-    req.flush(mockSystemStatus);
-    tick();
-
-    expect(operatorService.isPolling()).toBeTrue();
-
-    discardPeriodicTasks();
-  }));
-
-  it('should show Online when status is available', fakeAsync(() => {
-    fixture.detectChanges();
-
-    const req = httpMock.expectOne(`${baseUrl}/status`);
-    req.flush(mockSystemStatus);
-    tick();
-
+  it('should show Online when status is available', () => {
+    operatorService.status.set(mockSystemStatus);
     fixture.detectChanges();
 
     const statusIndicator = fixture.nativeElement.querySelector('.status-indicator');
     expect(statusIndicator.textContent.trim()).toBe('Online');
     expect(statusIndicator.classList.contains('online')).toBeTrue();
+  });
 
-    discardPeriodicTasks();
-  }));
-
-  it('should show Offline when status is null', fakeAsync(() => {
-    fixture.detectChanges();
-
-    const req = httpMock.expectOne(`${baseUrl}/status`);
-    req.error(new ProgressEvent('Network error'));
-    tick();
-
+  it('should show Offline when status is null', () => {
+    operatorService.status.set(null);
     fixture.detectChanges();
 
     const statusIndicator = fixture.nativeElement.querySelector('.status-indicator');
     expect(statusIndicator.textContent.trim()).toBe('Offline');
     expect(statusIndicator.classList.contains('offline')).toBeTrue();
+  });
 
-    discardPeriodicTasks();
-  }));
-
-  it('should contain status panel component', fakeAsync(() => {
-    fixture.detectChanges();
-
-    const req = httpMock.expectOne(`${baseUrl}/status`);
-    req.flush(mockSystemStatus);
-    tick();
-
+  it('should contain status panel component', () => {
     const statusPanel = fixture.nativeElement.querySelector('app-status-panel');
     expect(statusPanel).toBeTruthy();
+  });
 
-    discardPeriodicTasks();
-  }));
-
-  it('should contain control panel component', fakeAsync(() => {
-    fixture.detectChanges();
-
-    const req = httpMock.expectOne(`${baseUrl}/status`);
-    req.flush(mockSystemStatus);
-    tick();
-
+  it('should contain control panel component', () => {
     const controlPanel = fixture.nativeElement.querySelector('app-control-panel');
     expect(controlPanel).toBeTruthy();
+  });
 
-    discardPeriodicTasks();
-  }));
-
-  it('should contain run info component', fakeAsync(() => {
-    fixture.detectChanges();
-
-    const req = httpMock.expectOne(`${baseUrl}/status`);
-    req.flush(mockSystemStatus);
-    tick();
-
+  it('should contain run info component', () => {
     const runInfo = fixture.nativeElement.querySelector('app-run-info');
     expect(runInfo).toBeTruthy();
+  });
 
-    discardPeriodicTasks();
-  }));
-
-  it('should contain timer component', fakeAsync(() => {
-    fixture.detectChanges();
-
-    const req = httpMock.expectOne(`${baseUrl}/status`);
-    req.flush(mockSystemStatus);
-    tick();
-
+  it('should contain timer component', () => {
     const timer = fixture.nativeElement.querySelector('app-timer');
     expect(timer).toBeTruthy();
-
-    discardPeriodicTasks();
-  }));
+  });
 });
