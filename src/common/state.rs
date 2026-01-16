@@ -377,8 +377,12 @@ mod tests {
         let (state_tx, _state_rx) = watch::channel(ComponentState::Idle);
 
         // Cannot start from Idle
-        let resp =
-            handle_command_simple(&mut state, &state_tx, Command::Start { run_number: 1 }, "Test");
+        let resp = handle_command_simple(
+            &mut state,
+            &state_tx,
+            Command::Start { run_number: 1 },
+            "Test",
+        );
         assert!(!resp.success);
         assert_eq!(state.state, ComponentState::Idle);
     }

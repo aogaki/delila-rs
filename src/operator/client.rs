@@ -120,7 +120,8 @@ impl ComponentClient {
 
     /// Send start command to a component with run number
     pub async fn start(&self, config: &ComponentConfig, run_number: u32) -> CommandResult {
-        self.execute_command(config, Command::Start { run_number }).await
+        self.execute_command(config, Command::Start { run_number })
+            .await
     }
 
     /// Send stop command to a component
@@ -188,7 +189,11 @@ impl ComponentClient {
     }
 
     /// Start all components in pipeline order (descending: downstream first)
-    pub async fn start_all(&self, configs: &[ComponentConfig], run_number: u32) -> Vec<CommandResult> {
+    pub async fn start_all(
+        &self,
+        configs: &[ComponentConfig],
+        run_number: u32,
+    ) -> Vec<CommandResult> {
         // Sort by pipeline_order descending (downstream first, then upstream)
         let mut sorted: Vec<_> = configs.iter().collect();
         sorted.sort_by(|a, b| b.pipeline_order.cmp(&a.pipeline_order));

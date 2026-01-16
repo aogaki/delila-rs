@@ -283,12 +283,9 @@ async fn start(
     }
 
     // Now start with the run number
-    let results = state
-        .client
-        .start_all(&state.components, run_number)
-        .await;
-    let response =
-        ApiResponse::success(format!("Start command sent for run {}", run_number)).with_results(results);
+    let results = state.client.start_all(&state.components, run_number).await;
+    let response = ApiResponse::success(format!("Start command sent for run {}", run_number))
+        .with_results(results);
 
     let status = if response.success {
         StatusCode::OK

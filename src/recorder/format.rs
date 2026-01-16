@@ -534,7 +534,9 @@ impl<R: std::io::Read + std::io::Seek> DataFileReader<R> {
                         result.errors.push("Checksum mismatch".to_string());
                     }
                     Err(e) => {
-                        result.errors.push(format!("Checksum verification error: {}", e));
+                        result
+                            .errors
+                            .push(format!("Checksum verification error: {}", e));
                     }
                 }
             }
@@ -549,7 +551,11 @@ impl<R: std::io::Read + std::io::Seek> DataFileReader<R> {
         let mut events = 0u64;
 
         // Position after header
-        if self.reader.seek(std::io::SeekFrom::Start(self.header_size as u64)).is_err() {
+        if self
+            .reader
+            .seek(std::io::SeekFrom::Start(self.header_size as u64))
+            .is_err()
+        {
             return (0, 0);
         }
 
@@ -560,6 +566,7 @@ impl<R: std::io::Read + std::io::Seek> DataFileReader<R> {
             self.file_size
         };
 
+        #[allow(clippy::while_let_loop)]
         loop {
             let pos = match self.reader.stream_position() {
                 Ok(p) => p,
@@ -616,7 +623,8 @@ impl<R: std::io::Read + std::io::Seek> DataFileReader<R> {
         let footer = self.footer.as_ref().ok_or(FileFormatError::TooShort)?;
 
         // Position after header
-        self.reader.seek(std::io::SeekFrom::Start(self.header_size as u64))?;
+        self.reader
+            .seek(std::io::SeekFrom::Start(self.header_size as u64))?;
 
         let mut calc = ChecksumCalculator::new();
 
@@ -658,7 +666,9 @@ impl<R: std::io::Read + std::io::Seek> DataFileReader<R> {
     /// Iterator over data blocks (for recovery)
     pub fn data_blocks(&mut self) -> DataBlockIterator<'_, R> {
         // Position after header
-        let _ = self.reader.seek(std::io::SeekFrom::Start(self.header_size as u64));
+        let _ = self
+            .reader
+            .seek(std::io::SeekFrom::Start(self.header_size as u64));
 
         let data_end = if self.file_size >= FOOTER_SIZE as u64 {
             self.file_size - FOOTER_SIZE as u64
@@ -751,7 +761,9 @@ mod tests {
         let mut header = FileHeader::new(42, "CRIB2026".to_string(), 5);
         header.comment = "Test run".to_string();
         header.source_ids = vec![0, 1, 2];
-        header.metadata.insert("operator".to_string(), "Aogaki".to_string());
+        header
+            .metadata
+            .insert("operator".to_string(), "Aogaki".to_string());
 
         let bytes = header.to_bytes().unwrap();
         let restored = FileHeader::from_bytes(&bytes).unwrap();
@@ -762,7 +774,10 @@ mod tests {
         assert_eq!(restored.file_sequence, 5);
         assert_eq!(restored.comment, "Test run");
         assert_eq!(restored.source_ids, vec![0, 1, 2]);
-        assert_eq!(restored.metadata.get("operator"), Some(&"Aogaki".to_string()));
+        assert_eq!(
+            restored.metadata.get("operator"),
+            Some(&"Aogaki".to_string())
+        );
     }
 
     #[test]

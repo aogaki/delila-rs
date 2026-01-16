@@ -21,8 +21,8 @@
 mod format;
 
 pub use format::{
-    ChecksumCalculator, DataBlockIterator, DataFileReader, FileFooter, FileFormatError,
-    FileHeader, FileValidationResult, FOOTER_SIZE, FORMAT_VERSION,
+    ChecksumCalculator, DataBlockIterator, DataFileReader, FileFooter, FileFormatError, FileHeader,
+    FileValidationResult, FOOTER_SIZE, FORMAT_VERSION,
 };
 
 use std::fs::{self, File};
@@ -789,16 +789,10 @@ mod tests {
         });
 
         let path = writer.generate_filename();
-        assert_eq!(
-            path.to_str().unwrap(),
-            "/data/run0042_0000_CRIB2026.delila"
-        );
+        assert_eq!(path.to_str().unwrap(), "/data/run0042_0000_CRIB2026.delila");
 
         writer.file_sequence = 5;
         let path = writer.generate_filename();
-        assert_eq!(
-            path.to_str().unwrap(),
-            "/data/run0042_0005_CRIB2026.delila"
-        );
+        assert_eq!(path.to_str().unwrap(), "/data/run0042_0005_CRIB2026.delila");
     }
 }

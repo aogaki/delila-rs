@@ -11,9 +11,7 @@ use std::io::{BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
-use delila_rs::recorder::{
-    ChecksumCalculator, DataFileReader, FileFooter, FileValidationResult,
-};
+use delila_rs::recorder::{ChecksumCalculator, DataFileReader, FileFooter, FileValidationResult};
 
 #[derive(Parser)]
 #[command(name = "delila-recover")]
@@ -108,10 +106,7 @@ fn validate_file(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
         println!("\n\x1b[32m✓ File is valid\x1b[0m");
     } else if result.needs_recovery() {
         println!("\n\x1b[33m⚠ File needs recovery\x1b[0m");
-        println!(
-            "  Run: delila-recover recover \"{}\"",
-            path.display()
-        );
+        println!("  Run: delila-recover recover \"{}\"", path.display());
     } else {
         println!("\n\x1b[31m✗ File is corrupted\x1b[0m");
     }
@@ -256,7 +251,10 @@ fn recover_file(
                 blocks_written += 1;
             }
             Err(e) => {
-                println!("  \x1b[33mStopped at block {}: {}\x1b[0m", blocks_written, e);
+                println!(
+                    "  \x1b[33mStopped at block {}: {}\x1b[0m",
+                    blocks_written, e
+                );
                 break;
             }
         }

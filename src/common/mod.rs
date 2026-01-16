@@ -593,14 +593,7 @@ mod tests {
     fn batch_roundtrip() {
         let mut batch = EventDataBatch::new(42, 1);
         batch.push(EventData::new(0, 0, 100, 80, 1000.0, 0));
-        batch.push(EventData::new(
-            0,
-            1,
-            200,
-            160,
-            2000.0,
-            flags::FLAG_PILEUP,
-        ));
+        batch.push(EventData::new(0, 1, 200, 160, 2000.0, flags::FLAG_PILEUP));
 
         let bytes = batch.to_msgpack().unwrap();
         let decoded = EventDataBatch::from_msgpack(&bytes).unwrap();
