@@ -3,7 +3,7 @@
 //! Usage:
 //!   cargo run --bin controller -- configure tcp://localhost:5560 --run 123
 //!   cargo run --bin controller -- arm tcp://localhost:5560
-//!   cargo run --bin controller -- start tcp://localhost:5560
+//!   cargo run --bin controller -- start tcp://localhost:5560 --run 123
 //!   cargo run --bin controller -- stop tcp://localhost:5560
 //!   cargo run --bin controller -- reset tcp://localhost:5560
 //!   cargo run --bin controller -- status tcp://localhost:5560
@@ -28,11 +28,14 @@ fn print_usage() {
     println!("  --run <number>     Run number (required)");
     println!("  --comment <text>   Optional comment");
     println!();
+    println!("Options for 'start':");
+    println!("  --run <number>     Run number (required)");
+    println!();
     println!("Examples:");
     println!("  controller configure tcp://localhost:5560 --run 123");
     println!("  controller configure tcp://localhost:5560 --run 123 --comment \"Test run\"");
     println!("  controller arm tcp://localhost:5560");
-    println!("  controller start tcp://localhost:5560");
+    println!("  controller start tcp://localhost:5560 --run 123");
     println!("  controller stop tcp://localhost:5560");
     println!("  controller reset tcp://localhost:5560");
     println!("  controller status tcp://localhost:5570");
@@ -102,7 +105,39 @@ fn parse_args() -> Option<(Command, String)> {
             })
         }
         "arm" => Command::Arm,
-        "start" => Command::Start,
+        "start" => {
+            // Parse --run <number> (required)
+            let mut run_number: Option<u32> = None;
+            let mut i = 3;
+
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--run" => {
+                        if i + 1 < args.len() {
+                            run_number = args[i + 1].parse().ok();
+                            i += 2;
+                        } else {
+                            eprintln!("Error: --run requires a number");
+                            std::process::exit(1);
+                        }
+                    }
+                    _ => {
+                        eprintln!("Unknown option: {}", args[i]);
+                        std::process::exit(1);
+                    }
+                }
+            }
+
+            let run_number = match run_number {
+                Some(n) => n,
+                None => {
+                    eprintln!("Error: start requires --run <number>");
+                    std::process::exit(1);
+                }
+            };
+
+            Command::Start { run_number }
+        }
         "stop" => Command::Stop,
         "reset" => Command::Reset,
         "status" => Command::GetStatus,

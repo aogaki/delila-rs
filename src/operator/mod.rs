@@ -118,6 +118,13 @@ impl From<ConfigureRequest> for RunConfig {
     }
 }
 
+/// Request body for start command
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct StartRequest {
+    /// Run number to use for this start (allows changing run number without re-configure)
+    pub run_number: u32,
+}
+
 /// Generic API response
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ApiResponse {

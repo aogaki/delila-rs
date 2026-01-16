@@ -5,6 +5,11 @@
 CONFIG_FILE="${1:-config.toml}"
 BINARY_DIR="./target/release"
 
+# Log level configuration
+# For specific component: RUST_LOG=info,delila_rs::merger=debug ./scripts/start_daq.sh
+export RUST_LOG="${RUST_LOG:-info}"
+#export RUST_LOG="${RUST_LOG:-debug}"
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -66,9 +71,14 @@ echo "  Starting merger..."
 $BINARY_DIR/merger --config "$CONFIG_FILE" &
 sleep 0.3
 
-# Start data sink
-echo "  Starting data_sink..."
-$BINARY_DIR/data_sink --config "$CONFIG_FILE" &
+# Start recorder
+echo "  Starting recorder..."
+$BINARY_DIR/recorder --config "$CONFIG_FILE" &
+sleep 0.3
+
+# Start monitor
+echo "  Starting monitor..."
+$BINARY_DIR/monitor --config "$CONFIG_FILE" &
 sleep 0.3
 
 # Start operator (Web UI)
@@ -89,7 +99,8 @@ for id in $SOURCE_IDS; do
     fi
 done
 echo "  Merger:     tcp://localhost:5570"
-echo "  DataSink:   tcp://localhost:5580"
+echo "  Recorder:   tcp://localhost:5580"
+echo "  Monitor:    tcp://localhost:5590"
 echo ""
 echo -e "${CYAN}=== Web UI ===${NC}"
 echo -e "  Swagger UI: ${YELLOW}http://localhost:8080/swagger-ui/${NC}"

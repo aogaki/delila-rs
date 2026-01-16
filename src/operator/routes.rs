@@ -20,7 +20,7 @@ use crate::config::DigitizerConfig;
 
 use super::{
     ApiResponse, CommandResult, ComponentClient, ComponentConfig, ComponentStatus,
-    ConfigureRequest, OperatorConfig, SystemState, SystemStatus,
+    ConfigureRequest, OperatorConfig, StartRequest, SystemState, SystemStatus,
 };
 
 /// Application state shared across handlers
@@ -57,6 +57,7 @@ pub struct AppState {
         ComponentState,
         ComponentMetrics,
         ConfigureRequest,
+        StartRequest,
         ApiResponse,
         CommandResult,
         DigitizerConfig,
@@ -231,19 +232,63 @@ async fn arm(State(state): State<Arc<AppState>>) -> (StatusCode, Json<ApiRespons
 }
 
 /// Start data acquisition
+///
+/// If the system is in Configured state, this will automatically arm first,
+/// then start. If already Armed, it will just start.
+/// The run_number is passed at start time to allow changing it without re-configuring hardware.
 #[utoipa::path(
     post,
     path = "/api/start",
     tag = "DAQ Control",
+    request_body = StartRequest,
     responses(
         (status = 200, description = "Start result", body = ApiResponse),
         (status = 400, description = "Invalid state transition", body = ApiResponse)
     )
 )]
-async fn start(State(state): State<Arc<AppState>>) -> (StatusCode, Json<ApiResponse>) {
-    let results = state.client.start_all(&state.components).await;
+async fn start(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<StartRequest>,
+) -> (StatusCode, Json<ApiResponse>) {
+    let run_number = request.run_number;
 
-    let response = ApiResponse::success("Start command sent").with_results(results);
+    // Check current state
+    let components = state.client.get_all_status(&state.components).await;
+    let system_state = SystemState::from_components(&components);
+
+    // If Configured, arm first
+    if system_state == SystemState::Configured {
+        match state
+            .client
+            .arm_all_sync(&state.components, state.config.arm_timeout_ms)
+            .await
+        {
+            Ok(arm_results) => {
+                let arm_response =
+                    ApiResponse::success("Arm command sent").with_results(arm_results);
+                if !arm_response.success {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(ApiResponse::error("Auto-arm failed before start")),
+                    );
+                }
+            }
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(ApiResponse::error(format!("Auto-arm failed: {}", e))),
+                );
+            }
+        }
+    }
+
+    // Now start with the run number
+    let results = state
+        .client
+        .start_all(&state.components, run_number)
+        .await;
+    let response =
+        ApiResponse::success(format!("Start command sent for run {}", run_number)).with_results(results);
 
     let status = if response.success {
         StatusCode::OK
@@ -376,10 +421,10 @@ async fn run_start(
         Ok(_) => {}
     }
 
-    // Phase 3: Start
+    // Phase 3: Start (with run_number)
     let start_result = state
         .client
-        .start_all_sync(&state.components, state.config.start_timeout_ms)
+        .start_all_sync(&state.components, run_number, state.config.start_timeout_ms)
         .await;
 
     match start_result {

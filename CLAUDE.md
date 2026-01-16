@@ -290,6 +290,23 @@ cargo build --release    # Optimized build
 cargo doc --open         # Generate & view docs
 ```
 
+## System Testing
+
+Use Claude Code slash commands for DAQ operations:
+
+| Command | Description |
+|---------|-------------|
+| `/test-daq` | Run complete integration test |
+| `/start-daq` | Start all DAQ components |
+| `/stop-daq` | Stop all DAQ components |
+| `/daq-status` | Check component status |
+
+**State Machine:** `Idle → Configure → Configured → Arm → Armed → Start → Running → Stop → Configured`
+
+**Web UIs:** Swagger http://localhost:8080/swagger-ui/ | Monitor http://localhost:8081/
+
+**重要:** 常に Operator REST API 経由でコントロールする。直接 ZMQ コマンドは使用しない。
+
 ## C++ to Rust Quick Reference
 
 | C++ | Rust | Notes |

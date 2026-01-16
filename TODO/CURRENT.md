@@ -1,6 +1,6 @@
 # Current Sprint - TODO Index
 
-**Updated:** 2026-01-15
+**Updated:** 2026-01-16
 
 このファイルは現在のスプリントの概要を示すインデックスです。
 Claudeセッション開始時に必ず読み込まれます。
@@ -11,44 +11,28 @@ Claudeセッション開始時に必ず読み込まれます。
 
 | Priority | File | Status | Summary |
 |----------|------|--------|---------|
-| 1 | [09_timestamp_sorting_design.md](09_timestamp_sorting_design.md) | **Phase 2完了** | タイムスタンプソートとファイル書き出し |
-| 2 | [07_digitizer_config_design.md](07_digitizer_config_design.md) | 作業中 | デジタイザ設定のWeb UI設計 |
-| 3 | [08_monitor_component.md](08_monitor_component.md) | **完了** | Monitorコンポーネント実装 |
+| 1 | [11_operator_web_ui.md](11_operator_web_ui.md) | **In Progress** | Operator Web UI (Angular + Material) |
+| 2 | [09_timestamp_sorting_design.md](09_timestamp_sorting_design.md) | **Phase 3完了** | タイムスタンプソートとファイル書き出し |
 
 ---
 
-## Current Focus: Recorder Enhancement
+## Current Status: Phase 4 - Web UI (2026-01-16)
 
-### Phase 1: SortingBuffer実装 ✅ 完了 (2026-01-14)
-- [x] `SortingBuffer` struct を `src/recorder/mod.rs` に追加
-- [x] 5%末尾マージン戦略
-- [x] Recorderをlock-freeタスク分離アーキテクチャに修正
-  - Receiver task: ZMQ SUB → mpsc channel (non-blocking)
-  - Sorter task: バッファリング + ソート
-  - Writer task: File I/O
-- [x] unbounded channelでデータ欠損防止
+### In Progress
+- **Operator Web UI** (Angular + Material Design)
+  - DAQ制御フロントエンド
+  - 設計ドキュメント: `docs/architecture/operator_web_ui.md`
 
-### Phase 2: ファイルヘッダー/フッター ✅ 完了 (2026-01-14)
-- [x] `FileHeader` struct - MsgPack形式のメタデータ
-- [x] `FileFooter` struct - 固定64バイト、xxHash64チェックサム
-- [x] `ChecksumCalculator` - データブロックのチェックサム計算
-- [x] ファイル拡張子を `.msgpack` → `.delila` に変更
-- [x] シーケンス番号リセット (Start時にEmulator/Reader/Mergerでリセット)
-- [x] 中間fsync削除 (バッチ単位書き込みでは意味がないため)
-
-### Phase 2.5: Start/Stop順序制御 ✅ 完了 (2026-01-15)
-- [x] `pipeline_order` フィールドを設定に追加
-  - Sources: デフォルト 1 (upstream)
-  - Merger: デフォルト 2 (middle)
-  - Recorder/Monitor: デフォルト 3 (downstream)
-- [x] Operator の `start_all`: pipeline_order 降順 (下流→上流)
-- [x] Operator の `stop_all`: pipeline_order 昇順 (上流→下流)
-- [x] 設定ファイルから `pipeline_order` を読み込み
-
-### Phase 3: 高度な機能 (将来)
-- クラッシュリカバリツール
-- イベント数ベースローテーション
+### Completed Features
+- Emulator + Reader (CAEN FFI) + ZMQ pipeline
+- Merger (zero-copy forwarding)
+- Recorder (sorting + file format v2)
+- Monitor (Web UI + REST API)
+- Operator (control system + pipeline ordering)
+- Digitizer configuration REST API
+- `delila-recover` CLIツール (クラッシュリカバリ)
 - EOS (End Of Stream) ベースの停止制御
+- **EventData統一** (MinimalEventData廃止、Option<Waveform>対応)
 
 ---
 
@@ -66,16 +50,19 @@ Claudeセッション開始時に必ず読み込まれます。
 
 ---
 
-## Completed (Ready for Archive)
+## Archived
 
-- [x] **07_refactoring_plan.md** - Phase 1完了、残りは保留
-- [x] **08_monitor_component.md** - 全機能実装完了
-- [x] **10_zero_copy_merger.md** - ゼロコピー実装、2MHz+でドロップなし達成
+以下のタスクは `TODO/archive/phase1_components/` に移動済み:
+- 06_caen_driver_design.md - CAEN FFIドライバ実装
+- 07_digitizer_config_design.md - デジタイザ設定REST API
+- 07_refactoring_plan.md - リファクタリング計画
+- 08_monitor_component.md - Monitorコンポーネント
+- 10_zero_copy_merger.md - ゼロコピーMerger
 
 ---
 
 ## Notes
 
 - **MVP目標:** 2026年3月中旬
-- **現在のフェーズ:** Phase 1 (Emulator + ZMQ + Web Monitor) ほぼ完了
-- **次のフェーズ:** Phase 2 (CAEN Driver) + Phase 3 (File Writer)
+- **現在のフェーズ:** Phase 1完了、Phase 2 (CAEN Driver) 実装済み
+- **次のフェーズ:** Phase 3 (File Writer高度機能) + Phase 4 (Web UI拡充)

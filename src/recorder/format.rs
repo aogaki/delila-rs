@@ -81,8 +81,8 @@ impl FileHeader {
                 .unwrap_or_default()
                 .as_nanos() as u64,
             comment: String::new(),
-            sort_margin_ratio: 0.05,
-            is_sorted: true,
+            sort_margin_ratio: 0.0, // Raw data recorder: unsorted
+            is_sorted: false,
             source_ids: Vec::new(),
             metadata: HashMap::new(),
         }
@@ -394,6 +394,352 @@ pub enum FileFormatError {
 
     #[error("Incomplete file (footer indicates crash during write)")]
     IncompleteFile,
+}
+
+/// Result of file validation
+#[derive(Debug)]
+pub struct FileValidationResult {
+    /// Whether the file is valid
+    pub is_valid: bool,
+    /// Header information (if readable)
+    pub header: Option<FileHeader>,
+    /// Footer information (if readable)
+    pub footer: Option<FileFooter>,
+    /// Number of recoverable data blocks
+    pub recoverable_blocks: usize,
+    /// Total recoverable events
+    pub recoverable_events: u64,
+    /// Validation errors encountered
+    pub errors: Vec<String>,
+}
+
+impl FileValidationResult {
+    /// Check if file needs recovery (has data but incomplete)
+    pub fn needs_recovery(&self) -> bool {
+        !self.is_valid && self.recoverable_blocks > 0
+    }
+}
+
+/// Reader for DELILA data files with recovery support
+pub struct DataFileReader<R> {
+    reader: R,
+    header: Option<FileHeader>,
+    footer: Option<FileFooter>,
+    header_size: usize,
+    file_size: u64,
+}
+
+impl<R: std::io::Read + std::io::Seek> DataFileReader<R> {
+    /// Open a data file for reading
+    pub fn new(mut reader: R) -> Result<Self, FileFormatError> {
+        // Get file size
+        let file_size = reader.seek(std::io::SeekFrom::End(0))?;
+        reader.seek(std::io::SeekFrom::Start(0))?;
+
+        let mut this = Self {
+            reader,
+            header: None,
+            footer: None,
+            header_size: 0,
+            file_size,
+        };
+
+        // Try to read header
+        this.read_header()?;
+
+        Ok(this)
+    }
+
+    /// Read and validate the file header
+    fn read_header(&mut self) -> Result<(), FileFormatError> {
+        self.reader.seek(std::io::SeekFrom::Start(0))?;
+        let header = FileHeader::read_from(&mut self.reader)?;
+
+        // Calculate header size (magic + length prefix + msgpack data)
+        let pos = self.reader.stream_position()?;
+        self.header_size = pos as usize;
+        self.header = Some(header);
+        Ok(())
+    }
+
+    /// Try to read the footer (may fail for incomplete files)
+    pub fn read_footer(&mut self) -> Result<FileFooter, FileFormatError> {
+        if self.file_size < FOOTER_SIZE as u64 {
+            return Err(FileFormatError::TooShort);
+        }
+
+        self.reader
+            .seek(std::io::SeekFrom::End(-(FOOTER_SIZE as i64)))?;
+        let footer = FileFooter::read_from(&mut self.reader)?;
+        self.footer = Some(footer);
+        Ok(footer)
+    }
+
+    /// Get the header
+    pub fn header(&self) -> Option<&FileHeader> {
+        self.header.as_ref()
+    }
+
+    /// Get the footer (if read)
+    pub fn footer(&self) -> Option<&FileFooter> {
+        self.footer.as_ref()
+    }
+
+    /// Validate file integrity
+    pub fn validate(&mut self) -> FileValidationResult {
+        let mut result = FileValidationResult {
+            is_valid: false,
+            header: self.header.clone(),
+            footer: None,
+            recoverable_blocks: 0,
+            recoverable_events: 0,
+            errors: Vec::new(),
+        };
+
+        // Check header
+        if self.header.is_none() {
+            result.errors.push("Missing or invalid header".to_string());
+            return result;
+        }
+
+        // Try to read footer
+        match self.read_footer() {
+            Ok(footer) => {
+                result.footer = Some(footer);
+                if !footer.is_complete() {
+                    result
+                        .errors
+                        .push("File incomplete (crash during write)".to_string());
+                }
+            }
+            Err(e) => {
+                result.errors.push(format!("Failed to read footer: {}", e));
+            }
+        }
+
+        // Count recoverable blocks
+        let (blocks, events) = self.count_recoverable_blocks();
+        result.recoverable_blocks = blocks;
+        result.recoverable_events = events;
+
+        // File is valid if footer exists, is complete, and checksum matches
+        if let Some(ref footer) = result.footer {
+            if footer.is_complete() {
+                // Verify checksum
+                match self.verify_checksum() {
+                    Ok(true) => {
+                        result.is_valid = true;
+                    }
+                    Ok(false) => {
+                        result.errors.push("Checksum mismatch".to_string());
+                    }
+                    Err(e) => {
+                        result.errors.push(format!("Checksum verification error: {}", e));
+                    }
+                }
+            }
+        }
+
+        result
+    }
+
+    /// Count recoverable data blocks
+    fn count_recoverable_blocks(&mut self) -> (usize, u64) {
+        let mut blocks = 0;
+        let mut events = 0u64;
+
+        // Position after header
+        if self.reader.seek(std::io::SeekFrom::Start(self.header_size as u64)).is_err() {
+            return (0, 0);
+        }
+
+        // Data region ends at file_size - FOOTER_SIZE (if footer might exist)
+        let data_end = if self.file_size >= FOOTER_SIZE as u64 {
+            self.file_size - FOOTER_SIZE as u64
+        } else {
+            self.file_size
+        };
+
+        loop {
+            let pos = match self.reader.stream_position() {
+                Ok(p) => p,
+                Err(_) => break,
+            };
+
+            if pos >= data_end {
+                break;
+            }
+
+            // Try to read length prefix
+            let mut len_bytes = [0u8; 4];
+            if self.reader.read_exact(&mut len_bytes).is_err() {
+                break;
+            }
+
+            let len = u32::from_le_bytes(len_bytes) as usize;
+
+            // Sanity check on length
+            if len == 0 || len > 100_000_000 {
+                // Max 100MB per block
+                break;
+            }
+
+            // Check if we have enough data
+            if pos + 4 + len as u64 > data_end {
+                break;
+            }
+
+            // Try to read and parse the block
+            let mut data = vec![0u8; len];
+            if self.reader.read_exact(&mut data).is_err() {
+                break;
+            }
+
+            // Try to deserialize to count events
+            match crate::common::EventDataBatch::from_msgpack(&data) {
+                Ok(batch) => {
+                    events += batch.events.len() as u64;
+                    blocks += 1;
+                }
+                Err(_) => {
+                    // Block is corrupted, stop here
+                    break;
+                }
+            }
+        }
+
+        (blocks, events)
+    }
+
+    /// Verify data checksum
+    fn verify_checksum(&mut self) -> Result<bool, FileFormatError> {
+        let footer = self.footer.as_ref().ok_or(FileFormatError::TooShort)?;
+
+        // Position after header
+        self.reader.seek(std::io::SeekFrom::Start(self.header_size as u64))?;
+
+        let mut calc = ChecksumCalculator::new();
+
+        // Read all data blocks and update checksum
+        let data_end = self.file_size - FOOTER_SIZE as u64;
+
+        loop {
+            let pos = self.reader.stream_position()?;
+            if pos >= data_end {
+                break;
+            }
+
+            // Read length prefix
+            let mut len_bytes = [0u8; 4];
+            if self.reader.read_exact(&mut len_bytes).is_err() {
+                break;
+            }
+
+            let len = u32::from_le_bytes(len_bytes) as usize;
+            if len == 0 || len > 100_000_000 {
+                break;
+            }
+
+            // Read data
+            let mut data = vec![0u8; len];
+            if self.reader.read_exact(&mut data).is_err() {
+                break;
+            }
+
+            // Update checksum
+            calc.update(&len_bytes);
+            calc.update(&data);
+        }
+
+        let computed = calc.finalize();
+        Ok(computed == footer.data_checksum)
+    }
+
+    /// Iterator over data blocks (for recovery)
+    pub fn data_blocks(&mut self) -> DataBlockIterator<'_, R> {
+        // Position after header
+        let _ = self.reader.seek(std::io::SeekFrom::Start(self.header_size as u64));
+
+        let data_end = if self.file_size >= FOOTER_SIZE as u64 {
+            self.file_size - FOOTER_SIZE as u64
+        } else {
+            self.file_size
+        };
+
+        DataBlockIterator {
+            reader: &mut self.reader,
+            data_end,
+            done: false,
+        }
+    }
+}
+
+/// Iterator over data blocks in a file
+pub struct DataBlockIterator<'a, R> {
+    reader: &'a mut R,
+    data_end: u64,
+    done: bool,
+}
+
+impl<'a, R: std::io::Read + std::io::Seek> Iterator for DataBlockIterator<'a, R> {
+    type Item = Result<crate::common::EventDataBatch, FileFormatError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.done {
+            return None;
+        }
+
+        let pos = match self.reader.stream_position() {
+            Ok(p) => p,
+            Err(e) => {
+                self.done = true;
+                return Some(Err(FileFormatError::Io(e)));
+            }
+        };
+
+        if pos >= self.data_end {
+            self.done = true;
+            return None;
+        }
+
+        // Read length prefix
+        let mut len_bytes = [0u8; 4];
+        if let Err(e) = self.reader.read_exact(&mut len_bytes) {
+            self.done = true;
+            if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                return None;
+            }
+            return Some(Err(FileFormatError::Io(e)));
+        }
+
+        let len = u32::from_le_bytes(len_bytes) as usize;
+        if len == 0 || len > 100_000_000 {
+            self.done = true;
+            return None;
+        }
+
+        // Check bounds
+        if pos + 4 + len as u64 > self.data_end {
+            self.done = true;
+            return None;
+        }
+
+        // Read data
+        let mut data = vec![0u8; len];
+        if let Err(e) = self.reader.read_exact(&mut data) {
+            self.done = true;
+            return Some(Err(FileFormatError::Io(e)));
+        }
+
+        // Deserialize
+        match crate::common::EventDataBatch::from_msgpack(&data) {
+            Ok(batch) => Some(Ok(batch)),
+            Err(e) => {
+                self.done = true;
+                Some(Err(FileFormatError::Deserialization(e)))
+            }
+        }
+    }
 }
 
 #[cfg(test)]

@@ -116,7 +116,8 @@ pub enum Command {
     /// Prepare hardware/resources for acquisition (Configured → Armed)
     Arm,
     /// Begin data acquisition (Armed → Running)
-    Start,
+    /// run_number is passed at start time to allow changing it without re-configuring hardware
+    Start { run_number: u32 },
     /// Stop data acquisition (Running → Configured)
     Stop,
     /// Reset to initial state (Any → Idle)
@@ -130,7 +131,7 @@ impl std::fmt::Display for Command {
         match self {
             Command::Configure(cfg) => write!(f, "Configure(run={})", cfg.run_number),
             Command::Arm => write!(f, "Arm"),
-            Command::Start => write!(f, "Start"),
+            Command::Start { run_number } => write!(f, "Start(run={})", run_number),
             Command::Stop => write!(f, "Stop"),
             Command::Reset => write!(f, "Reset"),
             Command::GetStatus => write!(f, "GetStatus"),
@@ -250,10 +251,10 @@ mod tests {
 
     #[test]
     fn command_json_roundtrip() {
-        let cmd = Command::Start;
+        let cmd = Command::Start { run_number: 42 };
         let bytes = cmd.to_json().unwrap();
         let decoded = Command::from_json(&bytes).unwrap();
-        assert!(matches!(decoded, Command::Start));
+        assert!(matches!(decoded, Command::Start { run_number: 42 }));
     }
 
     #[test]
@@ -332,7 +333,10 @@ mod tests {
             "Configure(run=99)"
         );
         assert_eq!(format!("{}", Command::Arm), "Arm");
-        assert_eq!(format!("{}", Command::Start), "Start");
+        assert_eq!(
+            format!("{}", Command::Start { run_number: 1 }),
+            "Start(run=1)"
+        );
         assert_eq!(format!("{}", Command::Stop), "Stop");
         assert_eq!(format!("{}", Command::Reset), "Reset");
         assert_eq!(format!("{}", Command::GetStatus), "GetStatus");

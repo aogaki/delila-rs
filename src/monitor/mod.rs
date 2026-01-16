@@ -30,7 +30,7 @@ use tracing::{debug, info, warn};
 
 use crate::common::{
     handle_command, run_command_task, CommandHandlerExt, ComponentSharedState, ComponentState,
-    Message, MinimalEventData, MinimalEventDataBatch,
+    EventData, EventDataBatch, Message,
 };
 
 /// Monitor configuration
@@ -191,7 +191,7 @@ impl MonitorState {
     }
 
     /// Process an event and update histograms
-    pub fn process_event(&mut self, event: &MinimalEventData) {
+    pub fn process_event(&mut self, event: &EventData) {
         self.total_events += 1;
 
         let key = ChannelKey::new(event.module as u32, event.channel as u32);
@@ -209,7 +209,7 @@ impl MonitorState {
     }
 
     /// Process a batch of events
-    pub fn process_batch(&mut self, batch: &MinimalEventDataBatch) {
+    pub fn process_batch(&mut self, batch: &EventDataBatch) {
         for event in &batch.events {
             self.process_event(event);
         }
@@ -471,8 +471,10 @@ impl CommandHandlerExt for MonitorCommandExt {
         "Monitor"
     }
 
-    fn on_start(&mut self) -> Result<(), String> {
-        // Set start time when Running begins (unbounded send is synchronous)
+    fn on_start(&mut self, _run_number: u32) -> Result<(), String> {
+        // Clear histograms and set start time when Running begins
+        // This allows viewing histograms after Stop while starting fresh each run
+        let _ = self.histogram_tx.send(HistogramMessage::Clear);
         let _ = self.histogram_tx.send(HistogramMessage::SetStartTime);
         Ok(())
     }
@@ -530,7 +532,7 @@ impl Monitor {
     pub async fn run(&mut self, mut shutdown: broadcast::Receiver<()>) -> Result<(), MonitorError> {
         // Create channels (unbounded - memory growth indicates bottleneck)
         let (hist_tx, hist_rx) = mpsc::unbounded_channel::<HistogramMessage>();
-        let (data_tx, data_rx) = mpsc::unbounded_channel::<MinimalEventDataBatch>();
+        let (data_tx, data_rx) = mpsc::unbounded_channel::<EventDataBatch>();
 
         // Create ZMQ SUB socket
         let context = Context::new();
@@ -641,7 +643,7 @@ impl Monitor {
     /// Receiver task: ZMQ SUB → channel (non-blocking)
     async fn receiver_task(
         mut socket: subscribe::Subscribe,
-        tx: mpsc::UnboundedSender<MinimalEventDataBatch>,
+        tx: mpsc::UnboundedSender<EventDataBatch>,
         mut shutdown: broadcast::Receiver<()>,
         atomic_stats: Arc<AtomicStats>,
         mut state_rx: watch::Receiver<ComponentState>,
@@ -684,7 +686,13 @@ impl Monitor {
                                         }
                                     }
                                     Ok(Message::EndOfStream { source_id }) => {
-                                        info!(source_id, "Received EOS");
+                                        let (recv, proc, _) = atomic_stats.snapshot();
+                                        info!(
+                                            source_id,
+                                            received_batches = recv,
+                                            processed_batches = proc,
+                                            "Received EOS - data stream complete"
+                                        );
                                     }
                                     Ok(Message::Heartbeat(hb)) => {
                                         debug!(source_id = hb.source_id, "Received heartbeat");
@@ -711,7 +719,7 @@ impl Monitor {
     /// Histogram task: owns MonitorState, processes batches and HTTP queries
     async fn histogram_task(
         mut cmd_rx: mpsc::UnboundedReceiver<HistogramMessage>,
-        mut data_rx: mpsc::UnboundedReceiver<MinimalEventDataBatch>,
+        mut data_rx: mpsc::UnboundedReceiver<EventDataBatch>,
         histogram_config: HistogramConfig,
         atomic_stats: Arc<AtomicStats>,
     ) {
@@ -842,13 +850,14 @@ mod tests {
     fn test_monitor_state_process_event() {
         let mut state = MonitorState::new(HistogramConfig::default());
 
-        let event = MinimalEventData {
+        let event = EventData {
             module: 0,
             channel: 5,
             energy: 1000,
             energy_short: 500,
             timestamp_ns: 0.0,
             flags: 0,
+            waveform: None,
         };
 
         state.process_event(&event);

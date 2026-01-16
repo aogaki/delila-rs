@@ -21,7 +21,7 @@ use tracing::{debug, info, warn};
 
 use crate::common::{
     handle_command, run_command_task, CommandHandlerExt, ComponentSharedState, ComponentState,
-    Message, MinimalEventDataBatch,
+    EventDataBatch, Message,
 };
 
 /// DataSink configuration
@@ -70,7 +70,7 @@ pub struct SourceStats {
 }
 
 impl SourceStats {
-    fn update(&mut self, batch: &MinimalEventDataBatch) {
+    fn update(&mut self, batch: &EventDataBatch) {
         let seq = batch.sequence_number;
 
         if let Some(last) = self.last_sequence {
@@ -122,7 +122,7 @@ pub struct DataSinkStats {
 }
 
 impl DataSinkStats {
-    fn update(&mut self, batch: &MinimalEventDataBatch) {
+    fn update(&mut self, batch: &EventDataBatch) {
         self.sources
             .entry(batch.source_id)
             .or_default()
@@ -226,7 +226,7 @@ impl AtomicStats {
 
 /// Message type for internal channel
 enum ProcessorMessage {
-    Data(MinimalEventDataBatch),
+    Data(EventDataBatch),
     Eos { source_id: u32 },
 }
 
@@ -524,7 +524,7 @@ impl DataSink {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::MinimalEventData;
+    use crate::common::EventData;
 
     #[test]
     fn default_config() {
@@ -537,9 +537,9 @@ mod tests {
     fn source_stats_tracking() {
         let mut stats = SourceStats::default();
 
-        let mut batch = MinimalEventDataBatch::new(0, 0);
-        batch.push(MinimalEventData::zeroed());
-        batch.push(MinimalEventData::zeroed());
+        let mut batch = EventDataBatch::new(0, 0);
+        batch.push(EventData::zeroed());
+        batch.push(EventData::zeroed());
 
         stats.update(&batch);
 
@@ -553,11 +553,11 @@ mod tests {
         let mut stats = DataSinkStats::default();
 
         // First batch with seq 0
-        let batch0 = MinimalEventDataBatch::new(0, 0);
+        let batch0 = EventDataBatch::new(0, 0);
         stats.update(&batch0);
 
         // Skip to seq 5 (lost 1,2,3,4)
-        let batch5 = MinimalEventDataBatch::new(0, 5);
+        let batch5 = EventDataBatch::new(0, 5);
         stats.update(&batch5);
 
         assert_eq!(stats.total_gaps(), 1);
@@ -569,13 +569,13 @@ mod tests {
         let mut stats = DataSinkStats::default();
 
         // Source 0: sequences 0, 1, 5 (gap of 3)
-        stats.update(&MinimalEventDataBatch::new(0, 0));
-        stats.update(&MinimalEventDataBatch::new(0, 1));
-        stats.update(&MinimalEventDataBatch::new(0, 5));
+        stats.update(&EventDataBatch::new(0, 0));
+        stats.update(&EventDataBatch::new(0, 1));
+        stats.update(&EventDataBatch::new(0, 5));
 
         // Source 1: sequences 0, 10 (gap of 9)
-        stats.update(&MinimalEventDataBatch::new(1, 0));
-        stats.update(&MinimalEventDataBatch::new(1, 10));
+        stats.update(&EventDataBatch::new(1, 0));
+        stats.update(&EventDataBatch::new(1, 10));
 
         assert_eq!(stats.sources.len(), 2);
         assert_eq!(stats.total_gaps(), 2);

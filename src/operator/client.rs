@@ -118,9 +118,9 @@ impl ComponentClient {
         self.execute_command(config, Command::Arm).await
     }
 
-    /// Send start command to a component
-    pub async fn start(&self, config: &ComponentConfig) -> CommandResult {
-        self.execute_command(config, Command::Start).await
+    /// Send start command to a component with run number
+    pub async fn start(&self, config: &ComponentConfig, run_number: u32) -> CommandResult {
+        self.execute_command(config, Command::Start { run_number }).await
     }
 
     /// Send stop command to a component
@@ -188,14 +188,14 @@ impl ComponentClient {
     }
 
     /// Start all components in pipeline order (descending: downstream first)
-    pub async fn start_all(&self, configs: &[ComponentConfig]) -> Vec<CommandResult> {
+    pub async fn start_all(&self, configs: &[ComponentConfig], run_number: u32) -> Vec<CommandResult> {
         // Sort by pipeline_order descending (downstream first, then upstream)
         let mut sorted: Vec<_> = configs.iter().collect();
         sorted.sort_by(|a, b| b.pipeline_order.cmp(&a.pipeline_order));
 
         let mut results = Vec::with_capacity(configs.len());
         for config in sorted {
-            results.push(self.start(config).await);
+            results.push(self.start(config, run_number).await);
         }
         results
     }
@@ -326,9 +326,10 @@ impl ComponentClient {
     pub async fn start_all_sync(
         &self,
         configs: &[ComponentConfig],
+        run_number: u32,
         timeout_ms: u64,
     ) -> Result<Vec<CommandResult>, String> {
-        let results = self.start_all(configs).await;
+        let results = self.start_all(configs, run_number).await;
 
         // Check if any failed immediately
         if results.iter().any(|r| !r.success) {

@@ -39,6 +39,9 @@ dashmap = "6"
 # Checksum
 xxhash-rust = { version = "0.8", features = ["xxh64"] }
 
+# CLI argument parsing
+clap = { version = "4", features = ["derive"] }
+
 # Web API
 axum = "0.7"
 tower-http = { version = "0.5", features = ["cors"] }
@@ -90,3 +93,7 @@ path = "src/bin/recorder.rs"
 [[bin]]
 name = "storage_bench"
 path = "src/bin/storage_bench.rs"
+
+[[bin]]
+name = "recover"
+path = "src/bin/recover.rs"

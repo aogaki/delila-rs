@@ -60,7 +60,7 @@ pub struct ComponentMetrics {
     pub data_rate: f64,
 }
 
-/// Flag bit definitions (compatible with C++ EventData)
+/// Flag bit definitions for event status
 pub mod flags {
     /// Pileup detected
     pub const FLAG_PILEUP: u64 = 0x01;
@@ -74,25 +74,33 @@ pub mod flags {
     pub const FLAG_N_LOST_TRIGGER: u64 = 0x10;
 }
 
-/// Minimal event data without waveforms (22 bytes in C++)
+/// Waveform data from digitizer
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct Waveform {
+    /// Analog probe 1 samples (signed 14-bit values)
+    pub analog_probe1: Vec<i16>,
+    /// Analog probe 2 samples (signed 14-bit values)
+    pub analog_probe2: Vec<i16>,
+    /// Digital probe 1 samples (1-bit per sample, packed)
+    pub digital_probe1: Vec<u8>,
+    /// Digital probe 2 samples (1-bit per sample, packed)
+    pub digital_probe2: Vec<u8>,
+    /// Digital probe 3 samples (1-bit per sample, packed)
+    pub digital_probe3: Vec<u8>,
+    /// Digital probe 4 samples (1-bit per sample, packed)
+    pub digital_probe4: Vec<u8>,
+    /// Time resolution (0=1x, 1=2x, 2=4x, 3=8x)
+    pub time_resolution: u8,
+    /// Trigger threshold
+    pub trigger_threshold: u16,
+}
+
+/// Event data with optional waveform
 ///
-/// Memory layout matches C++ `MinimalEventData` for binary compatibility.
-/// C++ uses `__attribute__((packed))`, Rust uses `#[repr(C, packed)]`.
-///
-/// # C++ Equivalent
-/// ```cpp
-/// class MinimalEventData {
-///     uint8_t module;          // 1 byte
-///     uint8_t channel;         // 1 byte
-///     uint16_t energy;         // 2 bytes
-///     uint16_t energyShort;    // 2 bytes
-///     double timeStampNs;      // 8 bytes
-///     uint64_t flags;          // 8 bytes
-/// } __attribute__((packed));   // Total: 22 bytes
-/// ```
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
-#[repr(C, packed)]
-pub struct MinimalEventData {
+/// This is the unified event type used throughout the pipeline.
+/// When waveform is None, serialization skips the field for minimal overhead.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct EventData {
     /// Hardware module ID (0-255)
     pub module: u8,
     /// Channel within module (0-255)
@@ -101,14 +109,17 @@ pub struct MinimalEventData {
     pub energy: u16,
     /// Short gate energy (for PSD)
     pub energy_short: u16,
-    /// Timestamp in nanoseconds
+    /// Timestamp in nanoseconds (includes fine time)
     pub timestamp_ns: f64,
-    /// Status/error flags
+    /// Status/error flags (u64 for future extensibility)
     pub flags: u64,
+    /// Optional waveform data (skipped in serialization when None)
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub waveform: Option<Waveform>,
 }
 
-impl MinimalEventData {
-    /// Create a new MinimalEventData with all fields
+impl EventData {
+    /// Create a new EventData without waveform
     pub fn new(
         module: u8,
         channel: u8,
@@ -124,10 +135,32 @@ impl MinimalEventData {
             energy_short,
             timestamp_ns,
             flags,
+            waveform: None,
         }
     }
 
-    /// Create a zero-initialized MinimalEventData
+    /// Create a new EventData with waveform
+    pub fn with_waveform(
+        module: u8,
+        channel: u8,
+        energy: u16,
+        energy_short: u16,
+        timestamp_ns: f64,
+        flags: u64,
+        waveform: Waveform,
+    ) -> Self {
+        Self {
+            module,
+            channel,
+            energy,
+            energy_short,
+            timestamp_ns,
+            flags,
+            waveform: Some(waveform),
+        }
+    }
+
+    /// Create a zero-initialized EventData
     pub fn zeroed() -> Self {
         Self {
             module: 0,
@@ -136,7 +169,14 @@ impl MinimalEventData {
             energy_short: 0,
             timestamp_ns: 0.0,
             flags: 0,
+            waveform: None,
         }
+    }
+
+    /// Check if this event has waveform data
+    #[inline]
+    pub fn has_waveform(&self) -> bool {
+        self.waveform.is_some()
     }
 
     /// Check if pileup was detected
@@ -158,15 +198,15 @@ impl MinimalEventData {
     }
 }
 
-// Compile-time size check: MinimalEventData must be exactly 22 bytes
-const _: () = assert!(
-    std::mem::size_of::<MinimalEventData>() == 22,
-    "MinimalEventData must be 22 bytes"
-);
+impl Default for EventData {
+    fn default() -> Self {
+        Self::zeroed()
+    }
+}
 
-/// Batch of minimal event data for network transfer
+/// Batch of event data for network transfer
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MinimalEventDataBatch {
+pub struct EventDataBatch {
     /// Source identifier (digitizer/emulator ID)
     pub source_id: u32,
     /// Sequence number for ordering and loss detection
@@ -174,10 +214,10 @@ pub struct MinimalEventDataBatch {
     /// Batch creation timestamp (Unix time in nanoseconds)
     pub timestamp: u64,
     /// Event data
-    pub events: Vec<MinimalEventData>,
+    pub events: Vec<EventData>,
 }
 
-impl MinimalEventDataBatch {
+impl EventDataBatch {
     /// Create a new empty batch
     pub fn new(source_id: u32, sequence_number: u64) -> Self {
         Self {
@@ -215,7 +255,7 @@ impl MinimalEventDataBatch {
     }
 
     /// Add an event to the batch
-    pub fn push(&mut self, event: MinimalEventData) {
+    pub fn push(&mut self, event: EventData) {
         self.events.push(event);
     }
 
@@ -236,7 +276,7 @@ impl MinimalEventDataBatch {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Message {
     /// Event data batch
-    Data(MinimalEventDataBatch),
+    Data(EventDataBatch),
     /// End of stream signal - source is shutting down
     EndOfStream { source_id: u32 },
     /// Heartbeat for liveness detection
@@ -245,7 +285,7 @@ pub enum Message {
 
 impl Message {
     /// Create a data message
-    pub fn data(batch: MinimalEventDataBatch) -> Self {
+    pub fn data(batch: EventDataBatch) -> Self {
         Self::Data(batch)
     }
 
@@ -362,7 +402,7 @@ impl MessageHeader {
     /// Parse Data variant header to extract source_id and sequence_number
     fn parse_data_header(bytes: &[u8]) -> Option<Self> {
         // rmp_serde serializes structs as arrays by default:
-        // MinimalEventDataBatch is [source_id, sequence_number, timestamp, events]
+        // EventDataBatch is [source_id, sequence_number, timestamp, events]
         // We only need source_id (index 0) and sequence_number (index 1)
 
         if bytes.is_empty() {
@@ -508,14 +548,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn minimal_event_data_size() {
-        // Verify struct is exactly 22 bytes (same as C++)
-        assert_eq!(std::mem::size_of::<MinimalEventData>(), 22);
-    }
-
-    #[test]
-    fn minimal_event_data_roundtrip() {
-        let event = MinimalEventData::new(
+    fn event_data_roundtrip() {
+        let event = EventData::new(
             1,                                           // module
             2,                                           // channel
             1000,                                        // energy
@@ -526,16 +560,40 @@ mod tests {
 
         // Serialize and deserialize
         let bytes = rmp_serde::to_vec(&event).unwrap();
-        let decoded: MinimalEventData = rmp_serde::from_slice(&bytes).unwrap();
+        let decoded: EventData = rmp_serde::from_slice(&bytes).unwrap();
 
         assert_eq!(event, decoded);
+        assert!(!decoded.has_waveform());
+    }
+
+    #[test]
+    fn event_data_with_waveform_roundtrip() {
+        let wf = Waveform {
+            analog_probe1: vec![100, 200, 300],
+            analog_probe2: vec![50, 100, 150],
+            digital_probe1: vec![0, 1, 0],
+            digital_probe2: vec![1, 0, 1],
+            digital_probe3: vec![],
+            digital_probe4: vec![],
+            time_resolution: 1,
+            trigger_threshold: 500,
+        };
+
+        let event = EventData::with_waveform(1, 2, 1000, 800, 123456789.0, 0, wf);
+
+        let bytes = rmp_serde::to_vec(&event).unwrap();
+        let decoded: EventData = rmp_serde::from_slice(&bytes).unwrap();
+
+        assert_eq!(event, decoded);
+        assert!(decoded.has_waveform());
+        assert_eq!(decoded.waveform.as_ref().unwrap().analog_probe1.len(), 3);
     }
 
     #[test]
     fn batch_roundtrip() {
-        let mut batch = MinimalEventDataBatch::new(42, 1);
-        batch.push(MinimalEventData::new(0, 0, 100, 80, 1000.0, 0));
-        batch.push(MinimalEventData::new(
+        let mut batch = EventDataBatch::new(42, 1);
+        batch.push(EventData::new(0, 0, 100, 80, 1000.0, 0));
+        batch.push(EventData::new(
             0,
             1,
             200,
@@ -545,7 +603,7 @@ mod tests {
         ));
 
         let bytes = batch.to_msgpack().unwrap();
-        let decoded = MinimalEventDataBatch::from_msgpack(&bytes).unwrap();
+        let decoded = EventDataBatch::from_msgpack(&bytes).unwrap();
 
         assert_eq!(batch.source_id, decoded.source_id);
         assert_eq!(batch.sequence_number, decoded.sequence_number);
@@ -556,8 +614,7 @@ mod tests {
 
     #[test]
     fn flag_helpers() {
-        let event =
-            MinimalEventData::new(0, 0, 0, 0, 0.0, flags::FLAG_PILEUP | flags::FLAG_OVER_RANGE);
+        let event = EventData::new(0, 0, 0, 0, 0.0, flags::FLAG_PILEUP | flags::FLAG_OVER_RANGE);
 
         assert!(event.has_pileup());
         assert!(!event.has_trigger_lost());
@@ -566,7 +623,7 @@ mod tests {
 
     #[test]
     fn message_data_roundtrip() {
-        let batch = MinimalEventDataBatch::new(42, 1);
+        let batch = EventDataBatch::new(42, 1);
         let msg = Message::data(batch);
 
         assert!(!msg.is_eos());
@@ -595,9 +652,9 @@ mod tests {
 
     #[test]
     fn message_header_parse_data() {
-        let mut batch = MinimalEventDataBatch::new(42, 1);
+        let mut batch = EventDataBatch::new(42, 1);
         batch.sequence_number = 12345;
-        batch.push(MinimalEventData::new(0, 0, 100, 80, 1000.0, 0));
+        batch.push(EventData::new(0, 0, 100, 80, 1000.0, 0));
 
         let msg = Message::data(batch);
         let bytes = msg.to_msgpack().unwrap();

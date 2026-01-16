@@ -13,8 +13,8 @@ pub use caen::{CaenError, CaenHandle, EndpointHandle};
 pub use decoder::{DataType, DecodeResult, EventData, Psd2Config, Psd2Decoder, Waveform};
 
 use crate::common::{
-    handle_command_simple, run_command_task, ComponentSharedState, ComponentState, Message,
-    MinimalEventData, MinimalEventDataBatch,
+    handle_command_simple, run_command_task, ComponentSharedState, ComponentState,
+    EventData as CommonEventData, EventDataBatch, Message,
 };
 use futures::SinkExt;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -187,9 +187,9 @@ impl Reader {
         &self.metrics
     }
 
-    /// Convert EventData to MinimalEventData
-    fn convert_event(event: &EventData) -> MinimalEventData {
-        MinimalEventData::new(
+    /// Convert EventData to CommonEventData
+    fn convert_event(event: &EventData) -> CommonEventData {
+        CommonEventData::new(
             event.module,
             event.channel,
             event.energy,
@@ -448,8 +448,8 @@ impl Reader {
                                         continue;
                                     }
 
-                                    // Convert to MinimalEventDataBatch
-                                    let mut batch = MinimalEventDataBatch::with_capacity(
+                                    // Convert to EventDataBatch
+                                    let mut batch = EventDataBatch::with_capacity(
                                         config.source_id,
                                         sequence_number,
                                         events.len(),
@@ -646,7 +646,7 @@ mod tests {
         };
 
         let minimal = Reader::convert_event(&event);
-        // MinimalEventData is packed, so we need to copy values before comparing
+        // CommonEventData is packed, so we need to copy values before comparing
         let module = minimal.module;
         let channel = minimal.channel;
         let energy = { minimal.energy };

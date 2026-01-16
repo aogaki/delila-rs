@@ -1,10 +1,12 @@
-//! Recorder component - writes event data to files
+//! Recorder component - writes raw event data to files
 //!
 //! Architecture (Lock-Free Task Separation):
 //! - Receiver task: ZMQ SUB → mpsc channel (non-blocking)
-//! - Sorter task: Sorts events by timestamp, manages margin buffer
-//! - Writer task: mpsc channel → File I/O (handles fsync)
+//! - Writer task: mpsc channel → File I/O
 //! - Command task: ZMQ REP socket for control commands
+//!
+//! Note: This is a Raw Data Recorder - data is written unsorted.
+//! Sorting will be performed by the future Online Event Builder component.
 //!
 //! File naming: run{XXXX}_{YYYY}_{ExpName}.delila
 //!   - XXXX: Run number (4 digits, zero-padded)
@@ -19,7 +21,8 @@
 mod format;
 
 pub use format::{
-    ChecksumCalculator, FileFooter, FileFormatError, FileHeader, FOOTER_SIZE, FORMAT_VERSION,
+    ChecksumCalculator, DataBlockIterator, DataFileReader, FileFooter, FileFormatError,
+    FileHeader, FileValidationResult, FOOTER_SIZE, FORMAT_VERSION,
 };
 
 use std::fs::{self, File};
@@ -37,7 +40,7 @@ use tracing::{debug, info, warn};
 
 use crate::common::{
     handle_command, run_command_task, CommandHandlerExt, ComponentSharedState, ComponentState,
-    Message, MinimalEventData, MinimalEventDataBatch, RunConfig,
+    EventDataBatch, Message, RunConfig,
 };
 
 /// Recorder configuration
@@ -53,12 +56,6 @@ pub struct RecorderConfig {
     pub max_file_size: u64,
     /// Maximum file duration in seconds (default: 600 = 10min)
     pub max_file_duration_secs: u64,
-    /// Internal channel capacity for receiver → sorter
-    pub channel_capacity: usize,
-    /// Sorting buffer margin ratio (0.0 - 1.0, default: 0.05 = 5%)
-    pub sort_margin_ratio: f64,
-    /// Minimum events before flush (default: 10000)
-    pub min_events_before_flush: usize,
 }
 
 impl Default for RecorderConfig {
@@ -69,9 +66,6 @@ impl Default for RecorderConfig {
             output_dir: PathBuf::from("./data"),
             max_file_size: 1024 * 1024 * 1024, // 1GB
             max_file_duration_secs: 600,       // 10 minutes
-            channel_capacity: 1000,
-            sort_margin_ratio: 0.05, // 5% margin
-            min_events_before_flush: 10000,
         }
     }
 }
@@ -141,89 +135,16 @@ pub struct RecorderStats {
     pub dropped_batches: u64,
 }
 
-/// Sorting buffer with margin strategy
-///
-/// Holds events and flushes them sorted, keeping a tail margin
-/// to handle late-arriving events from different channels.
-struct SortingBuffer {
-    events: Vec<MinimalEventData>,
-    margin_ratio: f64,
-    min_buffer_size: usize,
-    min_margin_count: usize,
-}
-
-impl SortingBuffer {
-    fn new(margin_ratio: f64, min_buffer_size: usize) -> Self {
-        Self {
-            events: Vec::with_capacity(min_buffer_size * 2),
-            margin_ratio,
-            min_buffer_size,
-            min_margin_count: 1000, // At least 1000 events as margin
-        }
-    }
-
-    /// Add a batch of events to the buffer
-    fn add_batch(&mut self, batch: &MinimalEventDataBatch) {
-        self.events.reserve(batch.events.len());
-        for event in &batch.events {
-            self.events.push(*event);
-        }
-    }
-
-    /// Flush events that are safe to write (keeping tail margin)
-    fn flush(&mut self) -> Vec<MinimalEventData> {
-        if self.events.len() < self.min_buffer_size {
-            return Vec::new();
-        }
-
-        // Sort by timestamp (copy to avoid unaligned access on packed struct)
-        self.events.sort_by(|a, b| {
-            let ts_a = a.timestamp_ns;
-            let ts_b = b.timestamp_ns;
-            ts_a.partial_cmp(&ts_b).unwrap_or(std::cmp::Ordering::Equal)
-        });
-
-        // Calculate margin (tail events to keep)
-        let margin_count = (self.events.len() as f64 * self.margin_ratio) as usize;
-        let margin_count = margin_count.max(self.min_margin_count);
-
-        // Write count (everything except margin)
-        let write_count = self.events.len().saturating_sub(margin_count);
-        if write_count == 0 {
-            return Vec::new();
-        }
-
-        // Drain the write portion, keep the margin
-        self.events.drain(..write_count).collect()
-    }
-
-    /// Flush all remaining events (for run end)
-    fn flush_all(&mut self) -> Vec<MinimalEventData> {
-        self.events.sort_by(|a, b| {
-            let ts_a = a.timestamp_ns;
-            let ts_b = b.timestamp_ns;
-            ts_a.partial_cmp(&ts_b).unwrap_or(std::cmp::Ordering::Equal)
-        });
-        std::mem::take(&mut self.events)
-    }
-
-    /// Clear buffer (for reset)
-    fn clear(&mut self) {
-        self.events.clear();
-    }
-
-    /// Current buffer size
-    fn len(&self) -> usize {
-        self.events.len()
-    }
-}
-
-/// Message from sorter to writer
+/// Commands for writer task
 enum WriterCommand {
-    /// Write these sorted events
-    WriteEvents(Vec<MinimalEventData>),
-    /// Open a new file for a new run
+    /// Write a batch of raw data
+    WriteBatch(EventDataBatch),
+    /// End of stream - close current file
+    EndOfStream { source_id: u32 },
+    /// Configure for a new run
     NewRun(RunConfig),
+    /// Start recording (enable writing) with the run number to use
+    StartRun { run_number: u32 },
     /// Close current file (run stopped)
     CloseFile,
     /// Shutdown writer task
@@ -245,6 +166,8 @@ struct FileWriter {
     footer: FileFooter,
     /// Header size for current file (needed for data_bytes calculation)
     header_size: u64,
+    /// Whether we have an active run (file can be opened)
+    run_active: bool,
 }
 
 impl FileWriter {
@@ -260,6 +183,7 @@ impl FileWriter {
             checksum: ChecksumCalculator::new(),
             footer: FileFooter::new(),
             header_size: 0,
+            run_active: false,
         }
     }
 
@@ -271,12 +195,36 @@ impl FileWriter {
             run_config.exp_name.clone()
         };
 
-        let filename = format!(
+        // Generate base filename
+        let base_filename = format!(
             "run{:04}_{:04}_{}.delila",
             run_config.run_number, self.file_sequence, exp_name
         );
+        let base_path = self.config.output_dir.join(&base_filename);
 
-        self.config.output_dir.join(filename)
+        // If file doesn't exist, use base filename
+        if !base_path.exists() {
+            return base_path;
+        }
+
+        // File exists - append Unix timestamp to avoid overwriting
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let filename_with_ts = format!(
+            "run{:04}_{:04}_{}_{}.delila",
+            run_config.run_number, self.file_sequence, exp_name, timestamp
+        );
+
+        warn!(
+            existing = %base_path.display(),
+            new = %filename_with_ts,
+            "File already exists, using timestamped filename"
+        );
+
+        self.config.output_dir.join(filename_with_ts)
     }
 
     fn open_new_file(&mut self) -> Result<(), RecorderError> {
@@ -300,8 +248,6 @@ impl FileWriter {
             self.file_sequence,
         );
         header.comment = run_config.comment.clone();
-        header.sort_margin_ratio = self.config.sort_margin_ratio;
-        header.is_sorted = true;
 
         let header_bytes = header
             .to_bytes()
@@ -318,7 +264,7 @@ impl FileWriter {
             path = %path.display(),
             sequence = self.file_sequence,
             header_size = self.header_size,
-            "Opened new data file with header"
+            "Opened new data file"
         );
 
         Ok(())
@@ -344,7 +290,7 @@ impl FileWriter {
                 size_mb = (self.current_file_size + FOOTER_SIZE as u64) as f64 / 1_000_000.0,
                 events = self.footer.total_events,
                 checksum = format!("{:016x}", self.footer.data_checksum),
-                "Closed data file with footer"
+                "Closed data file"
             );
         }
         self.current_file_start = None;
@@ -366,8 +312,14 @@ impl FileWriter {
         false
     }
 
-    fn write_events(&mut self, events: Vec<MinimalEventData>) -> Result<(), RecorderError> {
-        if events.is_empty() {
+    fn write_batch(&mut self, batch: EventDataBatch) -> Result<(), RecorderError> {
+        if batch.events.is_empty() {
+            return Ok(());
+        }
+
+        // Don't write if run is not active
+        if !self.run_active {
+            debug!("Ignoring write_batch: run not active");
             return Ok(());
         }
 
@@ -382,21 +334,10 @@ impl FileWriter {
         }
 
         // Update timestamp range for footer
-        if let (Some(first), Some(last)) = (events.first(), events.last()) {
+        if let (Some(first), Some(last)) = (batch.events.first(), batch.events.last()) {
             self.footer
                 .update_timestamp_range(first.timestamp_ns, last.timestamp_ns);
         }
-
-        // Create a batch for serialization
-        let batch = MinimalEventDataBatch {
-            source_id: 0, // Recorder-generated batch
-            sequence_number: self.stats.received_batches.load(Ordering::Relaxed),
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos() as u64,
-            events,
-        };
 
         let event_count = batch.events.len() as u64;
         let data = batch.to_msgpack()?;
@@ -425,7 +366,7 @@ impl FileWriter {
         debug!(
             events = event_count,
             file_size_mb = self.current_file_size as f64 / 1_000_000.0,
-            "Wrote sorted events"
+            "Wrote batch"
         );
 
         Ok(())
@@ -433,15 +374,36 @@ impl FileWriter {
 
     fn new_run(&mut self, run_config: RunConfig) {
         self.run_config = Some(run_config);
-        self.file_sequence = 0;
+        // Note: file state reset is done in start_run()
     }
 
-    #[allow(dead_code)] // Reserved for future crash recovery feature
-    fn reset(&mut self) -> Result<(), RecorderError> {
-        self.close_file()?;
-        self.run_config = None;
+    fn start_run(&mut self, run_number: u32) {
+        // Close any leftover file from previous run
+        if self.writer.is_some() {
+            if let Err(e) = self.close_file() {
+                warn!(error = %e, "Failed to close leftover file on start");
+            }
+        }
+
+        // Update run_number in run_config (this is the key change for timer-based starts)
+        if let Some(ref mut cfg) = self.run_config {
+            cfg.run_number = run_number;
+        }
+
+        // Reset file state for new run
         self.file_sequence = 0;
-        Ok(())
+        self.current_file_size = 0;
+        self.current_file_start = None;
+        self.checksum = ChecksumCalculator::new();
+        self.footer = FileFooter::new();
+        self.header_size = 0;
+
+        self.run_active = true;
+    }
+
+    fn end_run(&mut self) -> Result<(), RecorderError> {
+        self.run_active = false;
+        self.close_file()
     }
 }
 
@@ -457,21 +419,22 @@ impl CommandHandlerExt for RecorderCommandExt {
     }
 
     fn on_configure(&mut self, config: &RunConfig) -> Result<(), String> {
-        // Send new run config to writer task (unbounded send is synchronous)
+        // Send new run config to writer task
         self.writer_tx
             .send(WriterCommand::NewRun(config.clone()))
             .map_err(|e| format!("Failed to send config to writer: {}", e))
     }
 
-    fn on_start(&mut self) -> Result<(), String> {
-        // Writer will open file on first write
-        Ok(())
+    fn on_start(&mut self, run_number: u32) -> Result<(), String> {
+        // Enable writing in writer task with the run number
+        self.writer_tx
+            .send(WriterCommand::StartRun { run_number })
+            .map_err(|e| format!("Failed to send start to writer: {}", e))
     }
 
     fn on_stop(&mut self) -> Result<(), String> {
-        self.writer_tx
-            .send(WriterCommand::CloseFile)
-            .map_err(|e| format!("Failed to send close to writer: {}", e))
+        // File close is handled by EOS or state change in writer task
+        Ok(())
     }
 
     fn on_reset(&mut self) -> Result<(), String> {
@@ -510,8 +473,7 @@ impl Recorder {
             output_dir = %config.output_dir.display(),
             max_file_size_mb = config.max_file_size / 1_000_000,
             max_duration_sec = config.max_file_duration_secs,
-            sort_margin = format!("{}%", config.sort_margin_ratio * 100.0),
-            "Recorder created"
+            "Recorder created (raw data mode)"
         );
 
         Ok(Self {
@@ -538,10 +500,7 @@ impl Recorder {
         &mut self,
         mut shutdown: tokio::sync::broadcast::Receiver<()>,
     ) -> Result<(), RecorderError> {
-        // Create channels for task communication (unbounded - memory growth indicates bottleneck)
-        // Receiver → Sorter
-        let (recv_tx, recv_rx) = mpsc::unbounded_channel::<MinimalEventDataBatch>();
-        // Sorter → Writer
+        // Create channel: Receiver → Writer
         let (writer_tx, writer_rx) = mpsc::unbounded_channel::<WriterCommand>();
 
         // Create ZMQ SUB socket
@@ -558,36 +517,20 @@ impl Recorder {
         // === Spawn Writer Task ===
         let writer_config = self.config.clone();
         let writer_stats = self.stats.clone();
-        let writer_handle =
-            tokio::spawn(
-                async move { Self::writer_task(writer_rx, writer_config, writer_stats).await },
-            );
-
-        // === Spawn Sorter Task ===
-        let sorter_config = self.config.clone();
-        let sorter_stats = self.stats.clone();
-        let sorter_state_rx = self.state_rx.clone();
-        let sorter_writer_tx = writer_tx.clone();
-        let sorter_handle = tokio::spawn(async move {
-            Self::sorter_task(
-                recv_rx,
-                sorter_writer_tx,
-                sorter_config,
-                sorter_stats,
-                sorter_state_rx,
-            )
-            .await
+        let writer_state_rx = self.state_rx.clone();
+        let writer_handle = tokio::spawn(async move {
+            Self::writer_task(writer_rx, writer_config, writer_stats, writer_state_rx).await
         });
 
         // === Spawn Receiver Task ===
-        // Note: recv_tx is moved into receiver task; sorter will see channel close when receiver exits
         let receiver_stats = self.stats.clone();
         let receiver_state_rx = self.state_rx.clone();
         let receiver_shutdown = shutdown.resubscribe();
+        let receiver_writer_tx = writer_tx.clone();
         let receiver_handle = tokio::spawn(async move {
             Self::receiver_task(
                 socket,
-                recv_tx,
+                receiver_writer_tx,
                 receiver_shutdown,
                 receiver_stats,
                 receiver_state_rx,
@@ -651,11 +594,9 @@ impl Recorder {
         }
 
         // Shutdown tasks
-        // Note: recv_tx was moved to receiver task, channel will close when receiver exits
         let _ = writer_tx.send(WriterCommand::Shutdown);
 
         let _ = receiver_handle.await;
-        let _ = sorter_handle.await;
         let _ = writer_handle.await;
         let _ = cmd_handle.await;
 
@@ -672,10 +613,10 @@ impl Recorder {
         Ok(())
     }
 
-    /// Receiver task: ZMQ SUB → channel (non-blocking)
+    /// Receiver task: ZMQ SUB → Writer channel (non-blocking)
     async fn receiver_task(
         mut socket: subscribe::Subscribe,
-        tx: mpsc::UnboundedSender<MinimalEventDataBatch>,
+        tx: mpsc::UnboundedSender<WriterCommand>,
         mut shutdown: tokio::sync::broadcast::Receiver<()>,
         stats: Arc<AtomicStats>,
         mut state_rx: watch::Receiver<ComponentState>,
@@ -706,15 +647,18 @@ impl Recorder {
                                         stats.received_batches.fetch_add(1, Ordering::Relaxed);
                                         stats.received_events.fetch_add(batch.events.len() as u64, Ordering::Relaxed);
 
-                                        // Send to sorter (unbounded channel never blocks)
-                                        if tx.send(batch).is_err() {
+                                        // Send directly to writer
+                                        if tx.send(WriterCommand::WriteBatch(batch)).is_err() {
                                             info!("Channel closed, receiver exiting");
                                             break;
                                         }
-                                        debug!("Forwarded batch to sorter");
                                     }
                                     Ok(Message::EndOfStream { source_id }) => {
-                                        info!(source_id, "Received EOS");
+                                        info!(source_id, "Received EOS - closing file");
+                                        if tx.send(WriterCommand::EndOfStream { source_id }).is_err() {
+                                            info!("Channel closed, receiver exiting");
+                                            break;
+                                        }
                                     }
                                     Ok(Message::Heartbeat(hb)) => {
                                         debug!(source_id = hb.source_id, "Received heartbeat");
@@ -738,56 +682,56 @@ impl Recorder {
         }
     }
 
-    /// Sorter task: Sorts events and forwards to writer
-    async fn sorter_task(
-        mut rx: mpsc::UnboundedReceiver<MinimalEventDataBatch>,
-        writer_tx: mpsc::UnboundedSender<WriterCommand>,
+    /// Writer task: Handles file I/O
+    async fn writer_task(
+        mut rx: mpsc::UnboundedReceiver<WriterCommand>,
         config: RecorderConfig,
-        _stats: Arc<AtomicStats>,
+        stats: Arc<AtomicStats>,
         mut state_rx: watch::Receiver<ComponentState>,
     ) {
-        let mut buffer =
-            SortingBuffer::new(config.sort_margin_ratio, config.min_events_before_flush);
-        let mut flush_interval = tokio::time::interval(Duration::from_millis(500));
+        let mut writer = FileWriter::new(config, stats);
+        let mut eos_received = false;
 
         loop {
             tokio::select! {
                 biased;
 
-                batch = rx.recv() => {
-                    match batch {
-                        Some(batch) => {
-                            buffer.add_batch(&batch);
-
-                            // Try to flush if buffer is large enough
-                            let events = buffer.flush();
-                            if !events.is_empty()
-                                && writer_tx.send(WriterCommand::WriteEvents(events)).is_err()
-                            {
-                                warn!("Writer channel closed");
-                                break;
+                cmd = rx.recv() => {
+                    match cmd {
+                        Some(WriterCommand::WriteBatch(batch)) => {
+                            if let Err(e) = writer.write_batch(batch) {
+                                warn!(error = %e, "Failed to write batch");
                             }
                         }
-                        None => {
-                            // Channel closed, flush remaining and exit
-                            info!("Sorter: input channel closed, flushing remaining");
-                            let events = buffer.flush_all();
-                            if !events.is_empty() {
-                                let _ = writer_tx.send(WriterCommand::WriteEvents(events));
+                        Some(WriterCommand::EndOfStream { source_id }) => {
+                            info!(source_id, "Writer received EOS - closing file");
+                            if let Err(e) = writer.end_run() {
+                                warn!(error = %e, "Failed to close file on EOS");
+                            }
+                            eos_received = true;
+                        }
+                        Some(WriterCommand::NewRun(run_config)) => {
+                            writer.new_run(run_config);
+                            eos_received = false;
+                            info!("Writer configured for new run");
+                        }
+                        Some(WriterCommand::StartRun { run_number }) => {
+                            writer.start_run(run_number);
+                            info!(run_number, "Writer started - recording enabled");
+                        }
+                        Some(WriterCommand::CloseFile) => {
+                            if let Err(e) = writer.end_run() {
+                                warn!(error = %e, "Failed to close file");
+                            }
+                        }
+                        Some(WriterCommand::Shutdown) => {
+                            if let Err(e) = writer.close_file() {
+                                warn!(error = %e, "Failed to close file on shutdown");
                             }
                             break;
                         }
-                    }
-                }
-
-                _ = flush_interval.tick() => {
-                    // Periodic flush check
-                    if *state_rx.borrow() == ComponentState::Running && buffer.len() > 0 {
-                        let events = buffer.flush();
-                        if !events.is_empty()
-                            && writer_tx.send(WriterCommand::WriteEvents(events)).is_err()
-                        {
-                            warn!("Writer channel closed during periodic flush");
+                        None => {
+                            info!("Writer channel closed");
                             break;
                         }
                     }
@@ -795,52 +739,22 @@ impl Recorder {
 
                 _ = state_rx.changed() => {
                     let current = *state_rx.borrow();
-                    debug!(state = %current, "Sorter state changed");
+                    debug!(state = %current, "Writer state changed");
 
-                    // On stop, flush all remaining events
-                    if current == ComponentState::Configured || current == ComponentState::Idle {
-                        let events = buffer.flush_all();
-                        if !events.is_empty() {
-                            let _ = writer_tx.send(WriterCommand::WriteEvents(events));
+                    // Close file when stopping (if not already closed by EOS)
+                    if (current == ComponentState::Configured || current == ComponentState::Idle)
+                        && !eos_received
+                    {
+                        info!("State changed to {} - closing file", current);
+                        if let Err(e) = writer.end_run() {
+                            warn!(error = %e, "Failed to close file on state change");
                         }
-                        buffer.clear();
                     }
-                }
-            }
-        }
 
-        info!("Sorter task completed");
-    }
-
-    /// Writer task: Handles file I/O
-    async fn writer_task(
-        mut rx: mpsc::UnboundedReceiver<WriterCommand>,
-        config: RecorderConfig,
-        stats: Arc<AtomicStats>,
-    ) {
-        let mut writer = FileWriter::new(config, stats);
-
-        while let Some(cmd) = rx.recv().await {
-            match cmd {
-                WriterCommand::WriteEvents(events) => {
-                    if let Err(e) = writer.write_events(events) {
-                        warn!(error = %e, "Failed to write events");
+                    // Reset EOS flag when starting new run
+                    if current == ComponentState::Running {
+                        eos_received = false;
                     }
-                }
-                WriterCommand::NewRun(run_config) => {
-                    writer.new_run(run_config);
-                    info!("Writer configured for new run");
-                }
-                WriterCommand::CloseFile => {
-                    if let Err(e) = writer.close_file() {
-                        warn!(error = %e, "Failed to close file");
-                    }
-                }
-                WriterCommand::Shutdown => {
-                    if let Err(e) = writer.close_file() {
-                        warn!(error = %e, "Failed to close file on shutdown");
-                    }
-                    break;
                 }
             }
         }
@@ -858,71 +772,6 @@ mod tests {
         let config = RecorderConfig::default();
         assert_eq!(config.max_file_size, 1024 * 1024 * 1024);
         assert_eq!(config.max_file_duration_secs, 600);
-        assert!((config.sort_margin_ratio - 0.05).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn test_sorting_buffer_basic() {
-        let mut buffer = SortingBuffer::new(0.05, 100);
-
-        // Add events out of order
-        let mut batch = MinimalEventDataBatch::new(1, 1);
-        batch.push(MinimalEventData::new(0, 0, 100, 80, 3000.0, 0));
-        batch.push(MinimalEventData::new(0, 1, 200, 160, 1000.0, 0));
-        batch.push(MinimalEventData::new(0, 2, 300, 240, 2000.0, 0));
-
-        buffer.add_batch(&batch);
-        assert_eq!(buffer.len(), 3);
-    }
-
-    #[test]
-    fn test_sorting_buffer_flush_all() {
-        let mut buffer = SortingBuffer::new(0.05, 100);
-
-        let mut batch = MinimalEventDataBatch::new(1, 1);
-        batch.push(MinimalEventData::new(0, 0, 100, 80, 3000.0, 0));
-        batch.push(MinimalEventData::new(0, 1, 200, 160, 1000.0, 0));
-        batch.push(MinimalEventData::new(0, 2, 300, 240, 2000.0, 0));
-
-        buffer.add_batch(&batch);
-
-        let events = buffer.flush_all();
-        assert_eq!(events.len(), 3);
-
-        // Verify sorted order
-        assert!((events[0].timestamp_ns - 1000.0).abs() < f64::EPSILON);
-        assert!((events[1].timestamp_ns - 2000.0).abs() < f64::EPSILON);
-        assert!((events[2].timestamp_ns - 3000.0).abs() < f64::EPSILON);
-
-        // Buffer should be empty
-        assert_eq!(buffer.len(), 0);
-    }
-
-    #[test]
-    fn test_sorting_buffer_margin() {
-        // Create buffer with small min_margin_count for testing
-        let mut buffer = SortingBuffer {
-            events: Vec::with_capacity(200),
-            margin_ratio: 0.20, // 20% margin
-            min_buffer_size: 10,
-            min_margin_count: 10, // Small for test
-        };
-
-        // Add 100 events
-        let mut batch = MinimalEventDataBatch::new(1, 1);
-        for i in 0..100 {
-            batch.push(MinimalEventData::new(0, 0, 100, 80, i as f64 * 10.0, 0));
-        }
-        buffer.add_batch(&batch);
-
-        // Flush should keep ~20 events as margin (20% of 100)
-        let events = buffer.flush();
-
-        // Should write 80 events (100 - 20% margin)
-        assert_eq!(events.len(), 80);
-
-        // Buffer should still have 20 margin events
-        assert_eq!(buffer.len(), 20);
     }
 
     #[test]

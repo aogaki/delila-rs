@@ -61,7 +61,8 @@ pub trait CommandHandlerExt {
     }
 
     /// Called before Start transition
-    fn on_start(&mut self) -> Result<(), String> {
+    /// run_number is provided to allow updating run number at start time
+    fn on_start(&mut self, _run_number: u32) -> Result<(), String> {
         Ok(())
     }
 
@@ -154,7 +155,7 @@ pub fn handle_command<E: CommandHandlerExt>(
             CommandResponse::success_with_run(ComponentState::Armed, "Armed", run_number)
         }
 
-        Command::Start => {
+        Command::Start { run_number } => {
             if !current.can_transition_to(ComponentState::Running) {
                 return CommandResponse::error(
                     current,
@@ -162,8 +163,13 @@ pub fn handle_command<E: CommandHandlerExt>(
                 );
             }
 
+            // Update run_number in run_config if it exists
+            if let Some(ref mut cfg) = state.run_config {
+                cfg.run_number = run_number;
+            }
+
             if let Some(ref mut e) = ext {
-                if let Err(msg) = e.on_start() {
+                if let Err(msg) = e.on_start(run_number) {
                     return CommandResponse::error(current, msg);
                 }
             }
@@ -171,8 +177,7 @@ pub fn handle_command<E: CommandHandlerExt>(
             state.state = ComponentState::Running;
             let _ = state_tx.send(ComponentState::Running);
 
-            info!(component = component_name, "Started");
-            let run_number = state.run_number().unwrap_or(0);
+            info!(component = component_name, run_number, "Started");
             CommandResponse::success_with_run(ComponentState::Running, "Started", run_number)
         }
 
@@ -294,7 +299,7 @@ mod tests {
             Ok(())
         }
 
-        fn on_start(&mut self) -> Result<(), String> {
+        fn on_start(&mut self, _run_number: u32) -> Result<(), String> {
             self.start_called = true;
             Ok(())
         }
@@ -343,7 +348,12 @@ mod tests {
         assert!(ext.arm_called);
 
         // Start
-        let resp = handle_command(&mut state, &state_tx, Command::Start, Some(&mut ext));
+        let resp = handle_command(
+            &mut state,
+            &state_tx,
+            Command::Start { run_number: 42 },
+            Some(&mut ext),
+        );
         assert!(resp.success);
         assert_eq!(state.state, ComponentState::Running);
         assert!(ext.start_called);
@@ -367,7 +377,8 @@ mod tests {
         let (state_tx, _state_rx) = watch::channel(ComponentState::Idle);
 
         // Cannot start from Idle
-        let resp = handle_command_simple(&mut state, &state_tx, Command::Start, "Test");
+        let resp =
+            handle_command_simple(&mut state, &state_tx, Command::Start { run_number: 1 }, "Test");
         assert!(!resp.success);
         assert_eq!(state.state, ComponentState::Idle);
     }

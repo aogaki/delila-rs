@@ -119,7 +119,6 @@ async fn main() -> anyhow::Result<()> {
             output_dir: PathBuf::from(output_dir.unwrap_or(out_dir)),
             max_file_size: max_size_mb * 1024 * 1024,
             max_file_duration_secs: max_duration_sec,
-            ..Default::default()
         }
     } else {
         // Use defaults with CLI overrides
@@ -129,7 +128,6 @@ async fn main() -> anyhow::Result<()> {
             output_dir: PathBuf::from(output_dir.unwrap_or_else(|| "./data".to_string())),
             max_file_size: 1024 * 1024 * 1024, // 1GB
             max_file_duration_secs: 600,       // 10 minutes
-            ..Default::default()
         }
     };
 
@@ -150,7 +148,7 @@ async fn main() -> anyhow::Result<()> {
     let mut recorder = Recorder::new(recorder_config.clone()).await?;
 
     println!("========================================");
-    println!("       DELILA Recorder Started");
+    println!("    DELILA Raw Data Recorder Started");
     println!("========================================");
     println!();
     println!("  Subscribing to: {}", recorder_config.subscribe_address);
@@ -163,10 +161,7 @@ async fn main() -> anyhow::Result<()> {
         "  Max duration:   {} sec",
         recorder_config.max_file_duration_secs
     );
-    println!(
-        "  Sort margin:    {}%",
-        recorder_config.sort_margin_ratio * 100.0
-    );
+    println!("  Mode:           Raw (unsorted)");
     println!();
     println!("  Press Ctrl+C to stop.");
     println!("========================================");

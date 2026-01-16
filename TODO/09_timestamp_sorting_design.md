@@ -396,7 +396,156 @@ pub struct ChecksumCalculator {
 2. Footerの magic が不正 → ファイル破損
 3. チェックサム不一致 → データ破損
 
-### 今後の拡張
+---
 
-- Phase 3: クラッシュリカバリツール実装
-- Phase 3: イベント数ベースローテーション
+## Phase 3 実装完了 (2026-01-15)
+
+### 1. クラッシュリカバリツール (`delila-recover`)
+
+**実装ファイル:** `src/bin/recover.rs`
+
+コマンドラインツールで以下の機能を提供:
+
+| コマンド | 説明 |
+|----------|------|
+| `validate <file>` | ファイル整合性チェック |
+| `info <file>` | ファイルメタデータ表示 |
+| `recover <file> [--output <path>]` | 不完全ファイルからデータ復旧 |
+| `list <directory> [-r]` | ディレクトリ内の.delilaファイル一覧とステータス表示 |
+
+**リカバリアルゴリズム:**
+1. ヘッダー読み込み（破損していれば復旧不可）
+2. データブロックを順次読み込み、エラーまで有効なデータを抽出
+3. 新しいファイルに有効データを書き込み、正しいフッターを付与
+
+**追加エクスポート (`src/recorder/mod.rs`):**
+- `DataFileReader` - ファイル読み込みクラス
+- `FileValidationResult` - 検証結果構造体
+- `ChecksumCalculator` - チェックサム計算器
+
+### 2. EOS (End Of Stream) ベースの停止制御
+
+**Recorder (`src/recorder/mod.rs`):**
+- `ReceiverMessage` enum: `Data(batch)` または `EndOfStream { source_id }`
+- EOS受信時に `SortingBuffer.flush_all()` で全データをフラッシュ
+- ファイルを正常クローズ（フッター書き込み）
+
+```rust
+// Sorter taskのEOS処理
+Some(ReceiverMessage::EndOfStream { source_id }) => {
+    info!(source_id, "Sorter received EOS - flushing all data");
+    let events = buffer.flush_all();
+    if !events.is_empty() {
+        let _ = writer_tx.send(WriterCommand::WriteEvents(events));
+    }
+    let _ = writer_tx.send(WriterCommand::CloseFile);
+    buffer.clear();
+}
+```
+
+**Monitor (`src/monitor/mod.rs`):**
+- EOS受信時にログ出力（統計情報含む）
+- **ヒストグラムはクリアしない** - Stop後もデータ閲覧可能
+- **Start時にヒストグラムをリセット** - 新しいランは新しいデータから開始
+
+```rust
+// on_start()でヒストグラムクリア
+fn on_start(&mut self) -> Result<(), String> {
+    let _ = self.histogram_tx.send(HistogramMessage::Clear);
+    let _ = self.histogram_tx.send(HistogramMessage::SetStartTime);
+    Ok(())
+}
+```
+
+### Status: **Phase 3 COMPLETED**
+
+---
+
+## Phase 4: Raw Data Recorder への簡略化 (2026-01-15)
+
+### 設計変更の背景
+
+Recorderの実装が複雑化し、以下の問題が発生した:
+- Sorter TaskとWriter Task間の状態同期が困難
+- `is_run_active` フラグによる制御でタイミング問題発生
+- 3タスク構成（Receiver → Sorter → Writer）のデバッグが困難
+
+### 決定事項: Raw Data Recorder
+
+**ソート機能をRecorderから削除し、将来のオンラインイベントビルダーに移管する。**
+
+理由:
+1. **責務の分離**: Recorderは「生データの高速書き込み」に専念すべき
+2. **オンラインイベントビルダー計画**: 近い将来、タイムスタンプソート・イベント結合を行う専用コンポーネントを実装予定
+3. **複雑さの集中**: ソート・マージン管理・バッファリングは、イベントビルダーで一元的に行うのが最適
+4. **シンプルさの価値**: 2タスク構成（Receiver → Writer）で信頼性向上
+
+### 新アーキテクチャ
+
+```
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│   Reader    │     │   Merger    │     │  Recorder   │     │   Event     │
+│  (CAEN)     │ ──► │ (zero-copy) │ ──► │ (Raw Data)  │ ──► │  Builder    │
+│             │     │             │     │  シンプル    │     │ (将来実装)  │
+└─────────────┘     └─────────────┘     └─────────────┘     └─────────────┘
+                                              │
+                                              │ ファイル出力
+                                              ▼
+                                        *.delila (未ソート)
+```
+
+### 削除するもの
+
+- `SortingBuffer` 構造体
+- `sorter_task()` 関数
+- `is_run_active: Arc<AtomicBool>` フラグ
+- `RecorderConfig` のソート関連フィールド:
+  - `sort_margin_ratio`
+  - `min_events_before_flush`
+
+### 残すもの
+
+- ファイルフォーマット v2（ヘッダー/フッター/チェックサム）
+- EOS処理（ファイルクローズ）
+- ファイルローテーション（サイズ/時間）
+- `delila-recover` CLIツール
+
+### FileHeader の変更
+
+```rust
+pub struct FileHeader {
+    pub is_sorted: bool,           // false に固定
+    pub sort_margin_ratio: f64,    // 0.0 に固定（未使用）
+    // ... 他のフィールドは維持
+}
+```
+
+### 実装構成 (簡略化後)
+
+```
+Recorder::run()
+├── Receiver Task
+│   └── ZMQ SUB → mpsc channel → Writer Task
+└── Writer Task
+    └── mpsc channel → FileWriter → *.delila
+```
+
+### fsync戦略 (維持)
+
+- ファイルクローズ時のみ `sync_data()` 実行
+- HDD/SSD問わずfsyncなしで運用（OSのPage Cacheに依存）
+- 電源断対策はUPSで行う
+
+### Status: **Phase 4 COMPLETED** (2026-01-15)
+
+**変更内容:**
+- `src/recorder/mod.rs`: 1035行 → 753行に簡略化
+  - `SortingBuffer` 構造体を削除
+  - `sorter_task()` を削除
+  - `ReceiverMessage` を `WriterCommand::WriteBatch` に統合
+  - `is_run_active: Arc<AtomicBool>` を `run_active: bool` に簡略化
+  - 2タスク構成（Receiver → Writer）に変更
+- `src/bin/recorder.rs`: ソート関連の表示を削除、"Raw (unsorted)"表示を追加
+- `RecorderConfig`: `sort_margin_ratio`, `min_events_before_flush`, `channel_capacity` を削除
+
+**テスト結果:** 147テスト全通過

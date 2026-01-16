@@ -10,37 +10,44 @@ cluster_name = "daq-cluster-1"
 
 # Data sources (emulators or real digitizers)
 # id = module number (0-indexed)
+# pipeline_order: Start順=昇順, Stop順=降順 (1=upstream, 3=downstream)
 [[network.sources]]
 id = 0
 name = "digitizer-0"
 bind = "tcp://*:5555"
 command = "tcp://*:5560"
+pipeline_order = 1
 
 [[network.sources]]
 id = 1
 name = "digitizer-1"
 bind = "tcp://*:5556"
 command = "tcp://*:5561"
-digitizer_url = "dig2://172.18.4.56"
-module_id = 1
-time_step_ns = 2.0
+pipeline_order = 1
+#digitizer_url = "dig2://172.18.4.56"
+#module_id = 1
+#time_step_ns = 2.0
 
 # Merger: receives from all sources, publishes merged stream
 [network.merger]
 subscribe = ["tcp://localhost:5555", "tcp://localhost:5556"]
 publish = "tcp://*:5557"
 command = "tcp://*:5570"
+pipeline_order = 2
 
 # Recorder: writes data to disk
 [network.recorder]
 subscribe = "tcp://localhost:5557"
 command = "tcp://*:5580"
 output_dir = "./data"
+pipeline_order = 3
 
 # Monitor: web interface for live monitoring
 [network.monitor]
 subscribe = "tcp://localhost:5557"
+command = "tcp://*:5590"
 http_port = 8081
+pipeline_order = 3
 
 # =============================================================================
 # Operational Settings

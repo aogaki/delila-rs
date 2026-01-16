@@ -20,8 +20,8 @@ use tokio::time::interval;
 use tracing::{debug, info};
 
 use crate::common::{
-    flags, handle_command_simple, run_command_task, ComponentSharedState, ComponentState, Message,
-    MinimalEventData, MinimalEventDataBatch,
+    flags, handle_command_simple, run_command_task, ComponentSharedState, ComponentState,
+    EventData, EventDataBatch, Message,
 };
 
 /// Emulator configuration
@@ -123,9 +123,9 @@ impl Emulator {
     ///
     /// Energy distribution: mean = module * 1000 + channel * 50, sigma = 50
     /// This creates distinct peaks for each channel, making histograms easier to verify.
-    fn generate_batch(&mut self) -> MinimalEventDataBatch {
+    fn generate_batch(&mut self) -> EventDataBatch {
         let mut rng = rand::thread_rng();
-        let mut batch = MinimalEventDataBatch::with_capacity(
+        let mut batch = EventDataBatch::with_capacity(
             self.config.source_id,
             self.sequence_number,
             self.config.events_per_batch,
@@ -159,7 +159,7 @@ impl Emulator {
                 0
             };
 
-            batch.push(MinimalEventData::new(
+            batch.push(EventData::new(
                 module,
                 channel,
                 energy,
@@ -478,7 +478,7 @@ mod tests {
 
     #[test]
     fn test_message_data_creation() {
-        let batch = MinimalEventDataBatch::with_capacity(0, 0, 10);
+        let batch = EventDataBatch::with_capacity(0, 0, 10);
         let msg = Message::data(batch);
         match msg {
             Message::Data(_) => (),

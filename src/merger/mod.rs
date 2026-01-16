@@ -229,7 +229,7 @@ impl CommandHandlerExt for MergerCommandExt {
         "Merger"
     }
 
-    fn on_start(&mut self) -> Result<(), String> {
+    fn on_start(&mut self, _run_number: u32) -> Result<(), String> {
         self.ext_state.clear();
         self.ext_state.atomic_stats.clear();
         Ok(())

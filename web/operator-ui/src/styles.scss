@@ -1,0 +1,28 @@
+@use '@angular/material' as mat;
+
+// Include core styles
+@include mat.core();
+
+// Define the theme using Material 3
+$theme: mat.define-theme((
+  color: (
+    theme-type: light,
+    primary: mat.$azure-palette,
+    tertiary: mat.$blue-palette,
+  ),
+  density: (
+    scale: 0,
+  )
+));
+
+// Apply the theme
+html {
+  @include mat.all-component-themes($theme);
+}
+
+// Global styles
+html, body {
+  height: 100%;
+  margin: 0;
+  font-family: Roboto, "Helvetica Neue", sans-serif;
+}
