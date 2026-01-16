@@ -1,4 +1,4 @@
-import { Injectable, signal, computed } from '@angular/core';
+import { Injectable, signal, computed, inject } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
 import { Observable, interval, switchMap, catchError, of, tap } from 'rxjs';
 import {
@@ -37,7 +37,7 @@ export class OperatorService {
     return comps.reduce((sum, c) => sum + (c.metrics?.event_rate ?? 0), 0);
   });
 
-  constructor(private http: HttpClient) {}
+  private readonly http = inject(HttpClient);
 
   // Start polling for status
   startPolling(): void {
