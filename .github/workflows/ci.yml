@@ -102,3 +102,68 @@ jobs:
         with:
           key: ${{ matrix.os }}
       - run: cargo build --release
+
+  # Angular Web UI checks
+  web-lint:
+    name: Web Lint
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: web/operator-ui
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: web/operator-ui/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+
+  web-build:
+    name: Web Build
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: web/operator-ui
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: web/operator-ui/package-lock.json
+      - run: npm ci
+      - run: npm run build
+
+  web-test:
+    name: Web Test
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: web/operator-ui
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: web/operator-ui/package-lock.json
+      - run: npm ci
+      - run: npm test -- --watch=false --browsers=ChromeHeadless
+
+  web-audit:
+    name: Web Security Audit
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: web/operator-ui
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: web/operator-ui/package-lock.json
+      - run: npm ci
+      - run: npm audit --audit-level=high
