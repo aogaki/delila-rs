@@ -49,10 +49,5 @@ if [ "$STOP_DOCKER" = true ]; then
             echo "  No DELILA Docker containers running"
         fi
     fi
-else
-    # Check if MongoDB is running and inform user
-    if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "delila_mongo"; then
-        echo ""
-        echo -e "${YELLOW}Note: MongoDB is still running. Use --with-docker to stop it.${NC}"
-    fi
 fi
+# Note: MongoDB runs as a daemon and is not stopped by default

@@ -57,53 +57,36 @@ if [ ! -f "$BINARY_DIR/emulator" ]; then
     cargo build --release
 fi
 
-# Start MongoDB with Docker Compose (unless --no-mongo)
+# Check if MongoDB is available (unless --no-mongo)
 MONGO_AVAILABLE=false
 if [ "$SKIP_MONGO" = false ]; then
     echo ""
-    echo -e "${CYAN}=== Starting MongoDB ===${NC}"
+    echo -e "${CYAN}=== Checking MongoDB ===${NC}"
 
-    # Check if docker is available
+    # Check if MongoDB container is running
     if command -v docker &> /dev/null; then
-        DOCKER_DIR="./docker"
-        if [ -f "$DOCKER_DIR/docker-compose.yml" ]; then
-            # Check if MongoDB is already running
-            if docker ps --format '{{.Names}}' | grep -q "delila_mongo"; then
-                echo "  MongoDB already running"
+        if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "delila_mongo"; then
+            # Verify MongoDB is responding
+            if docker exec delila_mongo mongosh --quiet --eval "db.runCommand('ping').ok" &>/dev/null; then
+                echo -e "  ${GREEN}MongoDB is running${NC}"
                 MONGO_AVAILABLE=true
             else
-                echo "  Starting Docker containers..."
-                (cd "$DOCKER_DIR" && docker compose up -d 2>/dev/null) || \
-                (cd "$DOCKER_DIR" && docker-compose up -d 2>/dev/null)
-
-                if [ $? -eq 0 ]; then
-                    echo "  Waiting for MongoDB to be ready..."
-                    # Wait for MongoDB to accept connections (max 30 seconds)
-                    for i in {1..30}; do
-                        if docker exec delila_mongo mongosh --quiet --eval "db.runCommand('ping').ok" &>/dev/null; then
-                            echo -e "  ${GREEN}MongoDB is ready${NC}"
-                            MONGO_AVAILABLE=true
-                            break
-                        fi
-                        sleep 1
-                    done
-
-                    if [ "$MONGO_AVAILABLE" = false ]; then
-                        echo -e "  ${YELLOW}Warning: MongoDB not responding, continuing without it${NC}"
-                    fi
-                else
-                    echo -e "  ${YELLOW}Warning: Failed to start Docker containers${NC}"
-                fi
+                echo -e "  ${YELLOW}MongoDB container exists but not responding${NC}"
             fi
         else
-            echo -e "  ${YELLOW}Warning: docker-compose.yml not found in $DOCKER_DIR${NC}"
+            echo -e "  ${YELLOW}MongoDB not running${NC}"
+            echo -e "  ${YELLOW}To start MongoDB: cd docker && docker compose up -d${NC}"
         fi
     else
-        echo -e "  ${YELLOW}Warning: Docker not available, skipping MongoDB${NC}"
+        echo -e "  ${YELLOW}Docker not available${NC}"
+    fi
+
+    if [ "$MONGO_AVAILABLE" = false ]; then
+        echo -e "  ${YELLOW}Continuing without run history persistence${NC}"
     fi
 else
     echo ""
-    echo -e "${YELLOW}Skipping MongoDB (--no-mongo)${NC}"
+    echo -e "${YELLOW}Skipping MongoDB check (--no-mongo)${NC}"
 fi
 
 # Function to check if source has digitizer_url
