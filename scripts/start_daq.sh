@@ -75,7 +75,7 @@ if [ "$SKIP_MONGO" = false ]; then
             fi
         else
             echo -e "  ${YELLOW}MongoDB not running${NC}"
-            echo -e "  ${YELLOW}To start MongoDB: cd docker && docker compose up -d${NC}"
+            echo -e "  ${YELLOW}To start MongoDB: cd docker && docker-compose up -d${NC}"
         fi
     else
         echo -e "  ${YELLOW}Docker not available${NC}"

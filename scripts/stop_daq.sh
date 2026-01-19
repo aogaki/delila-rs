@@ -42,8 +42,7 @@ if [ "$STOP_DOCKER" = true ]; then
     DOCKER_DIR="./docker"
     if [ -f "$DOCKER_DIR/docker-compose.yml" ]; then
         if docker ps --format '{{.Names}}' | grep -q "delila_"; then
-            (cd "$DOCKER_DIR" && docker compose down 2>/dev/null) || \
-            (cd "$DOCKER_DIR" && docker-compose down 2>/dev/null)
+            (cd "$DOCKER_DIR" && docker-compose down)
             echo -e "  ${GREEN}Docker containers stopped${NC}"
         else
             echo "  No DELILA Docker containers running"

@@ -8,8 +8,10 @@ Run history and configuration storage.
 
 ```bash
 cd docker
-docker compose up -d
+docker-compose up -d
 ```
+
+> **Note**: On macOS with Homebrew Docker, use `docker-compose` (with hyphen) instead of `docker compose` (with space).
 
 ### Services
 
@@ -36,8 +38,8 @@ docker compose up -d
 Data is stored in a Docker volume `mongo_data`. To reset:
 
 ```bash
-docker compose down -v
-docker compose up -d
+docker-compose down -v
+docker-compose up -d
 ```
 
 ### Collections
