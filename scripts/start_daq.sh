@@ -1,9 +1,27 @@
 #!/bin/bash
 # DELILA DAQ Start Script
-# Usage: ./scripts/start_daq.sh [config_file]
+# Usage: ./scripts/start_daq.sh [config_file] [--no-mongo]
+#
+# Options:
+#   --no-mongo    Skip MongoDB/Docker startup
 
 CONFIG_FILE="${1:-config.toml}"
 BINARY_DIR="./target/release"
+SKIP_MONGO=false
+
+# Parse arguments
+for arg in "$@"; do
+    case $arg in
+        --no-mongo)
+            SKIP_MONGO=true
+            shift
+            ;;
+        *.toml)
+            CONFIG_FILE="$arg"
+            shift
+            ;;
+    esac
+done
 
 # Log level configuration
 # For specific component: RUST_LOG=info,delila_rs::merger=debug ./scripts/start_daq.sh
@@ -23,6 +41,10 @@ NC='\033[0m' # No Color
 echo -e "${GREEN}=== DELILA DAQ Startup ===${NC}"
 echo "Config: $CONFIG_FILE"
 
+# MongoDB configuration
+MONGODB_URI="mongodb://delila:delila_pass@localhost:27017"
+MONGODB_DATABASE="delila"
+
 # Check if config exists
 if [ ! -f "$CONFIG_FILE" ]; then
     echo -e "${RED}Error: Config file not found: $CONFIG_FILE${NC}"
@@ -33,6 +55,55 @@ fi
 if [ ! -f "$BINARY_DIR/emulator" ]; then
     echo -e "${YELLOW}Building release binaries...${NC}"
     cargo build --release
+fi
+
+# Start MongoDB with Docker Compose (unless --no-mongo)
+MONGO_AVAILABLE=false
+if [ "$SKIP_MONGO" = false ]; then
+    echo ""
+    echo -e "${CYAN}=== Starting MongoDB ===${NC}"
+
+    # Check if docker is available
+    if command -v docker &> /dev/null; then
+        DOCKER_DIR="./docker"
+        if [ -f "$DOCKER_DIR/docker-compose.yml" ]; then
+            # Check if MongoDB is already running
+            if docker ps --format '{{.Names}}' | grep -q "delila_mongo"; then
+                echo "  MongoDB already running"
+                MONGO_AVAILABLE=true
+            else
+                echo "  Starting Docker containers..."
+                (cd "$DOCKER_DIR" && docker compose up -d 2>/dev/null) || \
+                (cd "$DOCKER_DIR" && docker-compose up -d 2>/dev/null)
+
+                if [ $? -eq 0 ]; then
+                    echo "  Waiting for MongoDB to be ready..."
+                    # Wait for MongoDB to accept connections (max 30 seconds)
+                    for i in {1..30}; do
+                        if docker exec delila_mongo mongosh --quiet --eval "db.runCommand('ping').ok" &>/dev/null; then
+                            echo -e "  ${GREEN}MongoDB is ready${NC}"
+                            MONGO_AVAILABLE=true
+                            break
+                        fi
+                        sleep 1
+                    done
+
+                    if [ "$MONGO_AVAILABLE" = false ]; then
+                        echo -e "  ${YELLOW}Warning: MongoDB not responding, continuing without it${NC}"
+                    fi
+                else
+                    echo -e "  ${YELLOW}Warning: Failed to start Docker containers${NC}"
+                fi
+            fi
+        else
+            echo -e "  ${YELLOW}Warning: docker-compose.yml not found in $DOCKER_DIR${NC}"
+        fi
+    else
+        echo -e "  ${YELLOW}Warning: Docker not available, skipping MongoDB${NC}"
+    fi
+else
+    echo ""
+    echo -e "${YELLOW}Skipping MongoDB (--no-mongo)${NC}"
 fi
 
 # Function to check if source has digitizer_url
@@ -95,7 +166,16 @@ sleep 0.3
 
 # Start operator (Web UI)
 echo "  Starting operator (Web UI)..."
-$BINARY_DIR/operator --config "$CONFIG_FILE" > "$LOG_DIR/operator.log" 2>&1 &
+if [ "$MONGO_AVAILABLE" = true ]; then
+    $BINARY_DIR/operator --config "$CONFIG_FILE" \
+        --mongodb-uri "$MONGODB_URI" \
+        --mongodb-database "$MONGODB_DATABASE" \
+        > "$LOG_DIR/operator.log" 2>&1 &
+    echo "    (with MongoDB for run history)"
+else
+    $BINARY_DIR/operator --config "$CONFIG_FILE" > "$LOG_DIR/operator.log" 2>&1 &
+    echo "    (without MongoDB)"
+fi
 sleep 0.5
 
 echo ""
@@ -115,7 +195,11 @@ echo "  Recorder:   tcp://localhost:5580"
 echo "  Monitor:    tcp://localhost:5590"
 echo ""
 echo -e "${CYAN}=== Web UI ===${NC}"
-echo -e "  Swagger UI: ${YELLOW}http://localhost:8080/swagger-ui/${NC}"
+echo -e "  Swagger UI:    ${YELLOW}http://localhost:8080/swagger-ui/${NC}"
+echo -e "  Monitor:       ${YELLOW}http://localhost:8081/${NC}"
+if [ "$MONGO_AVAILABLE" = true ]; then
+    echo -e "  Mongo Express: ${YELLOW}http://localhost:8082/${NC}"
+fi
 echo ""
 echo -e "${CYAN}=== Logs ===${NC}"
 echo -e "  Log directory: ${YELLOW}$LOG_DIR/${NC}"
