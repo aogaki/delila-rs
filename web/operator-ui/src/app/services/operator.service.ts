@@ -100,4 +100,9 @@ export class OperatorService {
   reset(): Observable<ApiResponse> {
     return this.http.post<ApiResponse>(`${this.baseUrl}/reset`, {});
   }
+
+  // Get next available run number from MongoDB
+  getNextRunNumber(): Observable<{ next_run_number: number }> {
+    return this.http.get<{ next_run_number: number }>(`${this.baseUrl}/runs/next`);
+  }
 }

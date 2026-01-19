@@ -1,4 +1,4 @@
-import { Component, inject, signal, output } from '@angular/core';
+import { Component, inject, signal, output, OnInit, effect } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { MatCardModule } from '@angular/material/card';
@@ -107,7 +107,7 @@ import { OperatorService } from '../../services/operator.service';
     }
   `,
 })
-export class ControlPanelComponent {
+export class ControlPanelComponent implements OnInit {
   readonly operator = inject(OperatorService);
   private readonly snackBar = inject(MatSnackBar);
 
@@ -116,9 +116,47 @@ export class ControlPanelComponent {
   comment = '';
   autoIncrement = signal(true);
 
+  // Track if we've synced run number from backend
+  private runNumberSynced = false;
+
   // Events for parent component
   readonly runStarted = output<{ runNumber: number; expName: string }>();
   readonly runStopped = output<void>();
+
+  constructor() {
+    // When run_info changes (e.g., a run is active), sync run number
+    effect(() => {
+      const runInfo = this.operator.runInfo();
+      if (runInfo && runInfo.status === 'running') {
+        // A run is active, show its run number
+        this.runNumber = runInfo.run_number;
+      }
+    });
+  }
+
+  ngOnInit(): void {
+    // Fetch next run number from backend on init
+    this.syncRunNumber();
+  }
+
+  private syncRunNumber(): void {
+    if (this.runNumberSynced) return;
+
+    this.operator.getNextRunNumber().subscribe({
+      next: (res) => {
+        // Only update if no run is currently active
+        const runInfo = this.operator.runInfo();
+        if (!runInfo || runInfo.status !== 'running') {
+          this.runNumber = res.next_run_number;
+        }
+        this.runNumberSynced = true;
+      },
+      error: () => {
+        // MongoDB not available, keep default
+        console.log('MongoDB not available, using default run number');
+      },
+    });
+  }
 
   // Start is enabled for both Configured and Armed states
   // (backend will auto-arm if needed)

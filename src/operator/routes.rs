@@ -57,6 +57,7 @@ pub struct AppState {
         save_digitizer,
         get_run_history,
         get_run,
+        get_next_run_number,
     ),
     components(schemas(
         SystemStatus,
@@ -72,6 +73,7 @@ pub struct AppState {
         CurrentRunInfo,
         RunStats,
         RunStatus,
+        NextRunNumberResponse,
     )),
     tags(
         (name = "DAQ Control", description = "DAQ system control endpoints"),
@@ -151,6 +153,7 @@ pub fn create_router_full(
         .route("/api/run/start", post(run_start))
         // Run history routes
         .route("/api/runs", get(get_run_history))
+        .route("/api/runs/next", get(get_next_run_number))
         .route("/api/runs/{run_number}", get(get_run))
         // Digitizer configuration routes
         .route("/api/digitizers", get(list_digitizers))
@@ -837,4 +840,45 @@ async fn get_run(
             Json(ApiResponse::error(format!("Run {} not found", run_number))),
         )
     })
+}
+
+/// Next run number response
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct NextRunNumberResponse {
+    pub next_run_number: i32,
+}
+
+/// Get the next available run number
+#[utoipa::path(
+    get,
+    path = "/api/runs/next",
+    tag = "Run History",
+    responses(
+        (status = 200, description = "Next run number", body = NextRunNumberResponse),
+        (status = 503, description = "MongoDB not available", body = ApiResponse)
+    )
+)]
+async fn get_next_run_number(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<NextRunNumberResponse>, (StatusCode, Json<ApiResponse>)> {
+    let repo = state.run_repo.as_ref().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ApiResponse::error("MongoDB not configured")),
+        )
+    })?;
+
+    let next = repo.get_next_run_number().await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse::error(format!(
+                "Failed to get next run number: {}",
+                e
+            ))),
+        )
+    })?;
+
+    Ok(Json(NextRunNumberResponse {
+        next_run_number: next,
+    }))
 }
