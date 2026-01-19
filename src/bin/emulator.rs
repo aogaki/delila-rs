@@ -151,6 +151,9 @@ async fn main() -> anyhow::Result<()> {
             heartbeat_interval_ms: 1000, // 1Hz heartbeat
             num_modules: settings.num_modules as u8,
             channels_per_module: settings.channels_per_module as u8,
+            enable_waveform: settings.enable_waveform,
+            waveform_probes: settings.waveform_probes,
+            waveform_samples: settings.waveform_samples,
         }
     } else {
         // Use defaults with CLI overrides
@@ -164,6 +167,7 @@ async fn main() -> anyhow::Result<()> {
             heartbeat_interval_ms: 1000, // 1Hz heartbeat
             num_modules: 2,
             channels_per_module: 16,
+            ..Default::default()
         }
     };
 

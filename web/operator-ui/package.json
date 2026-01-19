@@ -32,6 +32,9 @@
     "@angular/material": "^20.2.14",
     "@angular/platform-browser": "^20.2.0",
     "@angular/router": "^20.2.0",
+    "echarts": "^6.0.0",
+    "ml-levenberg-marquardt": "^5.0.0",
+    "ngx-echarts": "^20.0.2",
     "rxjs": "~7.8.0",
     "tslib": "^2.3.0",
     "zone.js": "~0.15.0"

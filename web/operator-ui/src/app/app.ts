@@ -1,50 +1,80 @@
-import { Component, inject, OnInit, ViewChild } from '@angular/core';
-import { CommonModule } from '@angular/common';
+import { Component, inject, OnInit, computed } from '@angular/core';
+import { RouterModule, RouterLink, RouterLinkActive } from '@angular/router';
 import { MatToolbarModule } from '@angular/material/toolbar';
-import { MatGridListModule } from '@angular/material/grid-list';
-import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
-import { StatusPanelComponent } from './components/status-panel/status-panel.component';
-import { ControlPanelComponent } from './components/control-panel/control-panel.component';
-import { RunInfoComponent } from './components/run-info/run-info.component';
-import { TimerComponent } from './components/timer/timer.component';
+import { MatTabsModule } from '@angular/material/tabs';
+import { MatSnackBarModule } from '@angular/material/snack-bar';
 import { OperatorService } from './services/operator.service';
+import { HistogramService } from './services/histogram.service';
 
 @Component({
   selector: 'app-root',
   standalone: true,
   imports: [
-    CommonModule,
+    RouterModule,
+    RouterLink,
+    RouterLinkActive,
     MatToolbarModule,
-    MatGridListModule,
+    MatTabsModule,
     MatSnackBarModule,
-    StatusPanelComponent,
-    ControlPanelComponent,
-    RunInfoComponent,
-    TimerComponent,
   ],
   template: `
-    <mat-toolbar color="primary">
-      <span>DELILA DAQ Control</span>
+    <mat-toolbar color="primary" class="header">
+      <span class="title">DELILA DAQ</span>
+      <span class="header-stats">
+        <span class="stat-item" [class.running]="operator.systemState() === 'Running'">
+          {{ operator.systemState() }}
+        </span>
+        <span class="stat-separator">|</span>
+        <span class="stat-item">{{ formatEvents(histogram.totalEvents()) }} events</span>
+        <span class="stat-separator">|</span>
+        <span class="stat-item">{{ formatRate(histogram.eventRate()) }}</span>
+      </span>
       <span class="spacer"></span>
-      <span class="status-indicator" [class.online]="operator.status()" [class.offline]="!operator.status()">
+      @if (currentRunNumber()) {
+        <span class="run-info">Run: {{ currentRunNumber() }}</span>
+      }
+      <span
+        class="status-indicator"
+        [class.online]="operator.status()"
+        [class.offline]="!operator.status()"
+      >
         {{ operator.status() ? 'Online' : 'Offline' }}
       </span>
     </mat-toolbar>
 
-    <div class="main-content">
-      <div class="left-column">
-        <app-status-panel></app-status-panel>
-        <app-run-info #runInfo></app-run-info>
-      </div>
-      <div class="right-column">
-        <app-control-panel
-          #controlPanel
-          (runStarted)="onRunStarted($event)"
-          (runStopped)="onRunStopped()"
-        ></app-control-panel>
-        <app-timer (timerStarted)="onTimerStarted()" (timerExpired)="onTimerExpired()"></app-timer>
-      </div>
-    </div>
+    <nav mat-tab-nav-bar [tabPanel]="tabPanel" class="nav-tabs">
+      <a
+        mat-tab-link
+        routerLink="/control"
+        routerLinkActive
+        #rla1="routerLinkActive"
+        [active]="rla1.isActive"
+      >
+        Control
+      </a>
+      <a
+        mat-tab-link
+        routerLink="/monitor"
+        routerLinkActive
+        #rla2="routerLinkActive"
+        [active]="rla2.isActive"
+      >
+        Monitor
+      </a>
+      <a
+        mat-tab-link
+        routerLink="/waveform"
+        routerLinkActive
+        #rla3="routerLinkActive"
+        [active]="rla3.isActive"
+      >
+        Waveform
+      </a>
+    </nav>
+
+    <mat-tab-nav-panel #tabPanel class="tab-content">
+      <router-outlet></router-outlet>
+    </mat-tab-nav-panel>
   `,
   styles: `
     :host {
@@ -53,14 +83,47 @@ import { OperatorService } from './services/operator.service';
       height: 100vh;
     }
 
-    mat-toolbar {
+    .header {
       position: sticky;
       top: 0;
       z-index: 100;
     }
 
+    .title {
+      font-weight: 500;
+      margin-right: 24px;
+    }
+
+    .header-stats {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 14px;
+    }
+
+    .stat-item {
+      opacity: 0.9;
+    }
+
+    .stat-item.running {
+      color: #4caf50;
+      font-weight: 500;
+    }
+
+    .stat-separator {
+      opacity: 0.5;
+    }
+
     .spacer {
       flex: 1 1 auto;
+    }
+
+    .run-info {
+      margin-right: 16px;
+      padding: 4px 12px;
+      background-color: rgba(255, 255, 255, 0.1);
+      border-radius: 4px;
+      font-size: 14px;
     }
 
     .status-indicator {
@@ -80,79 +143,52 @@ import { OperatorService } from './services/operator.service';
       color: white;
     }
 
-    .main-content {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 16px;
-      padding: 16px;
+    .nav-tabs {
+      background-color: white;
+      border-bottom: 1px solid rgba(0, 0, 0, 0.12);
+    }
+
+    .tab-content {
       flex: 1;
       overflow: auto;
-    }
-
-    .left-column,
-    .right-column {
-      display: flex;
-      flex-direction: column;
-      gap: 16px;
-    }
-
-    @media (max-width: 800px) {
-      .main-content {
-        grid-template-columns: 1fr;
-      }
     }
   `,
 })
 export class App implements OnInit {
   readonly operator = inject(OperatorService);
-  private readonly snackBar = inject(MatSnackBar);
+  readonly histogram = inject(HistogramService);
 
-  @ViewChild('runInfo') runInfo!: RunInfoComponent;
-  @ViewChild('controlPanel') controlPanel!: ControlPanelComponent;
+  // Computed: get run number from any component that has one
+  readonly currentRunNumber = computed(() => {
+    const components = this.operator.components();
+    for (const comp of components) {
+      if (comp.run_number !== undefined) {
+        return comp.run_number;
+      }
+    }
+    return null;
+  });
 
   ngOnInit(): void {
     this.operator.startPolling();
+    this.histogram.startPolling();
   }
 
-  onRunStarted(event: { runNumber: number; expName: string }): void {
-    this.runInfo.startRun(event.runNumber);
+  formatEvents(events: number): string {
+    if (events >= 1_000_000) {
+      return (events / 1_000_000).toFixed(2) + 'M';
+    } else if (events >= 1_000) {
+      return (events / 1_000).toFixed(1) + 'K';
+    }
+    return events.toString();
   }
 
-  onRunStopped(): void {
-    this.runInfo.stopRun();
-  }
-
-  // Called when timer starts with "Start with Timer" enabled
-  onTimerStarted(): void {
-    // Trigger the control panel's start action with the current run number
-    const runNumber = this.controlPanel.runNumber;
-    this.operator.start(runNumber).subscribe({
-      next: (res) => {
-        if (res.success) {
-          this.snackBar.open(`Started run ${runNumber} with timer`, 'Close', { duration: 3000 });
-          this.runInfo.startRun(runNumber);
-        } else {
-          this.snackBar.open(`Start failed: ${res.message}`, 'Close', { duration: 3000 });
-        }
-      },
-      error: () => {
-        this.snackBar.open('Start failed: Network error', 'Close', { duration: 3000 });
-      },
-    });
-  }
-
-  onTimerExpired(): void {
-    // Auto stop when timer expires
-    this.operator.stop().subscribe({
-      next: (res) => {
-        if (res.success) {
-          this.runInfo.stopRun();
-          // Auto increment run number
-          if (this.controlPanel.autoIncrement()) {
-            this.controlPanel.runNumber++;
-          }
-        }
-      },
-    });
+  formatRate(rate: number): string {
+    if (rate >= 1_000_000) {
+      return (rate / 1_000_000).toFixed(2) + 'M eve/s';
+    } else if (rate >= 1_000) {
+      return (rate / 1_000).toFixed(1) + 'k eve/s';
+    }
+    return rate.toFixed(0) + ' eve/s';
   }
 }

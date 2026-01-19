@@ -7,8 +7,11 @@ BINARY_DIR="./target/release"
 
 # Log level configuration
 # For specific component: RUST_LOG=info,delila_rs::merger=debug ./scripts/start_daq.sh
-export RUST_LOG="${RUST_LOG:-info}"
-#export RUST_LOG="${RUST_LOG:-debug}"
+# Force info level unless explicitly set before script runs
+if [ -z "$RUST_LOG_SET" ]; then
+    export RUST_LOG="info"
+fi
+export RUST_LOG_SET=1
 
 # Colors for output
 RED='\033[0;31m'
@@ -54,36 +57,45 @@ SOURCE_IDS=$(grep -E "^id = " "$CONFIG_FILE" | head -n $(grep -c "\[\[network.so
 echo ""
 echo -e "${GREEN}Starting components...${NC}"
 
+# Create log directory with timestamp
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+LOG_DIR="./logs/${TIMESTAMP}"
+mkdir -p "$LOG_DIR"
+
+# Create symlink to latest logs
+rm -f ./logs/latest
+ln -sf "${TIMESTAMP}" ./logs/latest
+
 # Start emulators or readers based on config
 for id in $SOURCE_IDS; do
     if [ "$(has_digitizer_url $id)" = "yes" ]; then
         echo "  Starting reader (source_id=$id) [digitizer]..."
-        $BINARY_DIR/reader --config "$CONFIG_FILE" --source-id "$id" &
+        $BINARY_DIR/reader --config "$CONFIG_FILE" --source-id "$id" > "$LOG_DIR/reader_$id.log" 2>&1 &
     else
         echo "  Starting emulator (source_id=$id)..."
-        $BINARY_DIR/emulator --config "$CONFIG_FILE" --source-id "$id" &
+        $BINARY_DIR/emulator --config "$CONFIG_FILE" --source-id "$id" > "$LOG_DIR/emulator_$id.log" 2>&1 &
     fi
     sleep 0.3
 done
 
 # Start merger
 echo "  Starting merger..."
-$BINARY_DIR/merger --config "$CONFIG_FILE" &
+$BINARY_DIR/merger --config "$CONFIG_FILE" > "$LOG_DIR/merger.log" 2>&1 &
 sleep 0.3
 
 # Start recorder
 echo "  Starting recorder..."
-$BINARY_DIR/recorder --config "$CONFIG_FILE" &
+$BINARY_DIR/recorder --config "$CONFIG_FILE" > "$LOG_DIR/recorder.log" 2>&1 &
 sleep 0.3
 
 # Start monitor
 echo "  Starting monitor..."
-$BINARY_DIR/monitor --config "$CONFIG_FILE" &
+$BINARY_DIR/monitor --config "$CONFIG_FILE" > "$LOG_DIR/monitor.log" 2>&1 &
 sleep 0.3
 
 # Start operator (Web UI)
 echo "  Starting operator (Web UI)..."
-$BINARY_DIR/operator --config "$CONFIG_FILE" &
+$BINARY_DIR/operator --config "$CONFIG_FILE" > "$LOG_DIR/operator.log" 2>&1 &
 sleep 0.5
 
 echo ""
@@ -104,6 +116,11 @@ echo "  Monitor:    tcp://localhost:5590"
 echo ""
 echo -e "${CYAN}=== Web UI ===${NC}"
 echo -e "  Swagger UI: ${YELLOW}http://localhost:8080/swagger-ui/${NC}"
+echo ""
+echo -e "${CYAN}=== Logs ===${NC}"
+echo -e "  Log directory: ${YELLOW}$LOG_DIR/${NC}"
+echo -e "  Latest link:   ${YELLOW}./logs/latest/${NC}"
+echo -e "  View logs:     ${YELLOW}tail -f ./logs/latest/*.log${NC}"
 echo ""
 echo -e "${YELLOW}Use ./scripts/daq_ctl.sh to control components (CLI)${NC}"
 echo -e "${YELLOW}Use ./scripts/stop_daq.sh to stop all components${NC}"

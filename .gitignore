@@ -1,9 +1,14 @@
 /target
 
-.vscode
-.claude
 .serena
+.claude
 
 # Data output files
 /data/
 legacy
+
+# Logs
+/logs/
+
+# IDE settings
+.vscode/

@@ -21,11 +21,34 @@ use tracing::{debug, info};
 
 use crate::common::{
     flags, handle_command_simple, run_command_task, ComponentSharedState, ComponentState,
-    EventData, EventDataBatch, Message,
+    EventData, EventDataBatch, Message, Waveform,
 };
 
+/// Waveform probe bit masks
+pub mod waveform_probes {
+    /// Analog probe 1
+    pub const ANALOG_PROBE1: u8 = 0b0000_0001;
+    /// Analog probe 2
+    pub const ANALOG_PROBE2: u8 = 0b0000_0010;
+    /// Digital probe 1
+    pub const DIGITAL_PROBE1: u8 = 0b0000_0100;
+    /// Digital probe 2
+    pub const DIGITAL_PROBE2: u8 = 0b0000_1000;
+    /// Digital probe 3
+    pub const DIGITAL_PROBE3: u8 = 0b0001_0000;
+    /// Digital probe 4
+    pub const DIGITAL_PROBE4: u8 = 0b0010_0000;
+    /// All analog probes
+    pub const ALL_ANALOG: u8 = ANALOG_PROBE1 | ANALOG_PROBE2;
+    /// All digital probes
+    pub const ALL_DIGITAL: u8 = DIGITAL_PROBE1 | DIGITAL_PROBE2 | DIGITAL_PROBE3 | DIGITAL_PROBE4;
+    /// All probes
+    pub const ALL: u8 = ALL_ANALOG | ALL_DIGITAL;
+}
+
 /// Emulator configuration
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(default)]
 pub struct EmulatorConfig {
     /// ZMQ bind address for data (e.g., "tcp://*:5555")
     pub address: String,
@@ -43,6 +66,12 @@ pub struct EmulatorConfig {
     pub num_modules: u8,
     /// Number of channels per module
     pub channels_per_module: u8,
+    /// Enable waveform generation for all events
+    pub enable_waveform: bool,
+    /// Bitmask of enabled probes (see waveform_probes module)
+    pub waveform_probes: u8,
+    /// Number of samples per waveform
+    pub waveform_samples: usize,
 }
 
 impl Default for EmulatorConfig {
@@ -56,6 +85,9 @@ impl Default for EmulatorConfig {
             heartbeat_interval_ms: 1000, // 1Hz heartbeat
             num_modules: 1,
             channels_per_module: 16,
+            enable_waveform: false,
+            waveform_probes: waveform_probes::ALL_ANALOG, // analog_probe1 & 2 by default
+            waveform_samples: 512,
         }
     }
 }
@@ -119,10 +151,124 @@ impl Emulator {
         *self.state_rx.borrow()
     }
 
-    /// Generate a batch of random events with Gaussian energy distribution
+    /// Generate a simulated waveform
     ///
-    /// Energy distribution: mean = module * 1000 + channel * 50, sigma = 50
-    /// This creates distinct peaks for each channel, making histograms easier to verify.
+    /// Creates a realistic pulse shape: baseline -> fast rise -> exponential decay
+    /// The pulse timing is randomized within the waveform window.
+    fn generate_waveform(&self, energy: u16) -> Waveform {
+        let mut rng = rand::thread_rng();
+        let n = self.config.waveform_samples;
+        let probes = self.config.waveform_probes;
+
+        // Pulse parameters
+        let baseline: i16 = rng.gen_range(-50..50); // Small baseline fluctuation
+        let amplitude = (energy as f64 / 65535.0 * 8000.0) as i16; // Scale to ~8000 max
+        let rise_time = 5; // samples
+        let decay_tau = 50.0; // decay time constant in samples
+        let pulse_start = rng.gen_range(n / 4..n / 2); // Random trigger position
+
+        // Generate analog probe 1 (main signal)
+        let analog_probe1 = if probes & waveform_probes::ANALOG_PROBE1 != 0 {
+            (0..n)
+                .map(|i| {
+                    if i < pulse_start {
+                        baseline
+                    } else if i < pulse_start + rise_time {
+                        // Fast linear rise
+                        let frac = (i - pulse_start) as f64 / rise_time as f64;
+                        baseline + (amplitude as f64 * frac) as i16
+                    } else {
+                        // Exponential decay
+                        let t = (i - pulse_start - rise_time) as f64;
+                        baseline + (amplitude as f64 * (-t / decay_tau).exp()) as i16
+                    }
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        // Generate analog probe 2 (differentiated signal or second integration)
+        let analog_probe2 = if probes & waveform_probes::ANALOG_PROBE2 != 0 {
+            (0..n)
+                .map(|i| {
+                    if i < pulse_start || i >= pulse_start + rise_time + 100 {
+                        0i16
+                    } else if i < pulse_start + rise_time {
+                        // Positive during rise
+                        (amplitude / 4) as i16
+                    } else {
+                        // Negative during decay
+                        let t = (i - pulse_start - rise_time) as f64;
+                        (-(amplitude as f64 / 4.0) * (-t / decay_tau).exp()) as i16
+                    }
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        // Digital probes: packed bits (1 bit per sample)
+        let digital_probe1 = if probes & waveform_probes::DIGITAL_PROBE1 != 0 {
+            // Trigger signal: high during pulse
+            let mut bits = vec![0u8; (n + 7) / 8];
+            for i in pulse_start..(pulse_start + 50).min(n) {
+                bits[i / 8] |= 1 << (i % 8);
+            }
+            bits
+        } else {
+            Vec::new()
+        };
+
+        let digital_probe2 = if probes & waveform_probes::DIGITAL_PROBE2 != 0 {
+            // Gate signal: high during integration window
+            let mut bits = vec![0u8; (n + 7) / 8];
+            for i in pulse_start..(pulse_start + 100).min(n) {
+                bits[i / 8] |= 1 << (i % 8);
+            }
+            bits
+        } else {
+            Vec::new()
+        };
+
+        let digital_probe3 = if probes & waveform_probes::DIGITAL_PROBE3 != 0 {
+            // Short gate
+            let mut bits = vec![0u8; (n + 7) / 8];
+            for i in pulse_start..(pulse_start + 30).min(n) {
+                bits[i / 8] |= 1 << (i % 8);
+            }
+            bits
+        } else {
+            Vec::new()
+        };
+
+        let digital_probe4 = if probes & waveform_probes::DIGITAL_PROBE4 != 0 {
+            // Pileup indicator (always low in this simple simulation)
+            vec![0u8; (n + 7) / 8]
+        } else {
+            Vec::new()
+        };
+
+        Waveform {
+            analog_probe1,
+            analog_probe2,
+            digital_probe1,
+            digital_probe2,
+            digital_probe3,
+            digital_probe4,
+            time_resolution: 0, // 1x resolution
+            trigger_threshold: 100,
+        }
+    }
+
+    /// Generate a batch of random events with Gaussian peak + uniform background
+    ///
+    /// Energy distribution:
+    /// - 70% Gaussian peak: mean = module * 1000 + channel * 50 + 500, sigma = 50
+    /// - 30% Uniform background: 0 to 4095 (simulating random noise/cosmic rays)
+    ///
+    /// This creates distinct peaks for each channel with a realistic background,
+    /// useful for testing fitting algorithms.
     fn generate_batch(&mut self) -> EventDataBatch {
         let mut rng = rand::thread_rng();
         let mut batch = EventDataBatch::with_capacity(
@@ -134,16 +280,24 @@ impl Emulator {
         // Module number = source_id (each emulator represents one digitizer module)
         let module = self.config.source_id as u8;
 
+        // Background ratio: 30% uniform, 70% Gaussian peak
+        const BACKGROUND_RATIO: f64 = 0.3;
+
         for _ in 0..self.config.events_per_batch {
             let channel = rng.gen_range(0..self.config.channels_per_module);
 
-            // Gaussian energy distribution: mean = module*1000 + channel*50, sigma = 50
-            let mean = (module as f64) * 1000.0 + (channel as f64) * 50.0 + 500.0;
-            let sigma = 50.0;
-            let normal = Normal::new(mean, sigma).unwrap();
-            let energy_f64 = normal.sample(&mut rng);
-            // Clamp to valid u16 range
-            let energy: u16 = energy_f64.clamp(0.0, 65535.0) as u16;
+            let energy: u16 = if rng.gen_bool(BACKGROUND_RATIO) {
+                // Uniform background: 0 to 4095 (12-bit ADC range)
+                rng.gen_range(0..4096)
+            } else {
+                // Gaussian peak: mean = module*1000 + channel*50 + 500, sigma = 50
+                let mean = (module as f64) * 1000.0 + (channel as f64) * 50.0 + 500.0;
+                let sigma = 50.0;
+                let normal = Normal::new(mean, sigma).unwrap();
+                let energy_f64 = normal.sample(&mut rng);
+                // Clamp to valid u16 range
+                energy_f64.clamp(0.0, 65535.0) as u16
+            };
 
             // Short gate energy: ~70-80% of long gate with some noise
             let short_ratio = 0.75 + rng.gen_range(-0.05..0.05);
@@ -159,14 +313,29 @@ impl Emulator {
                 0
             };
 
-            batch.push(EventData::new(
-                module,
-                channel,
-                energy,
-                energy_short,
-                self.timestamp_ns,
-                flags,
-            ));
+            let event = if self.config.enable_waveform {
+                let waveform = self.generate_waveform(energy);
+                EventData::with_waveform(
+                    module,
+                    channel,
+                    energy,
+                    energy_short,
+                    self.timestamp_ns,
+                    flags,
+                    waveform,
+                )
+            } else {
+                EventData::new(
+                    module,
+                    channel,
+                    energy,
+                    energy_short,
+                    self.timestamp_ns,
+                    flags,
+                )
+            };
+
+            batch.push(event);
         }
 
         self.sequence_number += 1;
@@ -384,6 +553,9 @@ mod tests {
         assert_eq!(config.heartbeat_interval_ms, 1000);
         assert_eq!(config.num_modules, 1);
         assert_eq!(config.channels_per_module, 16);
+        assert!(!config.enable_waveform);
+        assert_eq!(config.waveform_probes, waveform_probes::ALL_ANALOG);
+        assert_eq!(config.waveform_samples, 512);
     }
 
     #[test]
@@ -406,11 +578,16 @@ mod tests {
             heartbeat_interval_ms: 500,
             num_modules: 2,
             channels_per_module: 8,
+            enable_waveform: true,
+            waveform_probes: waveform_probes::ALL,
+            waveform_samples: 1024,
         };
         assert_eq!(config.source_id, 42);
         assert_eq!(config.events_per_batch, 200);
         assert_eq!(config.batch_interval_ms, 50);
         assert_eq!(config.num_modules, 2);
+        assert!(config.enable_waveform);
+        assert_eq!(config.waveform_samples, 1024);
     }
 
     #[test]

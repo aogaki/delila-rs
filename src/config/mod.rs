@@ -300,6 +300,18 @@ pub struct FileSettings {
     /// Channels per module
     #[serde(default = "default_channels_per_module")]
     pub channels_per_module: u32,
+
+    /// Enable waveform generation (emulator)
+    #[serde(default)]
+    pub enable_waveform: bool,
+
+    /// Waveform probe bitmask (1=analog1, 2=analog2, 3=both analog, 63=all)
+    #[serde(default = "default_waveform_probes")]
+    pub waveform_probes: u8,
+
+    /// Number of waveform samples
+    #[serde(default = "default_waveform_samples")]
+    pub waveform_samples: usize,
 }
 
 impl Default for FileSettings {
@@ -309,6 +321,9 @@ impl Default for FileSettings {
             batch_interval_ms: default_batch_interval_ms(),
             num_modules: default_num_modules(),
             channels_per_module: default_channels_per_module(),
+            enable_waveform: false,
+            waveform_probes: default_waveform_probes(),
+            waveform_samples: default_waveform_samples(),
         }
     }
 }
@@ -324,6 +339,12 @@ fn default_num_modules() -> u32 {
 }
 fn default_channels_per_module() -> u32 {
     16
+}
+fn default_waveform_probes() -> u8 {
+    3 // Both analog probes
+}
+fn default_waveform_samples() -> usize {
+    512
 }
 
 /// MongoDB connection settings (future)
@@ -351,6 +372,9 @@ pub struct Settings {
     pub batch_interval_ms: u64,
     pub num_modules: u32,
     pub channels_per_module: u32,
+    pub enable_waveform: bool,
+    pub waveform_probes: u8,
+    pub waveform_samples: usize,
 }
 
 impl From<&FileSettings> for Settings {
@@ -360,6 +384,9 @@ impl From<&FileSettings> for Settings {
             batch_interval_ms: file.batch_interval_ms,
             num_modules: file.num_modules,
             channels_per_module: file.channels_per_module,
+            enable_waveform: file.enable_waveform,
+            waveform_probes: file.waveform_probes,
+            waveform_samples: file.waveform_samples,
         }
     }
 }

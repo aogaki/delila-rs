@@ -1,6 +1,6 @@
 # Current Sprint - TODO Index
 
-**Updated:** 2026-01-16
+**Updated:** 2026-01-19
 
 このファイルは現在のスプリントの概要を示すインデックスです。
 Claudeセッション開始時に必ず読み込まれます。
@@ -16,12 +16,27 @@ Claudeセッション開始時に必ず読み込まれます。
 
 ---
 
-## Current Status: Phase 4 - Web UI (2026-01-16)
+## Current Status: Phase 4 - Web UI (2026-01-19)
+
+### Recently Completed
+- **Phase 6: Waveformタブ** ✅ (2026-01-19)
+  - 波形表示コンポーネント（ECharts）
+  - 複数チャンネル選択、Analog Probe 1/2 トグル
+  - Shift+ホイール: X軸ズーム、Ctrl+ホイール: Y軸ズーム
+  - Y軸固定範囲（±20000 ADC）
+- **Phase 5: グリッド画像保存機能** ✅ (2026-01-19)
+- **Phase 4: Gaussian Fitting** ✅ (2026-01-16)
 
 ### In Progress
 - **Operator Web UI** (Angular + Material Design)
   - DAQ制御フロントエンド
   - 設計ドキュメント: `docs/architecture/operator_web_ui.md`
+  - **実装済み:**
+    - Monitorサブタブ（検出器ごとに設定を分離）
+    - ヒストグラムグリッド（NxM、範囲保持）
+    - ガウスフィッティング（JavaScript実装）✅
+    - localStorage永続化
+    - Waveformタブ（波形表示）✅
 
 ### Completed Features
 - Emulator + Reader (CAEN FFI) + ZMQ pipeline
@@ -47,6 +62,11 @@ Claudeセッション開始時に必ず読み込まれます。
 | Intermediate fsync | 削除 | バッチ単位書き込みでは効果なし |
 | Channel type | unbounded | データ欠損よりメモリ使用を優先 |
 | Start/Stop order | pipeline_order | 上流から停止、下流から開始 |
+| Chart library | ECharts | dataZoom、高パフォーマンス |
+| Fitting | JavaScript (LM) | 4096bins/6params は数十ms |
+| Fit UI | Hybrid (grid+modal) | サマリー表示+拡大モードで精密操作 |
+| Monitor subtabs | Nested tabs | 検出器ごとに設定を分離 |
+| State persistence | localStorage | ページリロードでも復元 |
 
 ---
 

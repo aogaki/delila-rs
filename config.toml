@@ -61,3 +61,6 @@ events_per_batch = 500    # 500 events/batch
 batch_interval_ms = 10    # 10ms = 100 batches/s per source
 num_modules = 2
 channels_per_module = 16
+enable_waveform = true    # true: generate waveform for all events
+waveform_probes = 3       # Bitmask: 1=analog1, 2=analog2, 3=both analog, 63=all probes
+waveform_samples = 512    # Number of samples (real experiments: 2000-10000)

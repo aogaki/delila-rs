@@ -1,9 +1,12 @@
-// DELILA File Reader - ROOT Macro
-// Read .delila format files written by delila-rs recorder
+// DELILA File to ROOT TTree Converter
+// Convert .delila format files to ROOT TTree format
 //
 // Usage:
-//   root -l 'read_delila.C("data/run0010_0000_data.delila")'
-//   root -l 'read_delila.C("data/run0010_0000_data.delila", 100)'  // First 100 events
+//   root -l 'convert_to_tree.C("data/run0010_0000_data.delila")'
+//   root -l 'convert_to_tree.C("data/run0010_0000_data.delila", "output.root")'
+//   root -l 'convert_to_tree.C("data/run0010_0000_data.delila", "", 10000)'  // First 10000 events
+//
+// Output: Creates a ROOT file with TTree "events" containing all event data
 //
 // File format (v2):
 //   Header: "DELILA02" + u32_le(len) + msgpack(metadata)
@@ -12,9 +15,7 @@
 
 #include <TFile.h>
 #include <TTree.h>
-#include <TH1F.h>
-#include <TCanvas.h>
-#include <TGraph.h>
+#include <TString.h>
 #include <iostream>
 #include <fstream>
 #include <vector>
@@ -26,57 +27,8 @@ const char* FILE_MAGIC = "DELILA02";
 const char* FOOTER_MAGIC = "DLEND002";
 const size_t FOOTER_SIZE = 64;
 
-// Waveform data structure
-struct Waveform {
-    std::vector<int16_t> analog_probe1;
-    std::vector<int16_t> analog_probe2;
-    std::vector<uint8_t> digital_probe1;
-    std::vector<uint8_t> digital_probe2;
-    std::vector<uint8_t> digital_probe3;
-    std::vector<uint8_t> digital_probe4;
-    uint8_t time_resolution;
-    uint16_t trigger_threshold;
-
-    void clear() {
-        analog_probe1.clear();
-        analog_probe2.clear();
-        digital_probe1.clear();
-        digital_probe2.clear();
-        digital_probe3.clear();
-        digital_probe4.clear();
-        time_resolution = 0;
-        trigger_threshold = 0;
-    }
-
-    bool has_data() const {
-        return !analog_probe1.empty() || !analog_probe2.empty();
-    }
-};
-
-// Event data structure (matches Rust EventData)
-struct Event {
-    uint8_t module;
-    uint8_t channel;
-    uint16_t energy;
-    uint16_t energy_short;
-    double timestamp_ns;
-    uint64_t flags;
-    bool has_waveform;
-    Waveform waveform;
-};
-
-// Footer structure
-struct Footer {
-    char magic[8];
-    uint64_t data_checksum;
-    uint64_t total_events;
-    uint64_t data_bytes;
-    double first_event_time_ns;
-    double last_event_time_ns;
-    uint64_t file_end_time_ns;
-    uint8_t write_complete;
-    uint8_t reserved[7];
-};
+// Maximum waveform samples (for fixed-size arrays in TTree)
+const int MAX_WAVEFORM_SAMPLES = 16384;
 
 // Read little-endian uint32
 uint32_t read_u32_le(std::ifstream& f) {
@@ -108,19 +60,13 @@ double read_f64_le(std::ifstream& f) {
 }
 
 // Simple MessagePack parser for EventDataBatch
-// MessagePack format:
-//   - Batch is array of 4 elements: [source_id, sequence_number, timestamp, events]
-//   - Event is array of 6 or 7 elements:
-//     Without waveform: [module, channel, energy, energy_short, timestamp_ns, flags]
-//     With waveform:    [module, channel, energy, energy_short, timestamp_ns, flags, waveform]
-//   - Waveform is array of 8 elements:
-//     [analog_probe1, analog_probe2, digital_probe1, digital_probe2,
-//      digital_probe3, digital_probe4, time_resolution, trigger_threshold]
 class MsgPackParser {
 public:
     MsgPackParser(const std::vector<uint8_t>& data) : data_(data), pos_(0) {}
 
-    bool parse_batch(uint32_t& source_id, std::vector<Event>& events) {
+    // Parse a single event into the output variables
+    // Returns false when no more events
+    bool parse_batch_header(uint32_t& source_id, size_t& num_events) {
         // Batch is array of 4 elements
         size_t batch_size;
         if (!read_array_header(batch_size) || batch_size != 4) {
@@ -140,22 +86,18 @@ public:
         uint64_t ts;
         if (!read_uint(ts)) return false;
 
-        // events array
-        size_t num_events;
+        // events array header
         if (!read_array_header(num_events)) return false;
-
-        events.reserve(num_events);
-        for (size_t i = 0; i < num_events; i++) {
-            Event ev;
-            if (!parse_event(ev)) return false;
-            events.push_back(ev);
-        }
 
         return true;
     }
 
-private:
-    bool parse_event(Event& ev) {
+    bool parse_event(uint8_t& module, uint8_t& channel, uint16_t& energy, uint16_t& energy_short,
+                     double& timestamp_ns, uint64_t& flags, bool& has_waveform,
+                     int& n_analog1, int16_t* analog1, int& n_analog2, int16_t* analog2,
+                     int& n_digital1, uint8_t* digital1, int& n_digital2, uint8_t* digital2,
+                     int& n_digital3, uint8_t* digital3, int& n_digital4, uint8_t* digital4,
+                     uint8_t& time_resolution, uint16_t& trigger_threshold) {
         // Event is array of 6 or 7 elements (7 if has waveform)
         size_t ev_size;
         if (!read_array_header(ev_size)) {
@@ -170,36 +112,54 @@ private:
 
         // module (u8)
         if (!read_uint(tmp)) return false;
-        ev.module = static_cast<uint8_t>(tmp);
+        module = static_cast<uint8_t>(tmp);
 
         // channel (u8)
         if (!read_uint(tmp)) return false;
-        ev.channel = static_cast<uint8_t>(tmp);
+        channel = static_cast<uint8_t>(tmp);
 
         // energy (u16)
         if (!read_uint(tmp)) return false;
-        ev.energy = static_cast<uint16_t>(tmp);
+        energy = static_cast<uint16_t>(tmp);
 
         // energy_short (u16)
         if (!read_uint(tmp)) return false;
-        ev.energy_short = static_cast<uint16_t>(tmp);
+        energy_short = static_cast<uint16_t>(tmp);
 
         // timestamp_ns (f64)
-        if (!read_float64(ev.timestamp_ns)) return false;
+        if (!read_float64(timestamp_ns)) return false;
 
         // flags (u64)
-        if (!read_uint(ev.flags)) return false;
+        if (!read_uint(flags)) return false;
 
         // waveform (optional)
-        ev.has_waveform = (ev_size == 7);
-        if (ev.has_waveform) {
-            if (!parse_waveform(ev.waveform)) return false;
+        has_waveform = (ev_size == 7);
+        n_analog1 = 0;
+        n_analog2 = 0;
+        n_digital1 = 0;
+        n_digital2 = 0;
+        n_digital3 = 0;
+        n_digital4 = 0;
+        time_resolution = 0;
+        trigger_threshold = 0;
+
+        if (has_waveform) {
+            if (!parse_waveform(n_analog1, analog1, n_analog2, analog2,
+                               n_digital1, digital1, n_digital2, digital2,
+                               n_digital3, digital3, n_digital4, digital4,
+                               time_resolution, trigger_threshold)) {
+                return false;
+            }
         }
 
         return true;
     }
 
-    bool parse_waveform(Waveform& wf) {
+private:
+    bool parse_waveform(int& n_analog1, int16_t* analog1, int& n_analog2, int16_t* analog2,
+                       int& n_digital1, uint8_t* digital1, int& n_digital2, uint8_t* digital2,
+                       int& n_digital3, uint8_t* digital3, int& n_digital4, uint8_t* digital4,
+                       uint8_t& time_resolution, uint16_t& trigger_threshold) {
         // Waveform is array of 8 elements
         size_t wf_size;
         if (!read_array_header(wf_size) || wf_size != 8) {
@@ -208,72 +168,76 @@ private:
         }
 
         // analog_probe1 (Vec<i16>)
-        if (!read_i16_array(wf.analog_probe1)) return false;
+        if (!read_i16_array(n_analog1, analog1, MAX_WAVEFORM_SAMPLES)) return false;
 
         // analog_probe2 (Vec<i16>)
-        if (!read_i16_array(wf.analog_probe2)) return false;
+        if (!read_i16_array(n_analog2, analog2, MAX_WAVEFORM_SAMPLES)) return false;
 
         // digital_probe1 (Vec<u8>)
-        if (!read_u8_array(wf.digital_probe1)) return false;
+        if (!read_u8_array(n_digital1, digital1, MAX_WAVEFORM_SAMPLES)) return false;
 
         // digital_probe2 (Vec<u8>)
-        if (!read_u8_array(wf.digital_probe2)) return false;
+        if (!read_u8_array(n_digital2, digital2, MAX_WAVEFORM_SAMPLES)) return false;
 
         // digital_probe3 (Vec<u8>)
-        if (!read_u8_array(wf.digital_probe3)) return false;
+        if (!read_u8_array(n_digital3, digital3, MAX_WAVEFORM_SAMPLES)) return false;
 
         // digital_probe4 (Vec<u8>)
-        if (!read_u8_array(wf.digital_probe4)) return false;
+        if (!read_u8_array(n_digital4, digital4, MAX_WAVEFORM_SAMPLES)) return false;
 
         // time_resolution (u8)
         uint64_t tmp;
         if (!read_uint(tmp)) return false;
-        wf.time_resolution = static_cast<uint8_t>(tmp);
+        time_resolution = static_cast<uint8_t>(tmp);
 
         // trigger_threshold (u16)
         if (!read_uint(tmp)) return false;
-        wf.trigger_threshold = static_cast<uint16_t>(tmp);
+        trigger_threshold = static_cast<uint16_t>(tmp);
 
         return true;
     }
 
-    bool read_i16_array(std::vector<int16_t>& arr) {
+    bool read_i16_array(int& n, int16_t* arr, int max_size) {
         size_t size;
         if (!read_array_header(size)) return false;
 
-        arr.reserve(size);
+        n = std::min(static_cast<int>(size), max_size);
         for (size_t i = 0; i < size; i++) {
             int64_t val;
             if (!read_int(val)) return false;
-            arr.push_back(static_cast<int16_t>(val));
+            if (static_cast<int>(i) < max_size) {
+                arr[i] = static_cast<int16_t>(val);
+            }
         }
         return true;
     }
 
-    bool read_u8_array(std::vector<uint8_t>& arr) {
+    bool read_u8_array(int& n, uint8_t* arr, int max_size) {
         // Can be either an array or binary data (bin8/bin16/bin32)
         if (pos_ >= data_.size()) return false;
         uint8_t b = data_[pos_];
 
         // Check for binary format first
         if (b == 0xc4 || b == 0xc5 || b == 0xc6) {
-            return read_bin(arr);
+            return read_bin(n, arr, max_size);
         }
 
         // Otherwise, it's an array
         size_t size;
         if (!read_array_header(size)) return false;
 
-        arr.reserve(size);
+        n = std::min(static_cast<int>(size), max_size);
         for (size_t i = 0; i < size; i++) {
             uint64_t val;
             if (!read_uint(val)) return false;
-            arr.push_back(static_cast<uint8_t>(val));
+            if (static_cast<int>(i) < max_size) {
+                arr[i] = static_cast<uint8_t>(val);
+            }
         }
         return true;
     }
 
-    bool read_bin(std::vector<uint8_t>& arr) {
+    bool read_bin(int& n, uint8_t* arr, int max_size) {
         if (pos_ >= data_.size()) return false;
         uint8_t b = data_[pos_++];
         size_t size = 0;
@@ -296,8 +260,9 @@ private:
             return false;
         }
 
+        n = std::min(static_cast<int>(size), max_size);
         if (pos_ + size > data_.size()) return false;
-        arr.assign(data_.begin() + pos_, data_.begin() + pos_ + size);
+        std::memcpy(arr, &data_[pos_], n);
         pos_ += size;
         return true;
     }
@@ -449,7 +414,7 @@ private:
     size_t pos_;
 };
 
-// Read and print file header info
+// Read file header and return data start position
 bool read_header(std::ifstream& f, size_t& header_end_pos) {
     // Check magic
     char magic[8];
@@ -461,60 +426,22 @@ bool read_header(std::ifstream& f, size_t& header_end_pos) {
 
     // Read header length
     uint32_t header_len = read_u32_le(f);
-    std::cout << "Header length: " << header_len << " bytes" << std::endl;
 
     // Skip header content (MessagePack metadata)
-    // For now, we just skip it. Could parse for run_number, exp_name, etc.
     f.seekg(header_len, std::ios::cur);
 
     header_end_pos = f.tellg();
-    std::cout << "Data starts at offset: " << header_end_pos << std::endl;
-
-    return true;
-}
-
-// Read and print footer info
-bool read_footer(std::ifstream& f, size_t file_size) {
-    if (file_size < FOOTER_SIZE) {
-        std::cerr << "Warning: File too small for footer" << std::endl;
-        return false;
-    }
-
-    f.seekg(file_size - FOOTER_SIZE, std::ios::beg);
-
-    Footer footer;
-    f.read(footer.magic, 8);
-
-    if (std::memcmp(footer.magic, FOOTER_MAGIC, 8) != 0) {
-        std::cerr << "Warning: Invalid footer magic" << std::endl;
-        return false;
-    }
-
-    footer.data_checksum = read_u64_le(f);
-    footer.total_events = read_u64_le(f);
-    footer.data_bytes = read_u64_le(f);
-    footer.first_event_time_ns = read_f64_le(f);
-    footer.last_event_time_ns = read_f64_le(f);
-    footer.file_end_time_ns = read_u64_le(f);
-    f.read(reinterpret_cast<char*>(&footer.write_complete), 1);
-
-    std::cout << "\n=== Footer ===" << std::endl;
-    std::cout << "Total events:    " << footer.total_events << std::endl;
-    std::cout << "Data bytes:      " << footer.data_bytes << std::endl;
-    std::cout << "First timestamp: " << footer.first_event_time_ns << " ns" << std::endl;
-    std::cout << "Last timestamp:  " << footer.last_event_time_ns << " ns" << std::endl;
-    std::cout << "Write complete:  " << (footer.write_complete ? "Yes" : "No") << std::endl;
-
     return true;
 }
 
 // Main function
-void read_delila(const char* filename, int max_events = -1) {
-    std::cout << "Reading DELILA file: " << filename << std::endl;
+void convert_to_tree(const char* input_file, const char* output_file = "", int max_events = -1) {
+    std::cout << "Converting DELILA file to ROOT TTree: " << input_file << std::endl;
 
-    std::ifstream f(filename, std::ios::binary);
+    // Open input file
+    std::ifstream f(input_file, std::ios::binary);
     if (!f.is_open()) {
-        std::cerr << "Error: Cannot open file" << std::endl;
+        std::cerr << "Error: Cannot open input file" << std::endl;
         return;
     }
 
@@ -522,7 +449,6 @@ void read_delila(const char* filename, int max_events = -1) {
     f.seekg(0, std::ios::end);
     size_t file_size = f.tellg();
     f.seekg(0, std::ios::beg);
-    std::cout << "File size: " << file_size << " bytes" << std::endl;
 
     // Read header
     size_t header_end_pos;
@@ -530,25 +456,94 @@ void read_delila(const char* filename, int max_events = -1) {
         return;
     }
 
-    // Read footer
-    read_footer(f, file_size);
+    // Generate output filename if not specified
+    TString out_name;
+    if (strlen(output_file) == 0) {
+        out_name = input_file;
+        out_name.ReplaceAll(".delila", ".root");
+    } else {
+        out_name = output_file;
+    }
+
+    std::cout << "Output file: " << out_name << std::endl;
+
+    // Create output ROOT file
+    TFile* outFile = new TFile(out_name, "RECREATE");
+    if (!outFile->IsOpen()) {
+        std::cerr << "Error: Cannot create output file" << std::endl;
+        return;
+    }
+
+    // Create TTree
+    TTree* tree = new TTree("events", "DELILA Event Data");
+
+    // Branch variables
+    UChar_t b_module;
+    UChar_t b_channel;
+    UShort_t b_energy;
+    UShort_t b_energy_short;
+    Double_t b_timestamp_ns;
+    ULong64_t b_flags;
+    Bool_t b_has_waveform;
+
+    // Waveform branches
+    Int_t b_n_analog1;
+    Int_t b_n_analog2;
+    Int_t b_n_digital1;
+    Int_t b_n_digital2;
+    Int_t b_n_digital3;
+    Int_t b_n_digital4;
+    Short_t* b_analog1 = new Short_t[MAX_WAVEFORM_SAMPLES];
+    Short_t* b_analog2 = new Short_t[MAX_WAVEFORM_SAMPLES];
+    UChar_t* b_digital1 = new UChar_t[MAX_WAVEFORM_SAMPLES];
+    UChar_t* b_digital2 = new UChar_t[MAX_WAVEFORM_SAMPLES];
+    UChar_t* b_digital3 = new UChar_t[MAX_WAVEFORM_SAMPLES];
+    UChar_t* b_digital4 = new UChar_t[MAX_WAVEFORM_SAMPLES];
+    UChar_t b_time_resolution;
+    UShort_t b_trigger_threshold;
+
+    // Create branches
+    tree->Branch("module", &b_module, "module/b");
+    tree->Branch("channel", &b_channel, "channel/b");
+    tree->Branch("energy", &b_energy, "energy/s");
+    tree->Branch("energy_short", &b_energy_short, "energy_short/s");
+    tree->Branch("timestamp_ns", &b_timestamp_ns, "timestamp_ns/D");
+    tree->Branch("flags", &b_flags, "flags/l");
+    tree->Branch("has_waveform", &b_has_waveform, "has_waveform/O");
+
+    // Waveform branches (variable-length arrays)
+    tree->Branch("n_analog1", &b_n_analog1, "n_analog1/I");
+    tree->Branch("n_analog2", &b_n_analog2, "n_analog2/I");
+    tree->Branch("analog1", b_analog1, "analog1[n_analog1]/S");
+    tree->Branch("analog2", b_analog2, "analog2[n_analog2]/S");
+    tree->Branch("n_digital1", &b_n_digital1, "n_digital1/I");
+    tree->Branch("n_digital2", &b_n_digital2, "n_digital2/I");
+    tree->Branch("n_digital3", &b_n_digital3, "n_digital3/I");
+    tree->Branch("n_digital4", &b_n_digital4, "n_digital4/I");
+    tree->Branch("digital1", b_digital1, "digital1[n_digital1]/b");
+    tree->Branch("digital2", b_digital2, "digital2[n_digital2]/b");
+    tree->Branch("digital3", b_digital3, "digital3[n_digital3]/b");
+    tree->Branch("digital4", b_digital4, "digital4[n_digital4]/b");
+    tree->Branch("time_resolution", &b_time_resolution, "time_resolution/b");
+    tree->Branch("trigger_threshold", &b_trigger_threshold, "trigger_threshold/s");
 
     // Calculate data region
     size_t data_end = file_size - FOOTER_SIZE;
-    std::cout << "\nData region: " << header_end_pos << " - " << data_end << std::endl;
 
     // Read data blocks
     f.seekg(header_end_pos, std::ios::beg);
 
-    std::vector<Event> all_events;
     int block_count = 0;
+    Long64_t event_count = 0;
     int waveform_count = 0;
+
+    std::cout << "Processing..." << std::flush;
 
     while (f.tellg() < static_cast<std::streampos>(data_end)) {
         // Read block length
         uint32_t block_len = read_u32_le(f);
         if (block_len == 0 || block_len > 100000000) {
-            std::cerr << "Warning: Invalid block length " << block_len << std::endl;
+            std::cerr << "\nWarning: Invalid block length " << block_len << std::endl;
             break;
         }
 
@@ -557,144 +552,77 @@ void read_delila(const char* filename, int max_events = -1) {
         f.read(reinterpret_cast<char*>(block_data.data()), block_len);
 
         if (!f.good()) {
-            std::cerr << "Warning: Read error at block " << block_count << std::endl;
+            std::cerr << "\nWarning: Read error at block " << block_count << std::endl;
             break;
         }
 
         // Parse MessagePack
         MsgPackParser parser(block_data);
         uint32_t source_id;
-        std::vector<Event> events;
+        size_t num_events;
 
-        if (!parser.parse_batch(source_id, events)) {
-            std::cerr << "Warning: Failed to parse block " << block_count << std::endl;
+        if (!parser.parse_batch_header(source_id, num_events)) {
+            std::cerr << "\nWarning: Failed to parse block " << block_count << std::endl;
             break;
         }
 
-        // Add events
-        for (const auto& ev : events) {
-            all_events.push_back(ev);
-            if (ev.has_waveform) waveform_count++;
-            if (max_events > 0 && static_cast<int>(all_events.size()) >= max_events) {
+        // Process events
+        for (size_t i = 0; i < num_events; i++) {
+            if (!parser.parse_event(b_module, b_channel, b_energy, b_energy_short,
+                                   b_timestamp_ns, b_flags, b_has_waveform,
+                                   b_n_analog1, b_analog1, b_n_analog2, b_analog2,
+                                   b_n_digital1, b_digital1, b_n_digital2, b_digital2,
+                                   b_n_digital3, b_digital3, b_n_digital4, b_digital4,
+                                   b_time_resolution, b_trigger_threshold)) {
+                std::cerr << "\nWarning: Failed to parse event " << event_count << std::endl;
+                break;
+            }
+
+            tree->Fill();
+            event_count++;
+            if (b_has_waveform) waveform_count++;
+
+            if (max_events > 0 && event_count >= max_events) {
                 break;
             }
         }
 
         block_count++;
 
-        if (max_events > 0 && static_cast<int>(all_events.size()) >= max_events) {
+        // Progress indicator
+        if (block_count % 100 == 0) {
+            std::cout << "." << std::flush;
+        }
+
+        if (max_events > 0 && event_count >= max_events) {
             break;
         }
     }
 
-    std::cout << "\nParsed " << block_count << " blocks, " << all_events.size() << " events" << std::endl;
-    std::cout << "Events with waveform: " << waveform_count << std::endl;
+    std::cout << " done!" << std::endl;
 
-    if (all_events.empty()) {
-        std::cout << "No events to display" << std::endl;
-        return;
-    }
+    // Write and close
+    tree->Write();
+    outFile->Close();
 
-    // Print first 10 events
-    std::cout << "\n=== First " << std::min(10, static_cast<int>(all_events.size())) << " events ===" << std::endl;
-    std::cout << "Module  Ch  Energy  EShort  Timestamp(ns)      Flags     Waveform" << std::endl;
-    std::cout << "------  --  ------  ------  -----------------  --------  --------" << std::endl;
-    for (size_t i = 0; i < std::min(static_cast<size_t>(10), all_events.size()); i++) {
-        const Event& ev = all_events[i];
-        printf("%6d  %2d  %6d  %6d  %17.1f  0x%06llx  %s\n",
-               ev.module, ev.channel, ev.energy, ev.energy_short,
-               ev.timestamp_ns, static_cast<unsigned long long>(ev.flags),
-               ev.has_waveform ? "Yes" : "No");
-        if (ev.has_waveform) {
-            printf("        -> analog1: %zu samples, analog2: %zu samples\n",
-                   ev.waveform.analog_probe1.size(), ev.waveform.analog_probe2.size());
-        }
-    }
+    // Cleanup
+    delete[] b_analog1;
+    delete[] b_analog2;
+    delete[] b_digital1;
+    delete[] b_digital2;
+    delete[] b_digital3;
+    delete[] b_digital4;
 
-    // Create histograms
-    TCanvas* c1 = new TCanvas("c1", "DELILA Data", 1200, 800);
-    c1->Divide(2, 2);
+    std::cout << "\n=== Conversion Summary ===" << std::endl;
+    std::cout << "Blocks processed:      " << block_count << std::endl;
+    std::cout << "Events converted:      " << event_count << std::endl;
+    std::cout << "Events with waveform:  " << waveform_count << std::endl;
+    std::cout << "Output file:           " << out_name << std::endl;
 
-    // Energy histogram
-    c1->cd(1);
-    TH1F* h_energy = new TH1F("h_energy", "Energy Distribution;Energy;Counts", 4096, 0, 65536);
-    for (const auto& ev : all_events) {
-        h_energy->Fill(ev.energy);
-    }
-    h_energy->Draw();
-
-    // Energy short histogram
-    c1->cd(2);
-    TH1F* h_eshort = new TH1F("h_eshort", "Energy Short Distribution;Energy Short;Counts", 4096, 0, 65536);
-    for (const auto& ev : all_events) {
-        h_eshort->Fill(ev.energy_short);
-    }
-    h_eshort->Draw();
-
-    // Channel distribution
-    c1->cd(3);
-    TH1F* h_ch = new TH1F("h_ch", "Channel Distribution;Channel;Counts", 64, 0, 64);
-    for (const auto& ev : all_events) {
-        h_ch->Fill(ev.channel);
-    }
-    h_ch->Draw();
-
-    // Module distribution
-    c1->cd(4);
-    TH1F* h_mod = new TH1F("h_mod", "Module Distribution;Module;Counts", 32, 0, 32);
-    for (const auto& ev : all_events) {
-        h_mod->Fill(ev.module);
-    }
-    h_mod->Draw();
-
-    c1->Update();
-
-    // If we have waveforms, show one example
-    if (waveform_count > 0) {
-        // Find first event with waveform
-        const Event* wf_event = nullptr;
-        for (const auto& ev : all_events) {
-            if (ev.has_waveform && ev.waveform.has_data()) {
-                wf_event = &ev;
-                break;
-            }
-        }
-
-        if (wf_event) {
-            TCanvas* c2 = new TCanvas("c2", "Waveform Example", 800, 600);
-            c2->Divide(1, 2);
-
-            // Analog probe 1
-            c2->cd(1);
-            const auto& ap1 = wf_event->waveform.analog_probe1;
-            if (!ap1.empty()) {
-                TGraph* g1 = new TGraph();
-                for (size_t i = 0; i < ap1.size(); i++) {
-                    g1->SetPoint(i, i, ap1[i]);
-                }
-                g1->SetTitle(Form("Analog Probe 1 (Mod%d/Ch%d, E=%d);Sample;ADC",
-                                  wf_event->module, wf_event->channel, wf_event->energy));
-                g1->SetLineColor(kBlue);
-                g1->Draw("AL");
-            }
-
-            // Analog probe 2
-            c2->cd(2);
-            const auto& ap2 = wf_event->waveform.analog_probe2;
-            if (!ap2.empty()) {
-                TGraph* g2 = new TGraph();
-                for (size_t i = 0; i < ap2.size(); i++) {
-                    g2->SetPoint(i, i, ap2[i]);
-                }
-                g2->SetTitle(Form("Analog Probe 2 (Mod%d/Ch%d, E=%d);Sample;ADC",
-                                  wf_event->module, wf_event->channel, wf_event->energy));
-                g2->SetLineColor(kRed);
-                g2->Draw("AL");
-            }
-
-            c2->Update();
-        }
-    }
-
-    std::cout << "\nHistograms created. Use ROOT interactive mode to explore." << std::endl;
+    std::cout << "\nTo use the TTree:" << std::endl;
+    std::cout << "  TFile* f = TFile::Open(\"" << out_name << "\");" << std::endl;
+    std::cout << "  TTree* t = (TTree*)f->Get(\"events\");" << std::endl;
+    std::cout << "  t->Draw(\"energy\");                    // Energy histogram" << std::endl;
+    std::cout << "  t->Draw(\"energy:channel\", \"\", \"colz\"); // 2D: Energy vs Channel" << std::endl;
+    std::cout << "  t->Draw(\"analog1\", \"Entry$==0\");       // First waveform" << std::endl;
 }

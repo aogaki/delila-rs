@@ -18,7 +18,7 @@ use futures::{SinkExt, StreamExt};
 use thiserror::Error;
 use tmq::{publish, subscribe, AsZmqSocket, Context};
 use tokio::sync::{mpsc, watch};
-use tracing::{debug, info, warn};
+use tracing::{info, trace, warn};
 
 use crate::common::{
     handle_command, run_command_task, CommandHandlerExt, ComponentSharedState, ComponentState,
@@ -422,14 +422,14 @@ impl Merger {
                                             .entry(source_id)
                                             .or_default()
                                             .update(sequence_number);
-                                        debug!(source = source_id, seq = sequence_number, "Received data");
+                                        trace!(source = source_id, seq = sequence_number, "Received data");
                                     }
                                     Some(MessageHeader::EndOfStream { source_id }) => {
                                         ext_state.atomic_stats.record_eos();
                                         info!(source = source_id, "Received EOS");
                                     }
                                     Some(MessageHeader::Heartbeat { source_id }) => {
-                                        debug!(source = source_id, "Received heartbeat");
+                                        trace!(source = source_id, "Received heartbeat");
                                     }
                                     None => {
                                         warn!("Failed to parse message header");
@@ -442,7 +442,7 @@ impl Merger {
                                     info!("Channel closed, receiver exiting");
                                     break;
                                 }
-                                debug!("Receiver forwarded message");
+                                trace!("Receiver forwarded message");
                             }
                         }
                         Some(Err(e)) => {
@@ -471,7 +471,7 @@ impl Merger {
             match socket.send(msg).await {
                 Ok(()) => {
                     ext_state.atomic_stats.record_sent();
-                    debug!("Sender forwarded message");
+                    trace!("Sender forwarded message");
                 }
                 Err(e) => {
                     warn!(error = %e, "Failed to send message");

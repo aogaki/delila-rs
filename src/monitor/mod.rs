@@ -21,6 +21,7 @@ use axum::{
     routing::get,
     Router,
 };
+use tower_http::cors::{Any, CorsLayer};
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -30,7 +31,7 @@ use tracing::{debug, info, warn};
 
 use crate::common::{
     handle_command, run_command_task, CommandHandlerExt, ComponentSharedState, ComponentState,
-    EventData, EventDataBatch, Message,
+    EventData, EventDataBatch, Message, Waveform,
 };
 
 /// Monitor configuration
@@ -171,10 +172,21 @@ impl ChannelKey {
     }
 }
 
+/// Latest waveform data for a channel
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LatestWaveform {
+    pub module_id: u32,
+    pub channel_id: u32,
+    pub energy: u16,
+    pub timestamp_ns: f64,
+    pub waveform: Waveform,
+}
+
 /// Monitor state containing all histograms (owned by histogram task)
 #[derive(Debug, Default)]
 pub struct MonitorState {
     pub histograms: HashMap<ChannelKey, Histogram1D>,
+    pub latest_waveforms: HashMap<ChannelKey, LatestWaveform>,
     pub total_events: u64,
     pub start_time: Option<Instant>,
     pub histogram_config: HistogramConfig,
@@ -184,6 +196,7 @@ impl MonitorState {
     pub fn new(config: HistogramConfig) -> Self {
         Self {
             histograms: HashMap::new(),
+            latest_waveforms: HashMap::new(),
             total_events: 0,
             start_time: None,
             histogram_config: config,
@@ -206,6 +219,20 @@ impl MonitorState {
 
         // Fill with energy (long gate)
         histogram.fill(event.energy as f32);
+
+        // Store latest waveform if present
+        if let Some(ref wf) = event.waveform {
+            self.latest_waveforms.insert(
+                key,
+                LatestWaveform {
+                    module_id: event.module as u32,
+                    channel_id: event.channel as u32,
+                    energy: event.energy,
+                    timestamp_ns: event.timestamp_ns,
+                    waveform: wf.clone(),
+                },
+            );
+        }
     }
 
     /// Process a batch of events
@@ -215,11 +242,12 @@ impl MonitorState {
         }
     }
 
-    /// Clear all histograms
+    /// Clear all histograms and waveforms
     pub fn clear(&mut self) {
         for histogram in self.histograms.values_mut() {
             histogram.clear();
         }
+        self.latest_waveforms.clear();
         self.total_events = 0;
     }
 
@@ -303,6 +331,10 @@ enum HistogramMessage {
     GetSnapshot(oneshot::Sender<MonitorStateSnapshot>),
     /// Get specific histogram
     GetHistogram(ChannelKey, oneshot::Sender<Option<Histogram1D>>),
+    /// Get latest waveform for a channel
+    GetWaveform(ChannelKey, oneshot::Sender<Option<LatestWaveform>>),
+    /// List all available waveforms
+    ListWaveforms(oneshot::Sender<Vec<ChannelKey>>),
     /// Set start time
     SetStartTime,
 }
@@ -401,6 +433,66 @@ async fn clear_histograms(State(state): State<AppState>) -> StatusCode {
     StatusCode::OK
 }
 
+// =============================================================================
+// Waveform API Endpoints
+// =============================================================================
+
+/// Response for listing available waveforms
+#[derive(Serialize)]
+struct WaveformListResponse {
+    channels: Vec<WaveformChannelInfo>,
+}
+
+#[derive(Serialize)]
+struct WaveformChannelInfo {
+    module_id: u32,
+    channel_id: u32,
+}
+
+/// GET /api/waveforms - List all available waveforms
+async fn list_waveforms(State(state): State<AppState>) -> Json<WaveformListResponse> {
+    let (tx, rx) = oneshot::channel();
+    let _ = state.histogram_tx.send(HistogramMessage::ListWaveforms(tx));
+
+    match rx.await {
+        Ok(keys) => {
+            let mut channels: Vec<WaveformChannelInfo> = keys
+                .into_iter()
+                .map(|k| WaveformChannelInfo {
+                    module_id: k.module_id,
+                    channel_id: k.channel_id,
+                })
+                .collect();
+            // Sort by module_id, then channel_id
+            channels.sort_by(|a, b| {
+                a.module_id
+                    .cmp(&b.module_id)
+                    .then(a.channel_id.cmp(&b.channel_id))
+            });
+            Json(WaveformListResponse { channels })
+        }
+        Err(_) => Json(WaveformListResponse { channels: vec![] }),
+    }
+}
+
+/// GET /api/waveforms/:module/:channel - Get specific waveform
+async fn get_waveform(
+    State(state): State<AppState>,
+    axum::extract::Path((module_id, channel_id)): axum::extract::Path<(u32, u32)>,
+) -> Result<Json<LatestWaveform>, StatusCode> {
+    let (tx, rx) = oneshot::channel();
+    let key = ChannelKey::new(module_id, channel_id);
+    let _ = state
+        .histogram_tx
+        .send(HistogramMessage::GetWaveform(key, tx));
+
+    match rx.await {
+        Ok(Some(wf)) => Ok(Json(wf)),
+        Ok(None) => Err(StatusCode::NOT_FOUND),
+        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
 /// GET /api/status - Get monitor status
 #[derive(Serialize)]
 struct StatusResponse {
@@ -444,6 +536,12 @@ async fn serve_ui() -> impl IntoResponse {
 
 /// Create the Axum router
 pub fn create_router(state: AppState) -> Router {
+    // CORS layer for development (Angular dev server on different port)
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any);
+
     Router::new()
         .route("/", get(serve_ui))
         .route("/api/status", get(get_status))
@@ -453,6 +551,9 @@ pub fn create_router(state: AppState) -> Router {
             "/api/histograms/clear",
             axum::routing::post(clear_histograms),
         )
+        .route("/api/waveforms", get(list_waveforms))
+        .route("/api/waveforms/:module_id/:channel_id", get(get_waveform))
+        .layer(cors)
         .with_state(state)
 }
 
@@ -742,6 +843,13 @@ impl Monitor {
                         }
                         Some(HistogramMessage::GetHistogram(key, tx)) => {
                             let _ = tx.send(state.histograms.get(&key).cloned());
+                        }
+                        Some(HistogramMessage::GetWaveform(key, tx)) => {
+                            let _ = tx.send(state.latest_waveforms.get(&key).cloned());
+                        }
+                        Some(HistogramMessage::ListWaveforms(tx)) => {
+                            let keys: Vec<ChannelKey> = state.latest_waveforms.keys().copied().collect();
+                            let _ = tx.send(keys);
                         }
                         Some(HistogramMessage::SetStartTime) => {
                             state.start_time = Some(Instant::now());
