@@ -29,6 +29,14 @@ pub use command_task::{run_command_task, run_command_task_with_state};
 pub mod metrics;
 pub use metrics::{AtomicCounters, CounterSnapshot, RateSnapshot};
 
+// Common error types
+pub mod error;
+pub use error::{PipelineError, PipelineResult};
+
+// Unified shutdown handling
+pub mod shutdown;
+pub use shutdown::{setup_shutdown, setup_shutdown_with_message, ShutdownReceiver, ShutdownSender};
+
 /// Heartbeat message for liveness detection
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Heartbeat {

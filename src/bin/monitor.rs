@@ -6,10 +6,9 @@
 //!   cargo run --bin monitor -- -a tcp://localhost:5557 -p 8080
 
 use clap::Parser;
-use delila_rs::common::MonitorArgs;
+use delila_rs::common::{setup_shutdown_with_message, MonitorArgs};
 use delila_rs::config::Config;
 use delila_rs::monitor::{HistogramConfig, Monitor, MonitorConfig};
-use tokio::sync::broadcast;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -48,18 +47,9 @@ async fn main() -> anyhow::Result<()> {
         channel_capacity: 1000,
     };
 
-    // Create shutdown channel
-    let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
-
-    // Handle Ctrl+C
-    let shutdown_tx_clone = shutdown_tx.clone();
-    tokio::spawn(async move {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("Failed to listen for Ctrl+C");
-        println!("\nReceived Ctrl+C, shutting down...");
-        let _ = shutdown_tx_clone.send(());
-    });
+    // Setup shutdown handling
+    let (_shutdown_tx, shutdown_rx) =
+        setup_shutdown_with_message("Received Ctrl+C, shutting down...");
 
     // Create and run monitor
     let mut monitor = Monitor::new(monitor_config.clone()).await?;

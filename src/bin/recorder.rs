@@ -8,10 +8,9 @@
 use std::path::PathBuf;
 
 use clap::Parser;
-use delila_rs::common::RecorderArgs;
+use delila_rs::common::{setup_shutdown_with_message, RecorderArgs};
 use delila_rs::config::Config;
 use delila_rs::recorder::{Recorder, RecorderConfig};
-use tokio::sync::broadcast;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -66,18 +65,9 @@ async fn main() -> anyhow::Result<()> {
         max_file_duration_secs: max_duration_sec,
     };
 
-    // Create shutdown channel
-    let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
-
-    // Handle Ctrl+C
-    let shutdown_tx_clone = shutdown_tx.clone();
-    tokio::spawn(async move {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("Failed to listen for Ctrl+C");
-        println!("\nReceived Ctrl+C, shutting down...");
-        let _ = shutdown_tx_clone.send(());
-    });
+    // Setup shutdown handling
+    let (_shutdown_tx, shutdown_rx) =
+        setup_shutdown_with_message("Received Ctrl+C, shutting down...");
 
     // Create and run recorder
     let mut recorder = Recorder::new(recorder_config.clone()).await?;

@@ -7,11 +7,9 @@
 
 use anyhow::Result;
 use clap::Parser;
-use delila_rs::common::MergerArgs;
+use delila_rs::common::{setup_shutdown, MergerArgs};
 use delila_rs::config::Config;
 use delila_rs::merger::{Merger, MergerConfig};
-use tokio::signal;
-use tokio::sync::broadcast;
 use tracing::info;
 
 #[derive(Parser, Debug)]
@@ -58,15 +56,8 @@ async fn main() -> Result<()> {
 
     info!(?merger_config, "Starting merger");
 
-    // Create shutdown channel
-    let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
-
-    // Spawn shutdown signal handler
-    tokio::spawn(async move {
-        signal::ctrl_c().await.expect("Failed to listen for Ctrl+C");
-        info!("Ctrl+C received, initiating shutdown");
-        let _ = shutdown_tx.send(());
-    });
+    // Setup shutdown handling
+    let (_shutdown_tx, shutdown_rx) = setup_shutdown();
 
     // Run merger
     let mut merger = Merger::new(merger_config);

@@ -1,6 +1,6 @@
 # Refactoring Plan
 
-**Status: In Progress** (2026-01-19)
+**Status: COMPLETED** (2026-01-19)
 
 ## 実装状況
 
@@ -8,9 +8,9 @@
 |-------|-----|------|------|
 | 1 | CLIパーサー統合 (clap) | **✅ COMPLETED** | 7バイナリ移行、24テスト追加 |
 | 2 | 統一メトリクスフレームワーク | **✅ COMPLETED** | metrics.rs作成、10テスト追加 |
-| 3 | エラー型統合 | Pending | |
-| 4 | 設定構造体の共通化 | Pending | |
-| 5 | シャットダウン機構の統一 | Pending | |
+| 3 | エラー型統合 | **✅ COMPLETED** | error.rs作成、6テスト追加 |
+| 4 | 設定構造体の共通化 | **SKIPPED** | KISS原則により見送り（共通性が限定的） |
+| 5 | シャットダウン機構の統一 | **✅ COMPLETED** | shutdown.rs作成、5バイナリ移行 |
 
 ### Phase 1 成果 (2026-01-19)
 - **新規ファイル:** `src/common/cli.rs` (382行、24テスト)
@@ -22,6 +22,24 @@
 - **新規ファイル:** `src/common/metrics.rs` (263行、10テスト)
 - **提供機能:** AtomicCounters (lock-free統計), CounterSnapshot, RateSnapshot
 - **特徴:** ゼロオーバーヘッド、Relaxed ordering、rate計算ヘルパー
+
+### Phase 3 成果 (2026-01-19)
+- **新規ファイル:** `src/common/error.rs` (6テスト)
+- **提供型:** PipelineError (10+バリアント), PipelineResult<T>
+- **特徴:** ZMQ/シリアライズ/IO/チャンネル/設定エラーの統一定義
+- **備考:** 既存コンポーネントエラー型は維持（破壊的変更回避）
+
+### Phase 4 見送り理由 (2026-01-19)
+- 各コンポーネントの設定構造体を調査した結果、フィールドの共通性が限定的
+- トレイト抽象化の利点よりも複雑化のコストが高い
+- KISS原則に従い、現状維持を決定
+
+### Phase 5 成果 (2026-01-19)
+- **新規ファイル:** `src/common/shutdown.rs` (2テスト)
+- **提供関数:** setup_shutdown(), setup_shutdown_with_message()
+- **型エイリアス:** ShutdownSignal, ShutdownSender, ShutdownReceiver
+- **移行済み:** merger, recorder, monitor, data_sink, emulator
+- **削減:** 各バイナリで約10行のboilerplate削除
 
 ---
 

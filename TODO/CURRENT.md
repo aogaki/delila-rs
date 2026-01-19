@@ -11,27 +11,20 @@ Claudeセッション開始時に必ず読み込まれます。
 
 | Priority | File | Status | Summary |
 |----------|------|--------|---------|
-| 1 | [12_refactoring_plan.md](12_refactoring_plan.md) | **Ready** | コードベースリファクタリング (CLI, Metrics, Error, Config, Shutdown) |
-| 2 | [11_operator_web_ui.md](11_operator_web_ui.md) | **In Progress** | Operator Web UI (Angular + Material) |
-| 3 | [09_timestamp_sorting_design.md](09_timestamp_sorting_design.md) | **Phase 3完了** | タイムスタンプソートとファイル書き出し |
+| 1 | [11_operator_web_ui.md](11_operator_web_ui.md) | **In Progress** | Operator Web UI (Angular + Material) |
+| 2 | [09_timestamp_sorting_design.md](09_timestamp_sorting_design.md) | **Phase 3完了** | タイムスタンプソートとファイル書き出し |
 
 ---
 
-## Current Status: Refactoring Sprint (2026-01-19)
+## Current Status: Web UI Sprint (2026-01-19)
 
-### Refactoring Plan (5 Phases)
-
-**基本原則:** KISS + TDD（テスト駆動開発）
-
-| Phase | 内容 | 推定削減 | 状態 |
-|-------|-----|---------|------|
-| 1 | CLIパーサー統合 (clap) | 500行+ | Ready |
-| 2 | 統一メトリクスフレームワーク | 200行+ | Pending |
-| 3 | エラー型統合 | 100行+ | Pending |
-| 4 | 設定構造体の共通化 | 150行+ | Pending |
-| 5 | シャットダウン機構の統一 | ロバスト性向上 | Pending |
-
-**詳細:** [12_refactoring_plan.md](12_refactoring_plan.md)
+### Recently Completed
+- **Refactoring Plan** ✅ (2026-01-19) → `archive/phase1_components/`
+  - Phase 1: CLIパーサー統合 (clap) - 7バイナリ移行、24テスト
+  - Phase 2: 統一メトリクスフレームワーク - metrics.rs、10テスト
+  - Phase 3: エラー型統合 - error.rs、6テスト
+  - Phase 4: 設定構造体共通化 - KISS原則により見送り
+  - Phase 5: シャットダウン機構統一 - shutdown.rs、5バイナリ移行
 
 ---
 
@@ -94,9 +87,10 @@ Claudeセッション開始時に必ず読み込まれます。
 以下のタスクは `TODO/archive/phase1_components/` に移動済み:
 - 06_caen_driver_design.md - CAEN FFIドライバ実装
 - 07_digitizer_config_design.md - デジタイザ設定REST API
-- 07_refactoring_plan.md - リファクタリング計画
+- 07_refactoring_plan.md - リファクタリング計画（旧）
 - 08_monitor_component.md - Monitorコンポーネント
 - 10_zero_copy_merger.md - ゼロコピーMerger
+- **12_refactoring_plan.md** - コードベースリファクタリング（CLI, Metrics, Error, Shutdown）
 
 ---
 

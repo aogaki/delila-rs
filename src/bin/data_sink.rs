@@ -6,10 +6,9 @@
 //!   cargo run --bin data_sink -- -a tcp://localhost:5557
 
 use clap::Parser;
-use delila_rs::common::DataSinkArgs;
+use delila_rs::common::{setup_shutdown_with_message, DataSinkArgs};
 use delila_rs::config::Config;
 use delila_rs::data_sink::{DataSink, DataSinkConfig};
-use tokio::sync::broadcast;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -59,18 +58,9 @@ async fn main() -> anyhow::Result<()> {
         channel_capacity: 1000,
     };
 
-    // Create shutdown channel
-    let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
-
-    // Handle Ctrl+C
-    let shutdown_tx_clone = shutdown_tx.clone();
-    tokio::spawn(async move {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("Failed to listen for Ctrl+C");
-        println!("\nReceived Ctrl+C, shutting down...");
-        let _ = shutdown_tx_clone.send(());
-    });
+    // Setup shutdown handling
+    let (_shutdown_tx, shutdown_rx) =
+        setup_shutdown_with_message("Received Ctrl+C, shutting down...");
 
     // Create and run data sink
     let mut sink = DataSink::new(sink_config.clone()).await?;
