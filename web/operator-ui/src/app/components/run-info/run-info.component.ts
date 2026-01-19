@@ -1,4 +1,4 @@
-import { Component, inject, signal, computed, OnDestroy } from '@angular/core';
+import { Component, inject, computed } from '@angular/core';
 import { CommonModule, DecimalPipe } from '@angular/common';
 import { MatCardModule } from '@angular/material/card';
 import { OperatorService } from '../../services/operator.service';
@@ -16,7 +16,7 @@ import { OperatorService } from '../../services/operator.service';
         <div class="info-grid">
           <div class="info-item">
             <span class="label">Run #</span>
-            <span class="value">{{ currentRunNumber() ?? '-' }}</span>
+            <span class="value">{{ runNumber() }}</span>
           </div>
           <div class="info-item">
             <span class="label">Started</span>
@@ -28,11 +28,11 @@ import { OperatorService } from '../../services/operator.service';
           </div>
           <div class="info-item">
             <span class="label">Events</span>
-            <span class="value">{{ operator.totalEvents() | number }}</span>
+            <span class="value">{{ totalEvents() | number }}</span>
           </div>
           <div class="info-item">
             <span class="label">Rate</span>
-            <span class="value">{{ formatRate(operator.totalRate()) }}</span>
+            <span class="value">{{ formatRate(totalRate()) }}</span>
           </div>
         </div>
       </mat-card-content>
@@ -62,23 +62,30 @@ import { OperatorService } from '../../services/operator.service';
     }
   `,
 })
-export class RunInfoComponent implements OnDestroy {
-  readonly operator = inject(OperatorService);
+export class RunInfoComponent {
+  private readonly operator = inject(OperatorService);
 
-  readonly currentRunNumber = signal<number | null>(null);
-  readonly startTime = signal<Date | null>(null);
-  readonly elapsedSeconds = signal(0);
+  // Get run info from backend (via OperatorService)
+  readonly runInfo = this.operator.runInfo;
 
-  private intervalId: ReturnType<typeof setInterval> | null = null;
+  // Computed values derived from backend run_info
+  readonly runNumber = computed(() => {
+    const info = this.runInfo();
+    return info ? info.run_number : '-';
+  });
 
   readonly startTimeDisplay = computed(() => {
-    const time = this.startTime();
-    if (!time) return '--:--:--';
-    return time.toLocaleTimeString();
+    const info = this.runInfo();
+    if (!info) return '--:--:--';
+    const date = new Date(info.start_time);
+    return date.toLocaleTimeString();
   });
 
   readonly elapsedDisplay = computed(() => {
-    const total = this.elapsedSeconds();
+    const info = this.runInfo();
+    if (!info) return '00:00:00';
+
+    const total = info.elapsed_secs;
     const hours = Math.floor(total / 3600);
     const minutes = Math.floor((total % 3600) / 60);
     const seconds = total % 60;
@@ -86,30 +93,24 @@ export class RunInfoComponent implements OnDestroy {
     return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
   });
 
-  startRun(runNumber: number): void {
-    this.currentRunNumber.set(runNumber);
-    this.startTime.set(new Date());
-    this.elapsedSeconds.set(0);
-
-    // Start elapsed time counter
-    this.intervalId = setInterval(() => {
-      this.elapsedSeconds.update((v) => v + 1);
-    }, 1000);
-  }
-
-  stopRun(): void {
-    if (this.intervalId) {
-      clearInterval(this.intervalId);
-      this.intervalId = null;
+  // Use stats from run_info if available, otherwise fall back to aggregated component metrics
+  readonly totalEvents = computed(() => {
+    const info = this.runInfo();
+    if (info && info.stats.total_events > 0) {
+      return info.stats.total_events;
     }
-  }
+    // Fallback to component aggregation
+    return this.operator.totalEvents();
+  });
 
-  resetRun(): void {
-    this.stopRun();
-    this.currentRunNumber.set(null);
-    this.startTime.set(null);
-    this.elapsedSeconds.set(0);
-  }
+  readonly totalRate = computed(() => {
+    const info = this.runInfo();
+    if (info && info.stats.average_rate > 0) {
+      return info.stats.average_rate;
+    }
+    // Fallback to component aggregation
+    return this.operator.totalRate();
+  });
 
   formatRate(rate: number): string {
     if (rate >= 1_000_000) {
@@ -118,9 +119,5 @@ export class RunInfoComponent implements OnDestroy {
       return `${(rate / 1_000).toFixed(2)} kevt/s`;
     }
     return `${rate.toFixed(0)} evt/s`;
-  }
-
-  ngOnDestroy(): void {
-    this.stopRun();
   }
 }

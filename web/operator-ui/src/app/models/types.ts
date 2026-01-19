@@ -44,10 +44,32 @@ export interface ComponentStatus {
   online: boolean;
 }
 
+// Run status
+export type RunStatus = 'running' | 'completed' | 'error' | 'aborted';
+
+// Run statistics
+export interface RunStats {
+  total_events: number;
+  total_bytes: number;
+  average_rate: number;
+}
+
+// Current run information
+export interface CurrentRunInfo {
+  run_number: number;
+  exp_name: string;
+  comment: string;
+  start_time: string; // ISO date string
+  elapsed_secs: number;
+  status: RunStatus;
+  stats: RunStats;
+}
+
 // System-wide status
 export interface SystemStatus {
   components: ComponentStatus[];
   system_state: SystemState;
+  run_info?: CurrentRunInfo;
 }
 
 // Configure request

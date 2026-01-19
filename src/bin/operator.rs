@@ -18,11 +18,14 @@
 //! Swagger UI: http://localhost:8080/swagger-ui/
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 
 use clap::Parser;
 use delila_rs::common::OperatorArgs;
 use delila_rs::config::Config;
-use delila_rs::operator::{create_router, ComponentConfig};
+use delila_rs::operator::{
+    create_router, create_router_with_mongodb, ComponentConfig, OperatorConfig, RunRepository,
+};
 use tracing::{info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
@@ -34,6 +37,14 @@ use tracing_subscriber::FmtSubscriber;
 struct Args {
     #[command(flatten)]
     operator: OperatorArgs,
+
+    /// MongoDB connection URI (optional)
+    #[arg(long, env = "MONGODB_URI")]
+    mongodb_uri: Option<String>,
+
+    /// MongoDB database name
+    #[arg(long, env = "MONGODB_DATABASE", default_value = "delila")]
+    mongodb_database: String,
 }
 
 /// Load component configuration from config file or use defaults
@@ -164,8 +175,37 @@ async fn main() -> anyhow::Result<()> {
         info!("  {} -> {}", comp.name, comp.address);
     }
 
+    // Connect to MongoDB if URI is provided
+    let run_repo = if let Some(ref uri) = args.mongodb_uri {
+        match RunRepository::connect(uri, &args.mongodb_database).await {
+            Ok(repo) => {
+                info!(
+                    "Connected to MongoDB at {} (database: {})",
+                    uri, args.mongodb_database
+                );
+                Some(repo)
+            }
+            Err(e) => {
+                warn!("Failed to connect to MongoDB: {}. Run history will not be available.", e);
+                None
+            }
+        }
+    } else {
+        info!("MongoDB not configured. Run history will not be available.");
+        None
+    };
+
     // Create router
-    let app = create_router(components);
+    let app = if let Some(repo) = run_repo {
+        create_router_with_mongodb(
+            components,
+            OperatorConfig::default(),
+            PathBuf::from("./config/digitizers"),
+            repo,
+        )
+    } else {
+        create_router(components)
+    };
 
     // Start server
     let port = args.operator.port;

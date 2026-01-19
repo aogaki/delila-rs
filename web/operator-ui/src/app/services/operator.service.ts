@@ -7,6 +7,7 @@ import {
   ApiResponse,
   getButtonStates,
   ButtonStates,
+  CurrentRunInfo,
 } from '../models/types';
 
 @Injectable({
@@ -25,6 +26,7 @@ export class OperatorService {
   readonly systemState = computed(() => this.status()?.system_state ?? 'Offline');
   readonly components = computed(() => this.status()?.components ?? []);
   readonly buttonStates = computed<ButtonStates>(() => getButtonStates(this.systemState()));
+  readonly runInfo = computed<CurrentRunInfo | null>(() => this.status()?.run_info ?? null);
 
   // Aggregate metrics
   readonly totalEvents = computed(() => {

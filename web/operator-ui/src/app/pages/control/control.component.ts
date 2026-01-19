@@ -21,7 +21,7 @@ import { NotificationService } from '../../services/notification.service';
     <div class="control-content">
       <div class="left-column">
         <app-status-panel></app-status-panel>
-        <app-run-info #runInfo></app-run-info>
+        <app-run-info></app-run-info>
       </div>
       <div class="right-column">
         <app-control-panel
@@ -60,17 +60,20 @@ export class ControlPageComponent {
   private readonly operator = inject(OperatorService);
   private readonly notification = inject(NotificationService);
 
-  @ViewChild('runInfo') runInfo!: RunInfoComponent;
   @ViewChild('controlPanel') controlPanel!: ControlPanelComponent;
 
-  // ngOnInit is not needed - polling is started in App component
+  // Run info is now managed by the backend and displayed reactively
+  // No need for manual startRun/stopRun calls
 
   onRunStarted(event: { runNumber: number; expName: string }): void {
-    this.runInfo.startRun(event.runNumber);
+    // Backend handles run_info update automatically
+    // Just log for debugging
+    console.log(`Run ${event.runNumber} started (${event.expName})`);
   }
 
   onRunStopped(): void {
-    this.runInfo.stopRun();
+    // Backend handles run_info update automatically
+    console.log('Run stopped');
   }
 
   onTimerStarted(): void {
@@ -79,7 +82,7 @@ export class ControlPageComponent {
       next: (res) => {
         if (res.success) {
           this.notification.success(`Started run ${runNumber} with timer`);
-          this.runInfo.startRun(runNumber);
+          // Backend handles run_info update automatically
         } else {
           this.notification.error(`Start failed: ${res.message}`);
         }
@@ -94,7 +97,7 @@ export class ControlPageComponent {
     this.operator.stop().subscribe({
       next: (res) => {
         if (res.success) {
-          this.runInfo.stopRun();
+          // Backend handles run_info update automatically
           if (this.controlPanel.autoIncrement()) {
             this.controlPanel.runNumber++;
           }

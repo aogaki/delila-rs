@@ -40,7 +40,7 @@ dashmap = "6"
 xxhash-rust = { version = "0.8", features = ["xxh64"] }
 
 # CLI argument parsing
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 
 # Web API
 axum = "0.7"
@@ -50,6 +50,10 @@ tower-http = { version = "0.5", features = ["cors"] }
 utoipa = { version = "4", features = ["axum_extras"] }
 utoipa-swagger-ui = { version = "7", features = ["axum"] }
 bytes = "1.11.0"
+
+# MongoDB
+mongodb = "3"
+chrono = { version = "0.4", features = ["serde"] }
 
 [build-dependencies]
 bindgen = "0.70"

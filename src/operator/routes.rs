@@ -1,5 +1,6 @@
 //! REST API routes for DAQ control
 
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -12,7 +13,7 @@ use axum::{
 };
 use tokio::sync::RwLock;
 use tower_http::cors::{Any, CorsLayer};
-use utoipa::OpenApi;
+use utoipa::{OpenApi, ToSchema};
 use utoipa_swagger_ui::SwaggerUi;
 
 use crate::common::{ComponentMetrics, ComponentState, RunConfig};
@@ -20,7 +21,8 @@ use crate::config::DigitizerConfig;
 
 use super::{
     ApiResponse, CommandResult, ComponentClient, ComponentConfig, ComponentStatus,
-    ConfigureRequest, OperatorConfig, StartRequest, SystemState, SystemStatus,
+    ConfigureRequest, CurrentRunInfo, OperatorConfig, RunDocument, RunRepository, RunStats,
+    RunStatus, StartRequest, SystemState, SystemStatus,
 };
 
 /// Application state shared across handlers
@@ -32,6 +34,10 @@ pub struct AppState {
     pub digitizer_configs: RwLock<HashMap<u32, DigitizerConfig>>,
     /// Directory for storing digitizer config files
     pub config_dir: PathBuf,
+    /// Run repository for MongoDB storage (optional)
+    pub run_repo: Option<RunRepository>,
+    /// Current run info (cached in memory for fast access)
+    pub current_run: RwLock<Option<CurrentRunInfo>>,
 }
 
 /// OpenAPI documentation
@@ -49,6 +55,8 @@ pub struct AppState {
         get_digitizer,
         update_digitizer,
         save_digitizer,
+        get_run_history,
+        get_run,
     ),
     components(schemas(
         SystemStatus,
@@ -61,10 +69,14 @@ pub struct AppState {
         ApiResponse,
         CommandResult,
         DigitizerConfig,
+        CurrentRunInfo,
+        RunStats,
+        RunStatus,
     )),
     tags(
         (name = "DAQ Control", description = "DAQ system control endpoints"),
-        (name = "Digitizer Config", description = "Digitizer configuration endpoints")
+        (name = "Digitizer Config", description = "Digitizer configuration endpoints"),
+        (name = "Run History", description = "Run history and statistics")
     ),
     info(
         title = "DELILA DAQ Operator API",
@@ -84,7 +96,22 @@ pub fn create_router_with_config(
     components: Vec<ComponentConfig>,
     config: OperatorConfig,
 ) -> Router {
-    create_router_full(components, config, PathBuf::from("./config/digitizers"))
+    create_router_full(
+        components,
+        config,
+        PathBuf::from("./config/digitizers"),
+        None,
+    )
+}
+
+/// Create the axum router with MongoDB support
+pub fn create_router_with_mongodb(
+    components: Vec<ComponentConfig>,
+    config: OperatorConfig,
+    config_dir: PathBuf,
+    run_repo: RunRepository,
+) -> Router {
+    create_router_full(components, config, config_dir, Some(run_repo))
 }
 
 /// Create the axum router with full configuration including config directory
@@ -92,6 +119,7 @@ pub fn create_router_full(
     components: Vec<ComponentConfig>,
     config: OperatorConfig,
     config_dir: PathBuf,
+    run_repo: Option<RunRepository>,
 ) -> Router {
     // Load existing digitizer configs from disk
     let digitizer_configs = load_digitizer_configs(&config_dir).unwrap_or_default();
@@ -102,6 +130,8 @@ pub fn create_router_full(
         config,
         digitizer_configs: RwLock::new(digitizer_configs),
         config_dir,
+        run_repo,
+        current_run: RwLock::new(None),
     });
 
     let cors = CorsLayer::new()
@@ -119,6 +149,9 @@ pub fn create_router_full(
         .route("/api/reset", post(reset))
         // Two-phase synchronized run control
         .route("/api/run/start", post(run_start))
+        // Run history routes
+        .route("/api/runs", get(get_run_history))
+        .route("/api/runs/{run_number}", get(get_run))
         // Digitizer configuration routes
         .route("/api/digitizers", get(list_digitizers))
         .route("/api/digitizers/{id}", get(get_digitizer))
@@ -167,9 +200,13 @@ async fn get_status(State(state): State<Arc<AppState>>) -> Json<SystemStatus> {
     let components = state.client.get_all_status(&state.components).await;
     let system_state = SystemState::from_components(&components);
 
+    // Get current run info
+    let run_info = state.current_run.read().await.clone();
+
     Json(SystemStatus {
         components,
         system_state,
+        run_info,
     })
 }
 
@@ -288,6 +325,42 @@ async fn start(
         .with_results(results);
 
     let status = if response.success {
+        // Record run start in MongoDB and update current_run
+        if let Some(ref repo) = state.run_repo {
+            match repo
+                .start_run(run_number as i32, "", "", None)
+                .await
+            {
+                Ok(doc) => {
+                    let info = CurrentRunInfo::from_document(&doc);
+                    *state.current_run.write().await = Some(info);
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to record run start in MongoDB: {}", e);
+                    // Still set current_run for in-memory tracking
+                    *state.current_run.write().await = Some(CurrentRunInfo {
+                        run_number: run_number as i32,
+                        exp_name: String::new(),
+                        comment: String::new(),
+                        start_time: chrono::Utc::now(),
+                        elapsed_secs: 0,
+                        status: RunStatus::Running,
+                        stats: RunStats::default(),
+                    });
+                }
+            }
+        } else {
+            // No MongoDB, just track in memory
+            *state.current_run.write().await = Some(CurrentRunInfo {
+                run_number: run_number as i32,
+                exp_name: String::new(),
+                comment: String::new(),
+                start_time: chrono::Utc::now(),
+                elapsed_secs: 0,
+                status: RunStatus::Running,
+                stats: RunStats::default(),
+            });
+        }
         StatusCode::OK
     } else {
         StatusCode::BAD_REQUEST
@@ -307,11 +380,50 @@ async fn start(
     )
 )]
 async fn stop(State(state): State<Arc<AppState>>) -> (StatusCode, Json<ApiResponse>) {
+    // Get current run info before stopping
+    let current_run = state.current_run.read().await.clone();
+
     let results = state.client.stop_all(&state.components).await;
 
     let response = ApiResponse::success("Stop command sent").with_results(results);
 
     let status = if response.success {
+        // Record run end in MongoDB
+        if let (Some(ref repo), Some(run_info)) = (&state.run_repo, current_run) {
+            // Get final stats from components
+            let components = state.client.get_all_status(&state.components).await;
+            let total_events: i64 = components
+                .iter()
+                .filter_map(|c| c.metrics.as_ref())
+                .map(|m| m.events_processed as i64)
+                .sum();
+            let total_bytes: i64 = components
+                .iter()
+                .filter_map(|c| c.metrics.as_ref())
+                .map(|m| m.bytes_transferred as i64)
+                .sum();
+            let average_rate = if run_info.elapsed_secs > 0 {
+                total_events as f64 / run_info.elapsed_secs as f64
+            } else {
+                0.0
+            };
+
+            let stats = RunStats {
+                total_events,
+                total_bytes,
+                average_rate,
+            };
+
+            if let Err(e) = repo
+                .end_run(run_info.run_number, RunStatus::Completed, stats)
+                .await
+            {
+                tracing::warn!("Failed to record run end in MongoDB: {}", e);
+            }
+        }
+
+        // Clear current run
+        *state.current_run.write().await = None;
         StatusCode::OK
     } else {
         StatusCode::BAD_REQUEST
@@ -612,4 +724,117 @@ async fn save_digitizer(
             file_path.display()
         ))),
     )
+}
+
+// =============================================================================
+// Run History Endpoints
+// =============================================================================
+
+/// Run history response item (simplified from RunDocument)
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct RunHistoryItem {
+    pub run_number: i32,
+    pub exp_name: String,
+    pub comment: String,
+    #[schema(value_type = String, format = "date-time")]
+    pub start_time: chrono::DateTime<chrono::Utc>,
+    #[schema(value_type = Option<String>, format = "date-time")]
+    pub end_time: Option<chrono::DateTime<chrono::Utc>>,
+    pub duration_secs: Option<i32>,
+    pub status: RunStatus,
+    pub stats: RunStats,
+}
+
+impl From<RunDocument> for RunHistoryItem {
+    fn from(doc: RunDocument) -> Self {
+        Self {
+            run_number: doc.run_number,
+            exp_name: doc.exp_name,
+            comment: doc.comment,
+            start_time: doc.start_time,
+            end_time: doc.end_time,
+            duration_secs: doc.duration_secs,
+            status: doc.status,
+            stats: doc.stats,
+        }
+    }
+}
+
+/// Get recent run history
+#[utoipa::path(
+    get,
+    path = "/api/runs",
+    tag = "Run History",
+    params(
+        ("limit" = Option<i64>, Query, description = "Maximum number of runs to return (default: 50)")
+    ),
+    responses(
+        (status = 200, description = "Run history", body = Vec<RunHistoryItem>),
+        (status = 503, description = "MongoDB not available", body = ApiResponse)
+    )
+)]
+async fn get_run_history(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<Vec<RunHistoryItem>>, (StatusCode, Json<ApiResponse>)> {
+    let repo = state.run_repo.as_ref().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ApiResponse::error("MongoDB not configured")),
+        )
+    })?;
+
+    let limit = params
+        .get("limit")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(50);
+
+    let runs = repo.get_recent_runs(limit).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse::error(format!("Failed to get run history: {}", e))),
+        )
+    })?;
+
+    Ok(Json(runs.into_iter().map(Into::into).collect()))
+}
+
+/// Get a specific run by run number
+#[utoipa::path(
+    get,
+    path = "/api/runs/{run_number}",
+    tag = "Run History",
+    params(
+        ("run_number" = i32, Path, description = "Run number")
+    ),
+    responses(
+        (status = 200, description = "Run details", body = RunHistoryItem),
+        (status = 404, description = "Run not found", body = ApiResponse),
+        (status = 503, description = "MongoDB not available", body = ApiResponse)
+    )
+)]
+async fn get_run(
+    State(state): State<Arc<AppState>>,
+    Path(run_number): Path<i32>,
+) -> Result<Json<RunHistoryItem>, (StatusCode, Json<ApiResponse>)> {
+    let repo = state.run_repo.as_ref().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ApiResponse::error("MongoDB not configured")),
+        )
+    })?;
+
+    let run = repo.get_run(run_number).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse::error(format!("Failed to get run: {}", e))),
+        )
+    })?;
+
+    run.map(|r| Json(r.into())).ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ApiResponse::error(format!("Run {} not found", run_number))),
+        )
+    })
 }

@@ -5,9 +5,14 @@
 
 mod client;
 mod routes;
+mod run_repository;
 
 pub use client::ComponentClient;
-pub use routes::create_router;
+pub use routes::{create_router, create_router_with_mongodb};
+pub use run_repository::{
+    CurrentRunInfo, ErrorLogEntry, RepositoryError, RunDocument, RunRepository, RunStats,
+    RunStatus,
+};
 
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -43,6 +48,9 @@ pub struct SystemStatus {
     pub components: Vec<ComponentStatus>,
     /// Overall system state (derived from components)
     pub system_state: SystemState,
+    /// Current run information (if a run is active)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_info: Option<CurrentRunInfo>,
 }
 
 /// Aggregated system state
@@ -436,6 +444,7 @@ mod tests {
         let status = SystemStatus {
             components: vec![make_status("A", ComponentState::Idle, true)],
             system_state: SystemState::Idle,
+            run_info: None,
         };
         let json = serde_json::to_string(&status).unwrap();
         assert!(json.contains("\"system_state\":\"Idle\""));
