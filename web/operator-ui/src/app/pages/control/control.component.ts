@@ -1,4 +1,4 @@
-import { Component, inject, OnInit, ViewChild } from '@angular/core';
+import { Component, inject, ViewChild } from '@angular/core';
 import { MatSnackBarModule } from '@angular/material/snack-bar';
 import { StatusPanelComponent } from '../../components/status-panel/status-panel.component';
 import { ControlPanelComponent } from '../../components/control-panel/control-panel.component';
@@ -56,16 +56,14 @@ import { NotificationService } from '../../services/notification.service';
     }
   `,
 })
-export class ControlPageComponent implements OnInit {
+export class ControlPageComponent {
   private readonly operator = inject(OperatorService);
   private readonly notification = inject(NotificationService);
 
   @ViewChild('runInfo') runInfo!: RunInfoComponent;
   @ViewChild('controlPanel') controlPanel!: ControlPanelComponent;
 
-  ngOnInit(): void {
-    // Polling is started in App component
-  }
+  // ngOnInit is not needed - polling is started in App component
 
   onRunStarted(event: { runNumber: number; expName: string }): void {
     this.runInfo.startRun(event.runNumber);

@@ -1,5 +1,5 @@
 import { TestBed } from '@angular/core/testing';
-import { FittingService, GaussianFitResult, FitInput } from './fitting.service';
+import { FittingService, FitInput } from './fitting.service';
 
 describe('FittingService', () => {
   let service: FittingService;

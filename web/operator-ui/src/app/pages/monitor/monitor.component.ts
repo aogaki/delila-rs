@@ -55,7 +55,10 @@ const STORAGE_KEY = 'delila-monitor-state';
               {{ tab.name }}
               <span
                 class="tab-close"
+                role="button"
+                tabindex="0"
                 (click)="removeViewTab(tab.id, $event)"
+                (keydown.enter)="removeViewTab(tab.id, $event)"
                 title="Close"
               >×</span>
             </button>

@@ -241,10 +241,8 @@ export class FittingService {
     // Find max for amplitude and center estimate
     let maxY = -Infinity;
     let maxIdx = 0;
-    let sumY = 0;
 
     for (let i = 0; i < yData.length; i++) {
-      sumY += yData[i];
       if (yData[i] > maxY) {
         maxY = yData[i];
         maxIdx = i;

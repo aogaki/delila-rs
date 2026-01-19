@@ -55,7 +55,7 @@ export class HistogramService {
             this.error.set(null);
           }
         }),
-        catchError((err) => {
+        catchError(() => {
           this.error.set('Failed to connect to Monitor');
           return of(null);
         })

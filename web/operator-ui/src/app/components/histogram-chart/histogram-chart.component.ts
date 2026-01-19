@@ -111,9 +111,9 @@ export class HistogramChartComponent implements OnChanges {
     if (!this.chartInstance) return;
 
     const brushEvent = event as {
-      areas?: Array<{
+      areas?: {
         coordRange?: [number, number];
-      }>;
+      }[];
     };
 
     if (brushEvent.areas && brushEvent.areas.length > 0) {
@@ -135,7 +135,7 @@ export class HistogramChartComponent implements OnChanges {
     }
   }
 
-  onDataZoom(event: unknown): void {
+  onDataZoom(_event: unknown): void {
     if (!this.chartInstance) return;
 
     const option = this.chartInstance.getOption() as { dataZoom?: unknown[] };

@@ -15,13 +15,14 @@ export class NotificationService {
     verticalPosition: 'bottom',
   };
 
-  show(message: string, type: NotificationType = 'info', action: string = 'Close'): void {
+  show(message: string, type: NotificationType = 'info', action?: string): void {
+    const closeAction = action ?? 'Close';
     const config: MatSnackBarConfig = {
       ...this.defaultConfig,
       panelClass: this.getPanelClass(type),
     };
 
-    this.snackBar.open(message, action, config);
+    this.snackBar.open(message, closeAction, config);
   }
 
   success(message: string): void {

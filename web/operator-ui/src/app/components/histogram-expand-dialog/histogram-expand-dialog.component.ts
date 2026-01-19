@@ -1,4 +1,4 @@
-import { Component, Inject, signal, OnInit, OnDestroy, inject, computed } from '@angular/core';
+import { Component, signal, OnInit, OnDestroy, inject, computed } from '@angular/core';
 import { DecimalPipe } from '@angular/common';
 import { MAT_DIALOG_DATA, MatDialogRef, MatDialogModule } from '@angular/material/dialog';
 import { MatButtonModule } from '@angular/material/button';
@@ -202,11 +202,11 @@ export class HistogramExpandDialogComponent implements OnInit, OnDestroy {
     return fit.chi2 / fit.ndf;
   });
 
-  constructor(
-    @Inject(MAT_DIALOG_DATA) public data: ExpandDialogData,
-    private dialogRef: MatDialogRef<HistogramExpandDialogComponent, ExpandDialogResult>
-  ) {
-    this.cell = signal<ViewCell>(data.cell);
+  readonly data = inject<ExpandDialogData>(MAT_DIALOG_DATA);
+  private readonly dialogRef = inject(MatDialogRef<HistogramExpandDialogComponent, ExpandDialogResult>);
+
+  constructor() {
+    this.cell = signal<ViewCell>(this.data.cell);
   }
 
   ngOnInit(): void {

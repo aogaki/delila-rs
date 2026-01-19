@@ -106,9 +106,9 @@ describe('App', () => {
   });
 
   it('should format rate correctly', () => {
-    expect(component.formatRate(1500000)).toBe('1.50 Mev/s');
-    expect(component.formatRate(15000)).toBe('15.0 Kev/s');
-    expect(component.formatRate(150)).toBe('150 ev/s');
+    expect(component.formatRate(1500000)).toBe('1.50M eve/s');
+    expect(component.formatRate(15000)).toBe('15.0k eve/s');
+    expect(component.formatRate(150)).toBe('150 eve/s');
   });
 
   it('should display run number when available', () => {
