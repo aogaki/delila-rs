@@ -6,6 +6,13 @@
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
+// CLI argument parsing
+pub mod cli;
+pub use cli::{
+    CommonArgs, ControllerArgs, DataSinkArgs, MergerArgs, MonitorArgs, OperatorArgs, PipelineArgs,
+    RecorderArgs, SourceArgs,
+};
+
 // Re-export command types
 pub mod command;
 pub use command::{Command, CommandResponse, ComponentState, RunConfig};
@@ -17,6 +24,10 @@ pub use state::{handle_command, handle_command_simple, CommandHandlerExt, Compon
 // Generic command task for ZMQ REP socket handling
 pub mod command_task;
 pub use command_task::{run_command_task, run_command_task_with_state};
+
+// Unified metrics framework
+pub mod metrics;
+pub use metrics::{AtomicCounters, CounterSnapshot, RateSnapshot};
 
 /// Heartbeat message for liveness detection
 #[derive(Debug, Clone, Serialize, Deserialize)]

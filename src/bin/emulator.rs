@@ -6,11 +6,33 @@
 //!   cargo run --bin emulator -- --batches 10           # Run for 10 batches
 //!   cargo run --bin emulator -- --source-id 1          # Use specific source
 
+use clap::Parser;
+use delila_rs::common::SourceArgs;
 use delila_rs::config::Config;
 use delila_rs::data_source_emulator::{Emulator, EmulatorConfig};
 use tokio::sync::broadcast;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
+
+/// Emulator - publishes dummy event data via ZeroMQ
+#[derive(Parser, Debug)]
+#[command(name = "emulator", about = "DELILA data source emulator")]
+struct Args {
+    #[command(flatten)]
+    source: SourceArgs,
+
+    /// Run for N batches then send EOS and exit
+    #[arg(short, long)]
+    batches: Option<u64>,
+
+    /// Batch interval in milliseconds
+    #[arg(short, long)]
+    interval: Option<u64>,
+
+    /// Events per batch
+    #[arg(short, long)]
+    events: Option<usize>,
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -20,112 +42,21 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     // Parse command line arguments
-    let args: Vec<String> = std::env::args().collect();
-    let mut config_path: Option<String> = None;
-    let mut batches: Option<u64> = None;
-    let mut source_id: Option<u32> = None;
-    let mut address: Option<String> = None;
-    let mut interval_ms: Option<u64> = None;
-    let mut events_per_batch: Option<usize> = None;
-
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--config" | "-c" => {
-                if i + 1 < args.len() {
-                    config_path = Some(args[i + 1].clone());
-                    i += 2;
-                } else {
-                    eprintln!("Error: --config requires a file path");
-                    std::process::exit(1);
-                }
-            }
-            "--batches" | "-b" => {
-                if i + 1 < args.len() {
-                    batches = Some(args[i + 1].parse().expect("batches must be a number"));
-                    i += 2;
-                } else {
-                    eprintln!("Error: --batches requires a number");
-                    std::process::exit(1);
-                }
-            }
-            "--address" | "-a" => {
-                if i + 1 < args.len() {
-                    address = Some(args[i + 1].clone());
-                    i += 2;
-                } else {
-                    eprintln!("Error: --address requires an address");
-                    std::process::exit(1);
-                }
-            }
-            "--source-id" | "-s" => {
-                if i + 1 < args.len() {
-                    source_id = Some(args[i + 1].parse().expect("source-id must be a number"));
-                    i += 2;
-                } else {
-                    eprintln!("Error: --source-id requires a number");
-                    std::process::exit(1);
-                }
-            }
-            "--interval" | "-i" => {
-                if i + 1 < args.len() {
-                    interval_ms = Some(args[i + 1].parse().expect("interval must be a number"));
-                    i += 2;
-                } else {
-                    eprintln!("Error: --interval requires a number");
-                    std::process::exit(1);
-                }
-            }
-            "--events" | "-e" => {
-                if i + 1 < args.len() {
-                    events_per_batch = Some(args[i + 1].parse().expect("events must be a number"));
-                    i += 2;
-                } else {
-                    eprintln!("Error: --events requires a number");
-                    std::process::exit(1);
-                }
-            }
-            "--help" | "-h" => {
-                println!("Emulator - publishes dummy event data via ZeroMQ");
-                println!();
-                println!("Usage: emulator [OPTIONS]");
-                println!();
-                println!("Options:");
-                println!("  --config, -c <FILE>   Load configuration from TOML file");
-                println!(
-                    "  --source-id, -s <ID>  Source ID (selects config from file) [default: 0]"
-                );
-                println!("  --batches, -b <N>     Run for N batches then send EOS and exit");
-                println!("  --address, -a <ADDR>  Override ZMQ bind address");
-                println!("  --interval, -i <MS>   Batch interval in milliseconds [default: 100]");
-                println!("  --events, -e <N>      Events per batch [default: 100]");
-                println!("  --help, -h            Show this help message");
-                println!();
-                println!("Examples:");
-                println!("  emulator --config config.toml --source-id 1");
-                println!("  emulator --batches 100");
-                println!("  emulator --interval 10 --events 1000  # High rate: 100kHz");
-                return Ok(());
-            }
-            _ => {
-                eprintln!("Unknown argument: {}", args[i]);
-                std::process::exit(1);
-            }
-        }
-    }
+    let args = Args::parse();
 
     // Build configuration
-    let emulator_config = if let Some(path) = config_path {
+    let config_path = &args.source.common.config_file;
+    let emulator_config = if std::path::Path::new(config_path).exists() {
         // Load from config file
-        let config = Config::load(&path)?;
+        let config = Config::load(config_path)?;
         let settings = config.settings.get_settings()?;
 
         // Find source config by ID
-        let sid = source_id.unwrap_or(0);
+        let sid = args.source.source_id.unwrap_or(0);
         let source_net = config.network.sources.iter().find(|s| s.id == sid);
 
-        let bind_address = if let Some(addr) = address {
-            addr
+        let bind_address = if let Some(addr) = &args.source.address {
+            addr.clone()
         } else if let Some(src) = source_net {
             src.bind.clone()
         } else {
@@ -133,7 +64,7 @@ async fn main() -> anyhow::Result<()> {
         };
 
         info!(
-            config_file = %path,
+            config_file = %config_path,
             source_id = sid,
             "Loaded configuration"
         );
@@ -146,8 +77,8 @@ async fn main() -> anyhow::Result<()> {
             address: bind_address,
             command_address: command_addr,
             source_id: sid,
-            events_per_batch: settings.events_per_batch as usize,
-            batch_interval_ms: settings.batch_interval_ms,
+            events_per_batch: args.events.unwrap_or(settings.events_per_batch as usize),
+            batch_interval_ms: args.interval.unwrap_or(settings.batch_interval_ms),
             heartbeat_interval_ms: 1000, // 1Hz heartbeat
             num_modules: settings.num_modules as u8,
             channels_per_module: settings.channels_per_module as u8,
@@ -157,13 +88,16 @@ async fn main() -> anyhow::Result<()> {
         }
     } else {
         // Use defaults with CLI overrides
-        let sid = source_id.unwrap_or(0);
+        let sid = args.source.source_id.unwrap_or(0);
         EmulatorConfig {
-            address: address.unwrap_or_else(|| "tcp://*:5555".to_string()),
+            address: args
+                .source
+                .address
+                .unwrap_or_else(|| "tcp://*:5555".to_string()),
             command_address: format!("tcp://*:{}", 5560 + sid as u16),
             source_id: sid,
-            events_per_batch: events_per_batch.unwrap_or(100),
-            batch_interval_ms: interval_ms.unwrap_or(100),
+            events_per_batch: args.events.unwrap_or(100),
+            batch_interval_ms: args.interval.unwrap_or(100),
             heartbeat_interval_ms: 1000, // 1Hz heartbeat
             num_modules: 2,
             channels_per_module: 16,
@@ -179,7 +113,7 @@ async fn main() -> anyhow::Result<()> {
         emulator_config.source_id, emulator_config.address
     );
 
-    if let Some(count) = batches {
+    if let Some(count) = args.batches {
         // Run for fixed number of batches
         println!("Will send {} batches then EOS.", count);
         emulator.run_batches(count).await?;

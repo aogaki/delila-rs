@@ -196,7 +196,7 @@ impl Emulator {
                         0i16
                     } else if i < pulse_start + rise_time {
                         // Positive during rise
-                        (amplitude / 4) as i16
+                        amplitude / 4
                     } else {
                         // Negative during decay
                         let t = (i - pulse_start - rise_time) as f64;
@@ -211,7 +211,7 @@ impl Emulator {
         // Digital probes: packed bits (1 bit per sample)
         let digital_probe1 = if probes & waveform_probes::DIGITAL_PROBE1 != 0 {
             // Trigger signal: high during pulse
-            let mut bits = vec![0u8; (n + 7) / 8];
+            let mut bits = vec![0u8; n.div_ceil(8)];
             for i in pulse_start..(pulse_start + 50).min(n) {
                 bits[i / 8] |= 1 << (i % 8);
             }
@@ -222,7 +222,7 @@ impl Emulator {
 
         let digital_probe2 = if probes & waveform_probes::DIGITAL_PROBE2 != 0 {
             // Gate signal: high during integration window
-            let mut bits = vec![0u8; (n + 7) / 8];
+            let mut bits = vec![0u8; n.div_ceil(8)];
             for i in pulse_start..(pulse_start + 100).min(n) {
                 bits[i / 8] |= 1 << (i % 8);
             }
@@ -233,7 +233,7 @@ impl Emulator {
 
         let digital_probe3 = if probes & waveform_probes::DIGITAL_PROBE3 != 0 {
             // Short gate
-            let mut bits = vec![0u8; (n + 7) / 8];
+            let mut bits = vec![0u8; n.div_ceil(8)];
             for i in pulse_start..(pulse_start + 30).min(n) {
                 bits[i / 8] |= 1 << (i % 8);
             }
@@ -244,7 +244,7 @@ impl Emulator {
 
         let digital_probe4 = if probes & waveform_probes::DIGITAL_PROBE4 != 0 {
             // Pileup indicator (always low in this simple simulation)
-            vec![0u8; (n + 7) / 8]
+            vec![0u8; n.div_ceil(8)]
         } else {
             Vec::new()
         };

@@ -1,15 +1,24 @@
 //! Monitor binary - real-time histogram display via web browser
 //!
 //! Usage:
-//!   cargo run --bin monitor                            # Use defaults
-//!   cargo run --bin monitor -- --config config.toml    # Use config file
-//!   cargo run --bin monitor -- --address tcp://localhost:5557 --port 8080
+//!   cargo run --bin monitor                       # Use config.toml
+//!   cargo run --bin monitor -- -f config.toml     # Explicit config file
+//!   cargo run --bin monitor -- -a tcp://localhost:5557 -p 8080
 
+use clap::Parser;
+use delila_rs::common::MonitorArgs;
 use delila_rs::config::Config;
 use delila_rs::monitor::{HistogramConfig, Monitor, MonitorConfig};
 use tokio::sync::broadcast;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
+
+#[derive(Parser, Debug)]
+#[command(name = "monitor", about = "DELILA monitor - real-time histogram display via web browser")]
+struct Args {
+    #[command(flatten)]
+    monitor: MonitorArgs,
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -18,96 +27,25 @@ async fn main() -> anyhow::Result<()> {
         .with_env_filter(EnvFilter::from_default_env().add_directive("delila_rs=info".parse()?))
         .init();
 
-    // Parse command line arguments
-    let args: Vec<String> = std::env::args().collect();
-    let mut config_path: Option<String> = None;
-    let mut address: Option<String> = None;
-    let mut port: Option<u16> = None;
+    let args = Args::parse();
 
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--config" | "-c" => {
-                if i + 1 < args.len() {
-                    config_path = Some(args[i + 1].clone());
-                    i += 2;
-                } else {
-                    eprintln!("Error: --config requires a file path");
-                    std::process::exit(1);
-                }
-            }
-            "--address" | "-a" => {
-                if i + 1 < args.len() {
-                    address = Some(args[i + 1].clone());
-                    i += 2;
-                } else {
-                    eprintln!("Error: --address requires an address");
-                    std::process::exit(1);
-                }
-            }
-            "--port" | "-p" => {
-                if i + 1 < args.len() {
-                    port = Some(args[i + 1].parse().expect("Invalid port number"));
-                    i += 2;
-                } else {
-                    eprintln!("Error: --port requires a port number");
-                    std::process::exit(1);
-                }
-            }
-            "--help" | "-h" => {
-                println!("Monitor - real-time histogram display via web browser");
-                println!();
-                println!("Usage: monitor [OPTIONS]");
-                println!();
-                println!("Options:");
-                println!("  --config, -c <FILE>   Load configuration from TOML file");
-                println!("  --address, -a <ADDR>  ZMQ address to connect to (default: tcp://localhost:5557)");
-                println!("  --port, -p <PORT>     HTTP server port (default: 8080)");
-                println!("  --help, -h            Show this help message");
-                println!();
-                println!("Examples:");
-                println!("  monitor --config config.toml");
-                println!("  monitor --address tcp://localhost:5557 --port 8080");
-                println!();
-                println!("Web UI: http://localhost:<port>/");
-                return Ok(());
-            }
-            _ => {
-                eprintln!("Unknown argument: {}", args[i]);
-                std::process::exit(1);
-            }
-        }
-    }
+    // Load configuration
+    let config = Config::load(&args.monitor.common.config_file)?;
+    info!(config_file = %args.monitor.common.config_file, "Loaded configuration");
 
-    // Build configuration
-    let monitor_config = if let Some(path) = config_path {
-        // Load from config file
-        let config = Config::load(&path)?;
-
-        let (subscribe_addr, http_port) = if let Some(ref monitor) = config.network.monitor {
-            (monitor.subscribe.clone(), monitor.http_port)
-        } else {
-            ("tcp://localhost:5557".to_string(), 8081)
-        };
-
-        info!(config_file = %path, "Loaded configuration");
-
-        MonitorConfig {
-            subscribe_address: address.unwrap_or(subscribe_addr),
-            command_address: "tcp://*:5590".to_string(),
-            http_port: port.unwrap_or(http_port),
-            histogram_config: HistogramConfig::default(),
-            channel_capacity: 1000,
-        }
+    let (subscribe_addr, http_port) = if let Some(ref monitor) = config.network.monitor {
+        (monitor.subscribe.clone(), monitor.http_port)
     } else {
-        // Use defaults with CLI overrides
-        MonitorConfig {
-            subscribe_address: address.unwrap_or_else(|| "tcp://localhost:5557".to_string()),
-            command_address: "tcp://*:5590".to_string(),
-            http_port: port.unwrap_or(8081),
-            histogram_config: HistogramConfig::default(),
-            channel_capacity: 1000,
-        }
+        ("tcp://localhost:5557".to_string(), 8081)
+    };
+
+    // CLI overrides config file
+    let monitor_config = MonitorConfig {
+        subscribe_address: args.monitor.address.unwrap_or(subscribe_addr),
+        command_address: "tcp://*:5590".to_string(),
+        http_port: args.monitor.port.unwrap_or(http_port),
+        histogram_config: HistogramConfig::default(),
+        channel_capacity: 1000,
     };
 
     // Create shutdown channel

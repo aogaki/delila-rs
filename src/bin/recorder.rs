@@ -1,17 +1,26 @@
 //! Recorder binary - writes event data to files
 //!
 //! Usage:
-//!   cargo run --bin recorder                            # Use defaults
-//!   cargo run --bin recorder -- --config config.toml    # Use config file
-//!   cargo run --bin recorder -- --address tcp://localhost:5557 --output ./data
+//!   cargo run --bin recorder                       # Use config.toml
+//!   cargo run --bin recorder -- -f config.toml     # Explicit config file
+//!   cargo run --bin recorder -- -a tcp://localhost:5557 -o ./data
 
 use std::path::PathBuf;
 
+use clap::Parser;
+use delila_rs::common::RecorderArgs;
 use delila_rs::config::Config;
 use delila_rs::recorder::{Recorder, RecorderConfig};
 use tokio::sync::broadcast;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
+
+#[derive(Parser, Debug)]
+#[command(name = "recorder", about = "DELILA recorder - writes event data to files")]
+struct Args {
+    #[command(flatten)]
+    recorder: RecorderArgs,
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -20,115 +29,41 @@ async fn main() -> anyhow::Result<()> {
         .with_env_filter(EnvFilter::from_default_env().add_directive("delila_rs=info".parse()?))
         .init();
 
-    // Parse command line arguments
-    let args: Vec<String> = std::env::args().collect();
-    let mut config_path: Option<String> = None;
-    let mut address: Option<String> = None;
-    let mut output_dir: Option<String> = None;
+    let args = Args::parse();
 
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--config" | "-c" => {
-                if i + 1 < args.len() {
-                    config_path = Some(args[i + 1].clone());
-                    i += 2;
-                } else {
-                    eprintln!("Error: --config requires a file path");
-                    std::process::exit(1);
-                }
-            }
-            "--address" | "-a" => {
-                if i + 1 < args.len() {
-                    address = Some(args[i + 1].clone());
-                    i += 2;
-                } else {
-                    eprintln!("Error: --address requires an address");
-                    std::process::exit(1);
-                }
-            }
-            "--output" | "-o" => {
-                if i + 1 < args.len() {
-                    output_dir = Some(args[i + 1].clone());
-                    i += 2;
-                } else {
-                    eprintln!("Error: --output requires a directory path");
-                    std::process::exit(1);
-                }
-            }
-            "--help" | "-h" => {
-                println!("Recorder - writes event data to DELILA files");
-                println!();
-                println!("Usage: recorder [OPTIONS]");
-                println!();
-                println!("Options:");
-                println!("  --config, -c <FILE>   Load configuration from TOML file");
-                println!("  --address, -a <ADDR>  ZMQ address to connect to (default: tcp://localhost:5557)");
-                println!("  --output, -o <DIR>    Output directory (default: ./data)");
-                println!("  --help, -h            Show this help message");
-                println!();
-                println!("File naming: run{{XXXX}}_{{YYYY}}_{{ExpName}}.delila");
-                println!("  XXXX: Run number (4 digits)");
-                println!("  YYYY: File sequence (4 digits)");
-                println!("  ExpName: From Configure command");
-                println!();
-                println!("Examples:");
-                println!("  recorder --config config.toml");
-                println!("  recorder --address tcp://localhost:5557 --output ./data");
-                return Ok(());
-            }
-            _ => {
-                eprintln!("Unknown argument: {}", args[i]);
-                std::process::exit(1);
-            }
-        }
-    }
+    // Load configuration
+    let config = Config::load(&args.recorder.common.config_file)?;
+    info!(config_file = %args.recorder.common.config_file, "Loaded configuration");
 
-    // Build configuration
-    let recorder_config = if let Some(path) = config_path {
-        // Load from config file
-        let config = Config::load(&path)?;
+    let (subscribe_addr, command_addr, out_dir, max_size_mb, max_duration_sec) =
+        if let Some(ref recorder) = config.network.recorder {
+            (
+                recorder.subscribe.clone(),
+                recorder
+                    .command
+                    .clone()
+                    .unwrap_or_else(|| "tcp://*:5580".to_string()),
+                recorder.output_dir.clone(),
+                recorder.max_file_size_mb,
+                recorder.max_file_duration_sec,
+            )
+        } else {
+            (
+                "tcp://localhost:5557".to_string(),
+                "tcp://*:5580".to_string(),
+                "./data".to_string(),
+                1024,
+                600,
+            )
+        };
 
-        let (subscribe_addr, command_addr, out_dir, max_size_mb, max_duration_sec) =
-            if let Some(ref recorder) = config.network.recorder {
-                (
-                    recorder.subscribe.clone(),
-                    recorder
-                        .command
-                        .clone()
-                        .unwrap_or_else(|| "tcp://*:5580".to_string()),
-                    recorder.output_dir.clone(),
-                    recorder.max_file_size_mb,
-                    recorder.max_file_duration_sec,
-                )
-            } else {
-                (
-                    "tcp://localhost:5557".to_string(),
-                    "tcp://*:5580".to_string(),
-                    "./data".to_string(),
-                    1024,
-                    600,
-                )
-            };
-
-        info!(config_file = %path, "Loaded configuration");
-
-        RecorderConfig {
-            subscribe_address: address.unwrap_or(subscribe_addr),
-            command_address: command_addr,
-            output_dir: PathBuf::from(output_dir.unwrap_or(out_dir)),
-            max_file_size: max_size_mb * 1024 * 1024,
-            max_file_duration_secs: max_duration_sec,
-        }
-    } else {
-        // Use defaults with CLI overrides
-        RecorderConfig {
-            subscribe_address: address.unwrap_or_else(|| "tcp://localhost:5557".to_string()),
-            command_address: "tcp://*:5580".to_string(),
-            output_dir: PathBuf::from(output_dir.unwrap_or_else(|| "./data".to_string())),
-            max_file_size: 1024 * 1024 * 1024, // 1GB
-            max_file_duration_secs: 600,       // 10 minutes
-        }
+    // CLI overrides config file
+    let recorder_config = RecorderConfig {
+        subscribe_address: args.recorder.address.unwrap_or(subscribe_addr),
+        command_address: command_addr,
+        output_dir: PathBuf::from(args.recorder.output_dir.unwrap_or(out_dir)),
+        max_file_size: max_size_mb * 1024 * 1024,
+        max_file_duration_secs: max_duration_sec,
     };
 
     // Create shutdown channel

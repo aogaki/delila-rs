@@ -11,12 +11,31 @@ Claudeセッション開始時に必ず読み込まれます。
 
 | Priority | File | Status | Summary |
 |----------|------|--------|---------|
-| 1 | [11_operator_web_ui.md](11_operator_web_ui.md) | **In Progress** | Operator Web UI (Angular + Material) |
-| 2 | [09_timestamp_sorting_design.md](09_timestamp_sorting_design.md) | **Phase 3完了** | タイムスタンプソートとファイル書き出し |
+| 1 | [12_refactoring_plan.md](12_refactoring_plan.md) | **Ready** | コードベースリファクタリング (CLI, Metrics, Error, Config, Shutdown) |
+| 2 | [11_operator_web_ui.md](11_operator_web_ui.md) | **In Progress** | Operator Web UI (Angular + Material) |
+| 3 | [09_timestamp_sorting_design.md](09_timestamp_sorting_design.md) | **Phase 3完了** | タイムスタンプソートとファイル書き出し |
 
 ---
 
-## Current Status: Phase 4 - Web UI (2026-01-19)
+## Current Status: Refactoring Sprint (2026-01-19)
+
+### Refactoring Plan (5 Phases)
+
+**基本原則:** KISS + TDD（テスト駆動開発）
+
+| Phase | 内容 | 推定削減 | 状態 |
+|-------|-----|---------|------|
+| 1 | CLIパーサー統合 (clap) | 500行+ | Ready |
+| 2 | 統一メトリクスフレームワーク | 200行+ | Pending |
+| 3 | エラー型統合 | 100行+ | Pending |
+| 4 | 設定構造体の共通化 | 150行+ | Pending |
+| 5 | シャットダウン機構の統一 | ロバスト性向上 | Pending |
+
+**詳細:** [12_refactoring_plan.md](12_refactoring_plan.md)
+
+---
+
+## Web UI Status (2026-01-19)
 
 ### Recently Completed
 - **Phase 6: Waveformタブ** ✅ (2026-01-19)

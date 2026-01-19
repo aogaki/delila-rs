@@ -8,164 +8,107 @@
 //!   cargo run --bin controller -- reset tcp://localhost:5560
 //!   cargo run --bin controller -- status tcp://localhost:5560
 
+use clap::{Parser, Subcommand};
 use delila_rs::common::{Command, CommandResponse, RunConfig};
 use tmq::{request_reply, Context};
 
-fn print_usage() {
-    println!("Controller - send commands to DAQ components (5-state machine)");
-    println!();
-    println!("Usage: controller <command> <address> [options]");
-    println!();
-    println!("Commands:");
-    println!("  configure  Configure component for run (Idle → Configured)");
-    println!("  arm        Prepare for acquisition (Configured → Armed)");
-    println!("  start      Begin data acquisition (Armed → Running)");
-    println!("  stop       Stop acquisition (Running → Configured)");
-    println!("  reset      Reset to idle state (Any → Idle)");
-    println!("  status     Query current status");
-    println!();
-    println!("Options for 'configure':");
-    println!("  --run <number>     Run number (required)");
-    println!("  --comment <text>   Optional comment");
-    println!();
-    println!("Options for 'start':");
-    println!("  --run <number>     Run number (required)");
-    println!();
-    println!("Examples:");
-    println!("  controller configure tcp://localhost:5560 --run 123");
-    println!("  controller configure tcp://localhost:5560 --run 123 --comment \"Test run\"");
-    println!("  controller arm tcp://localhost:5560");
-    println!("  controller start tcp://localhost:5560 --run 123");
-    println!("  controller stop tcp://localhost:5560");
-    println!("  controller reset tcp://localhost:5560");
-    println!("  controller status tcp://localhost:5570");
-    println!();
-    println!("State Machine:");
-    println!("  Idle → Configure → Configured → Arm → Armed → Start → Running");
-    println!("  Running → Stop → Configured (quick restart possible)");
-    println!("  Any → Reset → Idle");
+#[derive(Parser, Debug)]
+#[command(name = "controller", about = "DELILA controller - send commands to DAQ components")]
+#[command(after_help = "State Machine:\n  Idle → Configure → Configured → Arm → Armed → Start → Running\n  Running → Stop → Configured (quick restart possible)\n  Any → Reset → Idle")]
+struct Args {
+    #[command(subcommand)]
+    command: ControllerCommand,
 }
 
-fn parse_args() -> Option<(Command, String)> {
-    let args: Vec<String> = std::env::args().collect();
+#[derive(Subcommand, Debug)]
+enum ControllerCommand {
+    /// Configure component for run (Idle → Configured)
+    Configure {
+        /// Target component's command address (e.g., tcp://localhost:5560)
+        address: String,
+        /// Run number (required)
+        #[arg(long = "run")]
+        run_number: u32,
+        /// Optional comment
+        #[arg(long)]
+        comment: Option<String>,
+    },
+    /// Prepare for acquisition (Configured → Armed)
+    Arm {
+        /// Target component's command address
+        address: String,
+    },
+    /// Begin data acquisition (Armed → Running)
+    Start {
+        /// Target component's command address
+        address: String,
+        /// Run number (required)
+        #[arg(long = "run")]
+        run_number: u32,
+    },
+    /// Stop acquisition (Running → Configured)
+    Stop {
+        /// Target component's command address
+        address: String,
+    },
+    /// Reset to idle state (Any → Idle)
+    Reset {
+        /// Target component's command address
+        address: String,
+    },
+    /// Query current status
+    Status {
+        /// Target component's command address
+        address: String,
+    },
+}
 
-    if args.len() < 3 {
-        return None;
-    }
-
-    let command_str = &args[1];
-    let address = args[2].clone();
-
-    let command = match command_str.as_str() {
-        "configure" => {
-            // Parse --run <number> and optional --comment <text>
-            let mut run_number: Option<u32> = None;
-            let mut comment = String::new();
-            let mut i = 3;
-
-            while i < args.len() {
-                match args[i].as_str() {
-                    "--run" => {
-                        if i + 1 < args.len() {
-                            run_number = args[i + 1].parse().ok();
-                            i += 2;
-                        } else {
-                            eprintln!("Error: --run requires a number");
-                            std::process::exit(1);
-                        }
-                    }
-                    "--comment" => {
-                        if i + 1 < args.len() {
-                            comment = args[i + 1].clone();
-                            i += 2;
-                        } else {
-                            eprintln!("Error: --comment requires text");
-                            std::process::exit(1);
-                        }
-                    }
-                    _ => {
-                        eprintln!("Unknown option: {}", args[i]);
-                        std::process::exit(1);
-                    }
-                }
-            }
-
-            let run_number = match run_number {
-                Some(n) => n,
-                None => {
-                    eprintln!("Error: configure requires --run <number>");
-                    std::process::exit(1);
-                }
-            };
-
-            Command::Configure(RunConfig {
+impl ControllerCommand {
+    fn to_command(&self) -> Command {
+        match self {
+            ControllerCommand::Configure {
                 run_number,
                 comment,
+                ..
+            } => Command::Configure(RunConfig {
+                run_number: *run_number,
+                comment: comment.clone().unwrap_or_default(),
                 exp_name: String::new(),
-            })
+            }),
+            ControllerCommand::Arm { .. } => Command::Arm,
+            ControllerCommand::Start { run_number, .. } => Command::Start {
+                run_number: *run_number,
+            },
+            ControllerCommand::Stop { .. } => Command::Stop,
+            ControllerCommand::Reset { .. } => Command::Reset,
+            ControllerCommand::Status { .. } => Command::GetStatus,
         }
-        "arm" => Command::Arm,
-        "start" => {
-            // Parse --run <number> (required)
-            let mut run_number: Option<u32> = None;
-            let mut i = 3;
+    }
 
-            while i < args.len() {
-                match args[i].as_str() {
-                    "--run" => {
-                        if i + 1 < args.len() {
-                            run_number = args[i + 1].parse().ok();
-                            i += 2;
-                        } else {
-                            eprintln!("Error: --run requires a number");
-                            std::process::exit(1);
-                        }
-                    }
-                    _ => {
-                        eprintln!("Unknown option: {}", args[i]);
-                        std::process::exit(1);
-                    }
-                }
-            }
-
-            let run_number = match run_number {
-                Some(n) => n,
-                None => {
-                    eprintln!("Error: start requires --run <number>");
-                    std::process::exit(1);
-                }
-            };
-
-            Command::Start { run_number }
+    fn address(&self) -> &str {
+        match self {
+            ControllerCommand::Configure { address, .. }
+            | ControllerCommand::Arm { address }
+            | ControllerCommand::Start { address, .. }
+            | ControllerCommand::Stop { address }
+            | ControllerCommand::Reset { address }
+            | ControllerCommand::Status { address } => address,
         }
-        "stop" => Command::Stop,
-        "reset" => Command::Reset,
-        "status" => Command::GetStatus,
-        _ => {
-            eprintln!("Unknown command: {}", command_str);
-            eprintln!("Use: configure, arm, start, stop, reset, or status");
-            std::process::exit(1);
-        }
-    };
-
-    Some((command, address))
+    }
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let (command, address) = match parse_args() {
-        Some(result) => result,
-        None => {
-            print_usage();
-            return Ok(());
-        }
-    };
+    let args = Args::parse();
+
+    let command = args.command.to_command();
+    let address = args.command.address();
 
     println!("Sending {} to {}", command, address);
 
     // Create REQ socket and connect
     let context = Context::new();
-    let requester = request_reply::request(&context).connect(&address)?;
+    let requester = request_reply::request(&context).connect(address)?;
 
     // Send command
     let cmd_bytes = command.to_json()?;
