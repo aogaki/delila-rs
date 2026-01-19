@@ -260,8 +260,7 @@ mod tests {
 
     #[test]
     fn test_merger_args_single_sub() {
-        let args =
-            MergerArgs::try_parse_from(["test", "-s", "tcp://localhost:5555"]).unwrap();
+        let args = MergerArgs::try_parse_from(["test", "-s", "tcp://localhost:5555"]).unwrap();
         assert_eq!(args.sub_addresses, vec!["tcp://localhost:5555"]);
     }
 
@@ -368,14 +367,9 @@ mod tests {
 
     #[test]
     fn test_data_sink_args_full() {
-        let args = DataSinkArgs::try_parse_from([
-            "test",
-            "-f",
-            "sink.toml",
-            "-a",
-            "tcp://localhost:5555",
-        ])
-        .unwrap();
+        let args =
+            DataSinkArgs::try_parse_from(["test", "-f", "sink.toml", "-a", "tcp://localhost:5555"])
+                .unwrap();
         assert_eq!(args.common.config_file, "sink.toml");
         assert_eq!(args.address, Some("tcp://localhost:5555".to_string()));
     }

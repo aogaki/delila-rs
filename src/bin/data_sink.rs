@@ -13,7 +13,10 @@ use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser, Debug)]
-#[command(name = "data_sink", about = "DELILA data sink - subscribes to event data via ZeroMQ")]
+#[command(
+    name = "data_sink",
+    about = "DELILA data sink - subscribes to event data via ZeroMQ"
+)]
 struct Args {
     #[command(flatten)]
     sink: DataSinkArgs,

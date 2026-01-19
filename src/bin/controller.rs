@@ -13,8 +13,13 @@ use delila_rs::common::{Command, CommandResponse, RunConfig};
 use tmq::{request_reply, Context};
 
 #[derive(Parser, Debug)]
-#[command(name = "controller", about = "DELILA controller - send commands to DAQ components")]
-#[command(after_help = "State Machine:\n  Idle → Configure → Configured → Arm → Armed → Start → Running\n  Running → Stop → Configured (quick restart possible)\n  Any → Reset → Idle")]
+#[command(
+    name = "controller",
+    about = "DELILA controller - send commands to DAQ components"
+)]
+#[command(
+    after_help = "State Machine:\n  Idle → Configure → Configured → Arm → Armed → Start → Running\n  Running → Stop → Configured (quick restart possible)\n  Any → Reset → Idle"
+)]
 struct Args {
     #[command(subcommand)]
     command: ControllerCommand,

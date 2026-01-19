@@ -13,7 +13,10 @@ use delila_rs::merger::{Merger, MergerConfig};
 use tracing::info;
 
 #[derive(Parser, Debug)]
-#[command(name = "merger", about = "DELILA merger - receives from multiple sources and forwards downstream")]
+#[command(
+    name = "merger",
+    about = "DELILA merger - receives from multiple sources and forwards downstream"
+)]
 struct Args {
     #[command(flatten)]
     merger: MergerArgs,

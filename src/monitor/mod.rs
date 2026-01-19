@@ -21,12 +21,12 @@ use axum::{
     routing::get,
     Router,
 };
-use tower_http::cors::{Any, CorsLayer};
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tmq::{subscribe, Context};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
+use tower_http::cors::{Any, CorsLayer};
 use tracing::{debug, info, warn};
 
 use crate::common::{

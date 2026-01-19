@@ -15,7 +15,10 @@ use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser, Debug)]
-#[command(name = "recorder", about = "DELILA recorder - writes event data to files")]
+#[command(
+    name = "recorder",
+    about = "DELILA recorder - writes event data to files"
+)]
 struct Args {
     #[command(flatten)]
     recorder: RecorderArgs,

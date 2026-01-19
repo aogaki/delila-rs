@@ -13,7 +13,10 @@ use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser, Debug)]
-#[command(name = "monitor", about = "DELILA monitor - real-time histogram display via web browser")]
+#[command(
+    name = "monitor",
+    about = "DELILA monitor - real-time histogram display via web browser"
+)]
 struct Args {
     #[command(flatten)]
     monitor: MonitorArgs,

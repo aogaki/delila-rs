@@ -34,9 +34,7 @@ pub fn setup_shutdown() -> (ShutdownSender, ShutdownReceiver) {
 
     let tx_clone = tx.clone();
     tokio::spawn(async move {
-        signal::ctrl_c()
-            .await
-            .expect("Failed to listen for Ctrl+C");
+        signal::ctrl_c().await.expect("Failed to listen for Ctrl+C");
         info!("Ctrl+C received, initiating shutdown");
         let _ = tx_clone.send(());
     });
@@ -52,9 +50,7 @@ pub fn setup_shutdown_with_message(message: &'static str) -> (ShutdownSender, Sh
 
     let tx_clone = tx.clone();
     tokio::spawn(async move {
-        signal::ctrl_c()
-            .await
-            .expect("Failed to listen for Ctrl+C");
+        signal::ctrl_c().await.expect("Failed to listen for Ctrl+C");
         println!("\n{}", message);
         let _ = tx_clone.send(());
     });

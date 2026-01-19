@@ -27,7 +27,10 @@ use tracing::{info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
 #[derive(Parser, Debug)]
-#[command(name = "operator", about = "DELILA operator - REST API server for DAQ system control")]
+#[command(
+    name = "operator",
+    about = "DELILA operator - REST API server for DAQ system control"
+)]
 struct Args {
     #[command(flatten)]
     operator: OperatorArgs,
