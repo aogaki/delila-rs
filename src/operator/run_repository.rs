@@ -395,7 +395,11 @@ impl RunRepository {
             .projection(doc! { "run_number": 1 })
             .build();
 
-        let doc = self.collection.find_one(doc! {}).with_options(options).await?;
+        let doc = self
+            .collection
+            .find_one(doc! {})
+            .with_options(options)
+            .await?;
 
         Ok(doc.map(|d| d.run_number + 1).unwrap_or(1))
     }
@@ -449,9 +453,7 @@ impl RunRepository {
             .build();
 
         // Use raw BSON document to avoid type issues
-        let raw_collection = self
-            .collection
-            .clone_with_type::<mongodb::bson::Document>();
+        let raw_collection = self.collection.clone_with_type::<mongodb::bson::Document>();
 
         let doc = raw_collection
             .find_one(doc! { "exp_name": exp_name })

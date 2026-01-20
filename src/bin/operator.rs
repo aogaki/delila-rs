@@ -194,7 +194,10 @@ async fn main() -> anyhow::Result<()> {
                 Some(repo)
             }
             Err(e) => {
-                warn!("Failed to connect to MongoDB: {}. Run history will not be available.", e);
+                warn!(
+                    "Failed to connect to MongoDB: {}. Run history will not be available.",
+                    e
+                );
                 None
             }
         }

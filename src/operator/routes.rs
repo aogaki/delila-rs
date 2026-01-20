@@ -395,10 +395,8 @@ async fn start(
         .await;
 
     let response = match start_result {
-        Ok(results) => {
-            ApiResponse::success(format!("Start command sent for run {}", run_number))
-                .with_results(results)
-        }
+        Ok(results) => ApiResponse::success(format!("Start command sent for run {}", run_number))
+            .with_results(results),
         Err(e) => {
             return (
                 StatusCode::REQUEST_TIMEOUT,
@@ -886,7 +884,10 @@ async fn get_run_history(
     let runs = repo.get_recent_runs(limit).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiResponse::error(format!("Failed to get run history: {}", e))),
+            Json(ApiResponse::error(format!(
+                "Failed to get run history: {}",
+                e
+            ))),
         )
     })?;
 

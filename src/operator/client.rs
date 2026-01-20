@@ -196,7 +196,11 @@ impl ComponentClient {
 
         for (order, group_configs) in groups {
             let names: Vec<_> = group_configs.iter().map(|c| c.name.as_str()).collect();
-            tracing::info!("Configuring group order={}: {:?} in parallel...", order, names);
+            tracing::info!(
+                "Configuring group order={}: {:?} in parallel...",
+                order,
+                names
+            );
 
             // Configure all components in this group in parallel
             let futures: Vec<_> = group_configs
@@ -263,12 +267,19 @@ impl ComponentClient {
         // Log the start order for debugging
         tracing::info!(
             "Start order (downstream first): {:?}",
-            sorted.iter().map(|c| (&c.name, c.pipeline_order)).collect::<Vec<_>>()
+            sorted
+                .iter()
+                .map(|c| (&c.name, c.pipeline_order))
+                .collect::<Vec<_>>()
         );
 
         let mut results = Vec::with_capacity(configs.len());
         for config in sorted {
-            tracing::info!("Starting {} (pipeline_order={})", config.name, config.pipeline_order);
+            tracing::info!(
+                "Starting {} (pipeline_order={})",
+                config.name,
+                config.pipeline_order
+            );
             results.push(self.start(config, run_number).await);
         }
         results
@@ -307,11 +318,7 @@ impl ComponentClient {
 
         for (order, group_configs) in groups {
             let names: Vec<_> = group_configs.iter().map(|c| c.name.as_str()).collect();
-            tracing::info!(
-                "Starting group order={}: {:?} in parallel...",
-                order,
-                names
-            );
+            tracing::info!("Starting group order={}: {:?} in parallel...", order, names);
 
             // Start all components in this group in parallel
             let futures: Vec<_> = group_configs
@@ -333,9 +340,13 @@ impl ComponentClient {
             }
 
             // Wait for all components in this group to reach Running
-            self.wait_for_state(&group_configs, ComponentState::Running, per_component_timeout_ms)
-                .await
-                .map_err(|e| format!("Group order={} failed to reach Running: {}", order, e))?;
+            self.wait_for_state(
+                &group_configs,
+                ComponentState::Running,
+                per_component_timeout_ms,
+            )
+            .await
+            .map_err(|e| format!("Group order={} failed to reach Running: {}", order, e))?;
 
             tracing::info!("Group order={} ({:?}) all Running", order, names);
         }
@@ -344,7 +355,9 @@ impl ComponentClient {
     }
 
     /// Group components by pipeline_order in descending order (for Start: downstream first)
-    fn group_by_pipeline_order_desc(configs: &[ComponentConfig]) -> Vec<(u32, Vec<ComponentConfig>)> {
+    fn group_by_pipeline_order_desc(
+        configs: &[ComponentConfig],
+    ) -> Vec<(u32, Vec<ComponentConfig>)> {
         let mut groups: BTreeMap<u32, Vec<ComponentConfig>> = BTreeMap::new();
         for config in configs {
             groups
@@ -359,7 +372,9 @@ impl ComponentClient {
     }
 
     /// Group components by pipeline_order in ascending order (for Stop: upstream first)
-    fn group_by_pipeline_order_asc(configs: &[ComponentConfig]) -> Vec<(u32, Vec<ComponentConfig>)> {
+    fn group_by_pipeline_order_asc(
+        configs: &[ComponentConfig],
+    ) -> Vec<(u32, Vec<ComponentConfig>)> {
         let mut groups: BTreeMap<u32, Vec<ComponentConfig>> = BTreeMap::new();
         for config in configs {
             groups
@@ -528,7 +543,8 @@ impl ComponentClient {
     ) -> Result<Vec<CommandResult>, String> {
         // Use sequential start to prevent buffer overflow
         // Each component must reach Running before the next starts
-        self.start_all_sequential(configs, run_number, timeout_ms).await
+        self.start_all_sequential(configs, run_number, timeout_ms)
+            .await
     }
 }
 
