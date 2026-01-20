@@ -13,13 +13,13 @@ pub use caen::{CaenError, CaenHandle, EndpointHandle};
 pub use decoder::{DataType, DecodeResult, EventData, Psd2Config, Psd2Decoder, Waveform};
 
 use crate::common::{
-    handle_command_simple, run_command_task, ComponentSharedState, ComponentState,
+    handle_command, run_command_task, CommandHandlerExt, ComponentSharedState, ComponentState,
     EventData as CommonEventData, EventDataBatch, Message,
 };
 use futures::SinkExt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use thiserror::Error;
 use tmq::publish;
 use tmq::Context;
@@ -138,6 +138,96 @@ pub struct ReaderMetrics {
     pub queue_length: AtomicU64,
 }
 
+/// Rate tracker for 1-second interval rate calculation
+#[derive(Debug)]
+struct RateTracker {
+    prev_events: AtomicU64,
+    prev_time: std::sync::Mutex<Option<Instant>>,
+    current_rate: AtomicU64,
+}
+
+impl RateTracker {
+    fn new() -> Self {
+        Self {
+            prev_events: AtomicU64::new(0),
+            prev_time: std::sync::Mutex::new(None),
+            current_rate: AtomicU64::new(0),
+        }
+    }
+
+    fn update(&self, current_events: u64) {
+        let now = Instant::now();
+        let mut prev_time_guard = self.prev_time.lock().unwrap();
+
+        if let Some(prev_time) = *prev_time_guard {
+            let elapsed = now.duration_since(prev_time).as_secs_f64();
+            if elapsed >= 1.0 {
+                let prev_events = self.prev_events.load(Ordering::Relaxed);
+                let delta = current_events.saturating_sub(prev_events);
+                let rate = (delta as f64 / elapsed) as u64;
+                self.current_rate.store(rate, Ordering::Relaxed);
+                self.prev_events.store(current_events, Ordering::Relaxed);
+                *prev_time_guard = Some(now);
+            }
+        } else {
+            self.prev_events.store(current_events, Ordering::Relaxed);
+            *prev_time_guard = Some(now);
+        }
+    }
+
+    fn get_rate(&self) -> f64 {
+        self.current_rate.load(Ordering::Relaxed) as f64
+    }
+
+    fn reset(&self) {
+        self.prev_events.store(0, Ordering::Relaxed);
+        self.current_rate.store(0, Ordering::Relaxed);
+        *self.prev_time.lock().unwrap() = None;
+    }
+}
+
+/// Command handler extension for Reader
+struct ReaderCommandExt {
+    metrics: Arc<ReaderMetrics>,
+    rate_tracker: Arc<RateTracker>,
+}
+
+impl CommandHandlerExt for ReaderCommandExt {
+    fn component_name(&self) -> &'static str {
+        "Reader"
+    }
+
+    fn status_details(&self) -> Option<String> {
+        let events = self.metrics.events_decoded.load(Ordering::Relaxed);
+        let batches = self.metrics.batches_published.load(Ordering::Relaxed);
+        let bytes = self.metrics.bytes_read.load(Ordering::Relaxed);
+        Some(format!(
+            "Events: {}, Batches: {}, Bytes: {}",
+            events, batches, bytes
+        ))
+    }
+
+    fn get_metrics(&self) -> Option<crate::common::ComponentMetrics> {
+        let events = self.metrics.events_decoded.load(Ordering::Relaxed);
+        let bytes = self.metrics.bytes_read.load(Ordering::Relaxed);
+        let queue = self.metrics.queue_length.load(Ordering::Relaxed);
+        self.rate_tracker.update(events);
+        Some(crate::common::ComponentMetrics {
+            events_processed: events,
+            bytes_transferred: bytes,
+            queue_size: queue as u32,
+            queue_max: 0,
+            event_rate: self.rate_tracker.get_rate(),
+            data_rate: 0.0,
+        })
+    }
+
+    fn on_start(&mut self, _run_number: u32) -> Result<(), String> {
+        self.rate_tracker.reset();
+        Ok(())
+    }
+}
+
 /// Reader for CAEN digitizer data acquisition
 ///
 /// Uses two-task architecture:
@@ -150,6 +240,7 @@ pub struct Reader {
     state_rx: watch::Receiver<ComponentState>,
     state_tx: watch::Sender<ComponentState>,
     metrics: Arc<ReaderMetrics>,
+    rate_tracker: Arc<RateTracker>,
 }
 
 impl Reader {
@@ -174,6 +265,7 @@ impl Reader {
             state_rx,
             state_tx,
             metrics: Arc::new(ReaderMetrics::default()),
+            rate_tracker: Arc::new(RateTracker::new()),
         })
     }
 
@@ -539,6 +631,8 @@ impl Reader {
         let shared_state = self.shared_state.clone();
         let state_tx = self.state_tx.clone();
         let shutdown_for_cmd = shutdown.resubscribe();
+        let metrics_for_cmd = self.metrics.clone();
+        let rate_tracker_for_cmd = self.rate_tracker.clone();
 
         let cmd_handle = tokio::spawn(async move {
             run_command_task(
@@ -546,7 +640,13 @@ impl Reader {
                 shared_state,
                 state_tx,
                 shutdown_for_cmd,
-                |state, tx, cmd| handle_command_simple(state, tx, cmd, "Reader"),
+                move |state, tx, cmd| {
+                    let mut ext = ReaderCommandExt {
+                        metrics: metrics_for_cmd.clone(),
+                        rate_tracker: rate_tracker_for_cmd.clone(),
+                    };
+                    handle_command(state, tx, cmd, Some(&mut ext))
+                },
                 "Reader",
             )
             .await;

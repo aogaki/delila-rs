@@ -24,7 +24,20 @@ import { ComponentState } from '../../models/types';
                 {{ getStateIcon(component.state, component.online) }}
               </mat-icon>
               <span matListItemTitle>{{ component.name }}</span>
-              <span matListItemLine>{{ component.state }}</span>
+              <span matListItemLine>
+                {{ component.state }}
+                @if (component.metrics && component.metrics.events_processed > 0) {
+                  <span class="metrics-inline">
+                    · {{ formatEvents(component.metrics.events_processed) }}
+                    @if (component.metrics.event_rate > 0) {
+                      · {{ formatRate(component.metrics.event_rate) }}
+                    }
+                    @if (component.metrics.bytes_transferred > 0) {
+                      · {{ formatBytes(component.metrics.bytes_transferred) }}
+                    }
+                  </span>
+                }
+              </span>
             </mat-list-item>
           }
           @empty {
@@ -42,6 +55,10 @@ import { ComponentState } from '../../models/types';
     }
     mat-list-item {
       cursor: default;
+    }
+    .metrics-inline {
+      color: #666;
+      font-size: 0.85em;
     }
   `,
 })
@@ -83,5 +100,36 @@ export class StatusPanelComponent {
       default:
         return 'pending';
     }
+  }
+
+  formatEvents(count: number): string {
+    if (count >= 1_000_000_000) {
+      return `${(count / 1_000_000_000).toFixed(2)}G`;
+    } else if (count >= 1_000_000) {
+      return `${(count / 1_000_000).toFixed(2)}M`;
+    } else if (count >= 1_000) {
+      return `${(count / 1_000).toFixed(1)}k`;
+    }
+    return count.toString();
+  }
+
+  formatBytes(bytes: number): string {
+    if (bytes >= 1_073_741_824) {
+      return `${(bytes / 1_073_741_824).toFixed(2)} GB`;
+    } else if (bytes >= 1_048_576) {
+      return `${(bytes / 1_048_576).toFixed(1)} MB`;
+    } else if (bytes >= 1_024) {
+      return `${(bytes / 1_024).toFixed(0)} KB`;
+    }
+    return `${bytes} B`;
+  }
+
+  formatRate(rate: number): string {
+    if (rate >= 1_000_000) {
+      return `${(rate / 1_000_000).toFixed(2)}M eve/s`;
+    } else if (rate >= 1_000) {
+      return `${(rate / 1_000).toFixed(1)}k eve/s`;
+    }
+    return `${rate.toFixed(0)} eve/s`;
   }
 }

@@ -8,7 +8,7 @@
 //! - Command task: handles REQ/REP commands, updates shared state via watch channel
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures::SinkExt;
 use rand::Rng;
@@ -19,9 +19,11 @@ use tokio::sync::{watch, Mutex};
 use tokio::time::interval;
 use tracing::{debug, info};
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use crate::common::{
-    flags, handle_command_simple, run_command_task, ComponentSharedState, ComponentState,
-    EventData, EventDataBatch, Message, Waveform,
+    flags, handle_command, run_command_task, CommandHandlerExt, ComponentSharedState,
+    ComponentState, EventData, EventDataBatch, Message, Waveform,
 };
 
 /// Waveform probe bit masks
@@ -105,6 +107,121 @@ pub enum EmulatorError {
     Json(#[from] serde_json::Error),
 }
 
+/// Lock-free statistics for emulator
+#[derive(Debug, Default)]
+struct AtomicStats {
+    events_generated: AtomicU64,
+    batches_published: AtomicU64,
+    bytes_sent: AtomicU64,
+}
+
+impl AtomicStats {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn reset(&self) {
+        self.events_generated.store(0, Ordering::Relaxed);
+        self.batches_published.store(0, Ordering::Relaxed);
+        self.bytes_sent.store(0, Ordering::Relaxed);
+    }
+
+    fn snapshot(&self) -> (u64, u64, u64) {
+        (
+            self.events_generated.load(Ordering::Relaxed),
+            self.batches_published.load(Ordering::Relaxed),
+            self.bytes_sent.load(Ordering::Relaxed),
+        )
+    }
+}
+
+/// Rate tracker for 1-second interval rate calculation
+#[derive(Debug)]
+struct RateTracker {
+    prev_events: AtomicU64,
+    prev_time: std::sync::Mutex<Option<Instant>>,
+    current_rate: AtomicU64,
+}
+
+impl RateTracker {
+    fn new() -> Self {
+        Self {
+            prev_events: AtomicU64::new(0),
+            prev_time: std::sync::Mutex::new(None),
+            current_rate: AtomicU64::new(0),
+        }
+    }
+
+    fn update(&self, current_events: u64) {
+        let now = Instant::now();
+        let mut prev_time_guard = self.prev_time.lock().unwrap();
+
+        if let Some(prev_time) = *prev_time_guard {
+            let elapsed = now.duration_since(prev_time).as_secs_f64();
+            if elapsed >= 1.0 {
+                let prev_events = self.prev_events.load(Ordering::Relaxed);
+                let delta = current_events.saturating_sub(prev_events);
+                let rate = (delta as f64 / elapsed) as u64;
+                self.current_rate.store(rate, Ordering::Relaxed);
+                self.prev_events.store(current_events, Ordering::Relaxed);
+                *prev_time_guard = Some(now);
+            }
+        } else {
+            self.prev_events.store(current_events, Ordering::Relaxed);
+            *prev_time_guard = Some(now);
+        }
+    }
+
+    fn get_rate(&self) -> f64 {
+        self.current_rate.load(Ordering::Relaxed) as f64
+    }
+
+    fn reset(&self) {
+        self.prev_events.store(0, Ordering::Relaxed);
+        self.current_rate.store(0, Ordering::Relaxed);
+        *self.prev_time.lock().unwrap() = None;
+    }
+}
+
+/// Command handler extension for Emulator
+struct EmulatorCommandExt {
+    stats: Arc<AtomicStats>,
+    rate_tracker: Arc<RateTracker>,
+}
+
+impl CommandHandlerExt for EmulatorCommandExt {
+    fn component_name(&self) -> &'static str {
+        "Emulator"
+    }
+
+    fn on_start(&mut self, _run_number: u32) -> Result<(), String> {
+        self.stats.reset();
+        self.rate_tracker.reset();
+        Ok(())
+    }
+
+    fn status_details(&self) -> Option<String> {
+        let (events, batches, bytes) = self.stats.snapshot();
+        Some(format!(
+            "Events: {}, Batches: {}, Bytes: {}",
+            events, batches, bytes
+        ))
+    }
+
+    fn get_metrics(&self) -> Option<crate::common::ComponentMetrics> {
+        let (events, _batches, bytes) = self.stats.snapshot();
+        self.rate_tracker.update(events);
+        Some(crate::common::ComponentMetrics {
+            events_processed: events,
+            bytes_transferred: bytes,
+            queue_size: 0,
+            queue_max: 0,
+            event_rate: self.rate_tracker.get_rate(),
+            data_rate: 0.0,
+        })
+    }
+}
+
 /// Emulator data source
 ///
 /// Generates random event data and publishes via ZeroMQ.
@@ -115,6 +232,8 @@ pub struct Emulator {
     shared_state: Arc<Mutex<ComponentSharedState>>,
     state_rx: watch::Receiver<ComponentState>,
     state_tx: watch::Sender<ComponentState>,
+    stats: Arc<AtomicStats>,
+    rate_tracker: Arc<RateTracker>,
     sequence_number: u64,
     timestamp_ns: f64,
     heartbeat_counter: u64,
@@ -140,6 +259,8 @@ impl Emulator {
             shared_state: Arc::new(Mutex::new(ComponentSharedState::new())),
             state_rx,
             state_tx,
+            stats: Arc::new(AtomicStats::new()),
+            rate_tracker: Arc::new(RateTracker::new()),
             sequence_number: 0,
             timestamp_ns: 0.0,
             heartbeat_counter: 0,
@@ -345,11 +466,21 @@ impl Emulator {
     /// Publish a message via ZMQ
     async fn publish_message(&mut self, message: &Message) -> Result<(), EmulatorError> {
         let bytes = message.to_msgpack()?;
+        let bytes_len = bytes.len() as u64;
         let msg: tmq::Multipart = vec![tmq::Message::from(bytes.as_slice())].into();
         self.data_socket.send(msg).await?;
 
         match message {
             Message::Data(batch) => {
+                // Update statistics
+                self.stats
+                    .events_generated
+                    .fetch_add(batch.len() as u64, Ordering::Relaxed);
+                self.stats.batches_published.fetch_add(1, Ordering::Relaxed);
+                self.stats
+                    .bytes_sent
+                    .fetch_add(bytes_len, Ordering::Relaxed);
+
                 debug!(
                     seq = batch.sequence_number,
                     events = batch.len(),
@@ -415,6 +546,8 @@ impl Emulator {
         let shared_state = self.shared_state.clone();
         let state_tx = self.state_tx.clone();
         let shutdown_for_cmd = shutdown.resubscribe();
+        let stats_for_cmd = self.stats.clone();
+        let rate_tracker_for_cmd = self.rate_tracker.clone();
 
         let cmd_handle = tokio::spawn(async move {
             run_command_task(
@@ -422,7 +555,13 @@ impl Emulator {
                 shared_state,
                 state_tx,
                 shutdown_for_cmd,
-                |state, tx, cmd| handle_command_simple(state, tx, cmd, "Emulator"),
+                move |state, tx, cmd| {
+                    let mut ext = EmulatorCommandExt {
+                        stats: stats_for_cmd.clone(),
+                        rate_tracker: rate_tracker_for_cmd.clone(),
+                    };
+                    handle_command(state, tx, cmd, Some(&mut ext))
+                },
                 "Emulator",
             )
             .await;

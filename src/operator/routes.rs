@@ -218,17 +218,14 @@ async fn get_status(State(state): State<Arc<AppState>>) -> Json<SystemStatus> {
                     .signed_duration_since(info.start_time)
                     .num_seconds();
 
-                // Update stats from component metrics
-                let total_events: i64 = components
+                // Update stats from Recorder metrics (authoritative source for recorded data)
+                let recorder_metrics = components
                     .iter()
-                    .filter_map(|c| c.metrics.as_ref())
-                    .map(|m| m.events_processed as i64)
-                    .sum();
-                let total_bytes: i64 = components
-                    .iter()
-                    .filter_map(|c| c.metrics.as_ref())
-                    .map(|m| m.bytes_transferred as i64)
-                    .sum();
+                    .find(|c| c.name == "Recorder")
+                    .and_then(|c| c.metrics.as_ref());
+                let (total_events, total_bytes) = recorder_metrics
+                    .map(|m| (m.events_processed as i64, m.bytes_transferred as i64))
+                    .unwrap_or((0, 0));
                 let average_rate = if info.elapsed_secs > 0 {
                     total_events as f64 / info.elapsed_secs as f64
                 } else {

@@ -144,6 +144,56 @@ pub struct RecorderStats {
     pub dropped_batches: u64,
 }
 
+/// Rate tracker for 1-second interval rate calculation
+#[derive(Debug)]
+struct RateTracker {
+    prev_events: AtomicU64,
+    prev_time: std::sync::Mutex<Option<Instant>>,
+    current_rate: AtomicU64,
+}
+
+impl RateTracker {
+    fn new() -> Self {
+        Self {
+            prev_events: AtomicU64::new(0),
+            prev_time: std::sync::Mutex::new(None),
+            current_rate: AtomicU64::new(0),
+        }
+    }
+
+    /// Update rate calculation. Call this periodically (e.g., every second).
+    fn update(&self, current_events: u64) {
+        let now = Instant::now();
+        let mut prev_time_guard = self.prev_time.lock().unwrap();
+
+        if let Some(prev_time) = *prev_time_guard {
+            let elapsed = now.duration_since(prev_time).as_secs_f64();
+            if elapsed >= 1.0 {
+                let prev_events = self.prev_events.load(Ordering::Relaxed);
+                let delta = current_events.saturating_sub(prev_events);
+                let rate = (delta as f64 / elapsed) as u64;
+                self.current_rate.store(rate, Ordering::Relaxed);
+                self.prev_events.store(current_events, Ordering::Relaxed);
+                *prev_time_guard = Some(now);
+            }
+        } else {
+            // First call - initialize
+            self.prev_events.store(current_events, Ordering::Relaxed);
+            *prev_time_guard = Some(now);
+        }
+    }
+
+    fn get_rate(&self) -> f64 {
+        self.current_rate.load(Ordering::Relaxed) as f64
+    }
+
+    fn reset(&self) {
+        self.prev_events.store(0, Ordering::Relaxed);
+        self.current_rate.store(0, Ordering::Relaxed);
+        *self.prev_time.lock().unwrap() = None;
+    }
+}
+
 /// Commands for writer task
 enum WriterCommand {
     /// Write a batch of raw data
@@ -420,6 +470,7 @@ impl FileWriter {
 /// Command handler extension for Recorder
 struct RecorderCommandExt {
     stats: Arc<AtomicStats>,
+    rate_tracker: Arc<RateTracker>,
     writer_tx: mpsc::UnboundedSender<WriterCommand>,
 }
 
@@ -436,8 +487,9 @@ impl CommandHandlerExt for RecorderCommandExt {
     }
 
     fn on_start(&mut self, run_number: u32) -> Result<(), String> {
-        // Reset statistics for the new run
+        // Reset statistics and rate tracker for the new run
         self.stats.reset();
+        self.rate_tracker.reset();
 
         // Drain any stale data from previous run and start recording
         self.writer_tx
@@ -463,6 +515,20 @@ impl CommandHandlerExt for RecorderCommandExt {
             stats.total_events, stats.written_events, stats.files_written, stats.dropped_batches
         ))
     }
+
+    fn get_metrics(&self) -> Option<crate::common::ComponentMetrics> {
+        let stats = self.stats.snapshot();
+        // Update rate tracker with current event count
+        self.rate_tracker.update(stats.written_events);
+        Some(crate::common::ComponentMetrics {
+            events_processed: stats.written_events,
+            bytes_transferred: stats.total_bytes_written,
+            queue_size: 0,
+            queue_max: 0,
+            event_rate: self.rate_tracker.get_rate(),
+            data_rate: 0.0,
+        })
+    }
 }
 
 /// Recorder component
@@ -470,6 +536,7 @@ pub struct Recorder {
     config: RecorderConfig,
     shared_state: Arc<tokio::sync::Mutex<ComponentSharedState>>,
     stats: Arc<AtomicStats>,
+    rate_tracker: Arc<RateTracker>,
     state_rx: watch::Receiver<ComponentState>,
     state_tx: watch::Sender<ComponentState>,
 }
@@ -479,6 +546,7 @@ impl Recorder {
     pub async fn new(config: RecorderConfig) -> Result<Self, RecorderError> {
         let (state_tx, state_rx) = watch::channel(ComponentState::Idle);
         let stats = Arc::new(AtomicStats::new());
+        let rate_tracker = Arc::new(RateTracker::new());
 
         info!(
             subscribe = %config.subscribe_address,
@@ -493,6 +561,7 @@ impl Recorder {
             config,
             shared_state: Arc::new(tokio::sync::Mutex::new(ComponentSharedState::new())),
             stats,
+            rate_tracker,
             state_rx,
             state_tx,
         })
@@ -557,6 +626,7 @@ impl Recorder {
         let state_tx = self.state_tx.clone();
         let shutdown_for_cmd = shutdown.resubscribe();
         let cmd_stats = self.stats.clone();
+        let cmd_rate_tracker = self.rate_tracker.clone();
         let cmd_writer_tx = writer_tx.clone();
 
         let cmd_handle = tokio::spawn(async move {
@@ -568,6 +638,7 @@ impl Recorder {
                 move |state, tx, cmd| {
                     let mut ext = RecorderCommandExt {
                         stats: cmd_stats.clone(),
+                        rate_tracker: cmd_rate_tracker.clone(),
                         writer_tx: cmd_writer_tx.clone(),
                     };
                     handle_command(state, tx, cmd, Some(&mut ext))

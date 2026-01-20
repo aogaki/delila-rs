@@ -80,6 +80,12 @@ pub trait CommandHandlerExt {
     fn status_details(&self) -> Option<String> {
         None
     }
+
+    /// Get component metrics for GetStatus command
+    /// Override this to return actual metrics from the component
+    fn get_metrics(&self) -> Option<super::ComponentMetrics> {
+        None
+    }
 }
 
 /// Handle a command using the 5-state machine logic
@@ -234,6 +240,14 @@ pub fn handle_command<E: CommandHandlerExt>(
 
             let mut resp = CommandResponse::success(state.state, msg);
             resp.run_number = state.run_number();
+
+            // Add metrics if available
+            if let Some(ref e) = ext {
+                if let Some(metrics) = e.get_metrics() {
+                    resp = resp.with_metrics(metrics);
+                }
+            }
+
             resp
         }
     }

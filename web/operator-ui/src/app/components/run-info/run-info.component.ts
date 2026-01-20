@@ -104,20 +104,16 @@ export class RunInfoComponent {
   });
 
   readonly totalRate = computed(() => {
-    const info = this.runInfo();
-    if (info && info.stats.average_rate > 0) {
-      return info.stats.average_rate;
-    }
-    // Fallback to component aggregation
+    // Use Recorder's instantaneous rate (1-second interval)
     return this.operator.totalRate();
   });
 
   formatRate(rate: number): string {
     if (rate >= 1_000_000) {
-      return `${(rate / 1_000_000).toFixed(2)} Mevt/s`;
+      return `${(rate / 1_000_000).toFixed(2)}M eve/s`;
     } else if (rate >= 1_000) {
-      return `${(rate / 1_000).toFixed(2)} kevt/s`;
+      return `${(rate / 1_000).toFixed(1)}k eve/s`;
     }
-    return `${rate.toFixed(0)} evt/s`;
+    return `${rate.toFixed(0)} eve/s`;
   }
 }

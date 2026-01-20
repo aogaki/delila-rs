@@ -36,15 +36,18 @@ export class OperatorService {
   /** Last run info for pre-filling comment (from MongoDB) */
   readonly lastRunInfo = computed<LastRunInfo | null>(() => this.status()?.last_run_info ?? null);
 
-  // Aggregate metrics
-  readonly totalEvents = computed(() => {
+  // Metrics from Recorder (authoritative source for recorded data)
+  readonly recorderMetrics = computed(() => {
     const comps = this.components();
-    return comps.reduce((sum, c) => sum + (c.metrics?.events_processed ?? 0), 0);
+    return comps.find((c) => c.name === 'Recorder')?.metrics ?? null;
+  });
+
+  readonly totalEvents = computed(() => {
+    return this.recorderMetrics()?.events_processed ?? 0;
   });
 
   readonly totalRate = computed(() => {
-    const comps = this.components();
-    return comps.reduce((sum, c) => sum + (c.metrics?.event_rate ?? 0), 0);
+    return this.recorderMetrics()?.event_rate ?? 0;
   });
 
   private readonly http = inject(HttpClient);

@@ -25,9 +25,9 @@ import { HistogramService } from './services/histogram.service';
           {{ operator.systemState() }}
         </span>
         <span class="stat-separator">|</span>
-        <span class="stat-item">{{ formatEvents(histogram.totalEvents()) }} events</span>
+        <span class="stat-item">{{ formatEvents(operator.totalEvents()) }} events</span>
         <span class="stat-separator">|</span>
-        <span class="stat-item">{{ formatRate(histogram.eventRate()) }}</span>
+        <span class="stat-item">{{ formatRate(operator.totalRate()) }}</span>
       </span>
       <span class="spacer"></span>
       @if (currentRunNumber()) {

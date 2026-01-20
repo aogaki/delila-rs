@@ -252,6 +252,19 @@ impl CommandHandlerExt for MergerCommandExt {
             stats.total_missing()
         ))
     }
+
+    fn get_metrics(&self) -> Option<crate::common::ComponentMetrics> {
+        let stats = self.ext_state.get_stats();
+        Some(crate::common::ComponentMetrics {
+            // Merger forwards batches, so we report batch counts
+            events_processed: stats.sent_batches,
+            bytes_transferred: 0, // Merger doesn't track bytes
+            queue_size: 0,
+            queue_max: 0,
+            event_rate: 0.0, // Will be calculated in Phase 2
+            data_rate: 0.0,
+        })
+    }
 }
 
 /// Merger component
