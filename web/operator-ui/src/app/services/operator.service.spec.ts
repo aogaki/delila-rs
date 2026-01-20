@@ -209,7 +209,7 @@ describe('OperatorService', () => {
 
       const req = httpMock.expectOne(`${baseUrl}/start`);
       expect(req.request.method).toBe('POST');
-      expect(req.request.body).toEqual({ run_number: runNumber });
+      expect(req.request.body).toEqual({ run_number: runNumber, comment: '' });
       req.flush(mockApiResponse);
     });
   });
