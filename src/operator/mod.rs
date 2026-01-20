@@ -461,6 +461,7 @@ mod tests {
             run_info: None,
             experiment_name: "TestExp".to_string(),
             next_run_number: Some(1),
+            last_run_info: None,
         };
         let json = serde_json::to_string(&status).unwrap();
         assert!(json.contains("\"system_state\":\"Idle\""));

@@ -67,8 +67,8 @@ pipeline_order = 3
 source = "file"
 
 [settings.file]
-events_per_batch = 500    # 500 events/batch
-batch_interval_ms = 10    # 10ms = 100 batches/s per source
+events_per_batch = 1000    # 500 events/batch
+batch_interval_ms = 0    # 10ms = 100 batches/s per source
 num_modules = 2
 channels_per_module = 16
 enable_waveform = false    # true: generate waveform for all events

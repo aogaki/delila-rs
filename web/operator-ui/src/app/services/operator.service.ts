@@ -97,7 +97,7 @@ export class OperatorService {
 
   // Note: arm() removed - backend auto-arms on start()
   // run_number and comment are passed at start time
-  start(runNumber: number, comment: string = ''): Observable<ApiResponse> {
+  start(runNumber: number, comment = ''): Observable<ApiResponse> {
     return this.http.post<ApiResponse>(`${this.baseUrl}/start`, { run_number: runNumber, comment });
   }
 
