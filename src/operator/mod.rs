@@ -8,10 +8,10 @@ mod routes;
 mod run_repository;
 
 pub use client::ComponentClient;
-pub use routes::{create_router, create_router_with_mongodb};
+pub use routes::{create_router, create_router_with_config, create_router_with_mongodb};
 pub use run_repository::{
-    CurrentRunInfo, ErrorLogEntry, RepositoryError, RunDocument, RunRepository, RunStats,
-    RunStatus,
+    CurrentRunInfo, ErrorLogEntry, LastRunInfo, RepositoryError, RunDocument, RunNote,
+    RunRepository, RunStats, RunStatus,
 };
 
 use serde::{Deserialize, Serialize};
@@ -51,6 +51,14 @@ pub struct SystemStatus {
     /// Current run information (if a run is active)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run_info: Option<CurrentRunInfo>,
+    /// Experiment name (server-authoritative, from config file)
+    pub experiment_name: String,
+    /// Next run number (from MongoDB, for multi-client sync)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_run_number: Option<i32>,
+    /// Last run info for pre-filling comment (comment + notes from previous run)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_run_info: Option<LastRunInfo>,
 }
 
 /// Aggregated system state
@@ -131,6 +139,9 @@ impl From<ConfigureRequest> for RunConfig {
 pub struct StartRequest {
     /// Run number to use for this start (allows changing run number without re-configure)
     pub run_number: u32,
+    /// Comment for this run (optional, stored in MongoDB)
+    #[serde(default)]
+    pub comment: String,
 }
 
 /// Generic API response
@@ -203,6 +214,8 @@ pub struct OperatorConfig {
     pub arm_timeout_ms: u64,
     /// Timeout for start phase (ms)
     pub start_timeout_ms: u64,
+    /// Experiment name (server-authoritative, from config file)
+    pub experiment_name: String,
 }
 
 impl Default for OperatorConfig {
@@ -211,6 +224,7 @@ impl Default for OperatorConfig {
             configure_timeout_ms: 5000,
             arm_timeout_ms: 5000,
             start_timeout_ms: 5000,
+            experiment_name: "DefaultExp".to_string(),
         }
     }
 }
@@ -445,9 +459,12 @@ mod tests {
             components: vec![make_status("A", ComponentState::Idle, true)],
             system_state: SystemState::Idle,
             run_info: None,
+            experiment_name: "TestExp".to_string(),
+            next_run_number: Some(1),
         };
         let json = serde_json::to_string(&status).unwrap();
         assert!(json.contains("\"system_state\":\"Idle\""));
+        assert!(json.contains("\"experiment_name\":\"TestExp\""));
     }
 
     #[test]

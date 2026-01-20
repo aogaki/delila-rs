@@ -314,6 +314,12 @@ impl AtomicStats {
         self.dropped_batches.fetch_add(1, Ordering::Relaxed);
     }
 
+    fn reset(&self) {
+        self.received_batches.store(0, Ordering::Relaxed);
+        self.processed_batches.store(0, Ordering::Relaxed);
+        self.dropped_batches.store(0, Ordering::Relaxed);
+    }
+
     fn snapshot(&self) -> (u64, u64, u64) {
         (
             self.received_batches.load(Ordering::Relaxed),
@@ -742,6 +748,9 @@ impl Monitor {
     }
 
     /// Receiver task: ZMQ SUB → channel (non-blocking)
+    ///
+    /// IMPORTANT: Always drains ZMQ socket to prevent internal buffer growth.
+    /// When not Running, data is discarded immediately.
     async fn receiver_task(
         mut socket: subscribe::Subscribe,
         tx: mpsc::UnboundedSender<EventDataBatch>,
@@ -766,9 +775,16 @@ impl Monitor {
                     continue;
                 }
 
-                msg = socket.next(), if is_running => {
+                // Always receive from ZMQ to drain the socket buffer
+                // Data is only forwarded when Running, otherwise discarded
+                msg = socket.next() => {
                     match msg {
                         Some(Ok(multipart)) => {
+                            // Not running - discard data to prevent ZMQ buffer growth
+                            if !is_running {
+                                continue;
+                            }
+
                             if let Some(data) = multipart.into_iter().next() {
                                 match Message::from_msgpack(&data) {
                                     Ok(Message::Data(batch)) => {
@@ -834,9 +850,19 @@ impl Monitor {
                 cmd = cmd_rx.recv() => {
                     match cmd {
                         Some(HistogramMessage::Clear) => {
+                            // Drain any stale data from the data channel first
+                            let mut drained = 0u64;
+                            while data_rx.try_recv().is_ok() {
+                                drained += 1;
+                            }
+                            if drained > 0 {
+                                info!(drained, "Drained stale batches from previous run");
+                            }
+
                             state.clear();
                             state.start_time = None;
-                            info!("Histograms cleared by command");
+                            atomic_stats.reset();
+                            info!("Histograms and stats cleared");
                         }
                         Some(HistogramMessage::GetSnapshot(tx)) => {
                             let _ = tx.send(state.snapshot());

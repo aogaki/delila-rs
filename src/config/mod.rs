@@ -41,6 +41,29 @@ pub struct Config {
     pub network: NetworkConfig,
     #[serde(default)]
     pub settings: SettingsConfig,
+    /// Operator configuration
+    #[serde(default)]
+    pub operator: OperatorFileConfig,
+}
+
+/// Operator configuration from config file
+#[derive(Debug, Clone, Deserialize)]
+pub struct OperatorFileConfig {
+    /// Experiment name (server-authoritative, not editable by UI)
+    #[serde(default = "default_experiment_name")]
+    pub experiment_name: String,
+}
+
+impl Default for OperatorFileConfig {
+    fn default() -> Self {
+        Self {
+            experiment_name: default_experiment_name(),
+        }
+    }
+}
+
+fn default_experiment_name() -> String {
+    "DefaultExp".to_string()
 }
 
 impl Config {

@@ -382,6 +382,9 @@ impl Merger {
     }
 
     /// Receiver task: SUB → channel (zero-copy with header-only parsing)
+    ///
+    /// IMPORTANT: Always drains ZMQ socket to prevent internal buffer growth.
+    /// When not Running, data is discarded immediately.
     async fn receiver_task(
         mut socket: subscribe::Subscribe,
         tx: mpsc::UnboundedSender<Bytes>,
@@ -406,9 +409,16 @@ impl Merger {
                     continue;
                 }
 
-                msg = socket.next(), if is_running => {
+                // Always receive from ZMQ to drain the socket buffer
+                // Data is only forwarded when Running, otherwise discarded
+                msg = socket.next() => {
                     match msg {
                         Some(Ok(multipart)) => {
+                            // Not running - discard data to prevent ZMQ buffer growth
+                            if !is_running {
+                                continue;
+                            }
+
                             if let Some(data) = multipart.into_iter().next() {
                                 // Zero-copy: convert to Bytes (reference counted)
                                 let raw_bytes: Bytes = Bytes::copy_from_slice(&data);

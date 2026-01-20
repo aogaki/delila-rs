@@ -21,8 +21,8 @@ use crate::config::DigitizerConfig;
 
 use super::{
     ApiResponse, CommandResult, ComponentClient, ComponentConfig, ComponentStatus,
-    ConfigureRequest, CurrentRunInfo, OperatorConfig, RunDocument, RunRepository, RunStats,
-    RunStatus, StartRequest, SystemState, SystemStatus,
+    ConfigureRequest, CurrentRunInfo, LastRunInfo, OperatorConfig, RunDocument, RunNote,
+    RunRepository, RunStats, RunStatus, StartRequest, SystemState, SystemStatus,
 };
 
 /// Application state shared across handlers
@@ -58,6 +58,7 @@ pub struct AppState {
         get_run_history,
         get_run,
         get_next_run_number,
+        add_run_note,
     ),
     components(schemas(
         SystemStatus,
@@ -74,6 +75,9 @@ pub struct AppState {
         RunStats,
         RunStatus,
         NextRunNumberResponse,
+        AddNoteRequest,
+        RunNote,
+        LastRunInfo,
     )),
     tags(
         (name = "DAQ Control", description = "DAQ system control endpoints"),
@@ -154,6 +158,7 @@ pub fn create_router_full(
         // Run history routes
         .route("/api/runs", get(get_run_history))
         .route("/api/runs/next", get(get_next_run_number))
+        .route("/api/runs/current/note", post(add_run_note))
         .route("/api/runs/{run_number}", get(get_run))
         // Digitizer configuration routes
         .route("/api/digitizers", get(list_digitizers))
@@ -203,13 +208,73 @@ async fn get_status(State(state): State<Arc<AppState>>) -> Json<SystemStatus> {
     let components = state.client.get_all_status(&state.components).await;
     let system_state = SystemState::from_components(&components);
 
-    // Get current run info
-    let run_info = state.current_run.read().await.clone();
+    // Get current run info and update real-time values
+    let run_info = {
+        let cached = state.current_run.read().await.clone();
+        if let Some(mut info) = cached {
+            if info.status == RunStatus::Running {
+                // Update elapsed time
+                info.elapsed_secs = chrono::Utc::now()
+                    .signed_duration_since(info.start_time)
+                    .num_seconds();
+
+                // Update stats from component metrics
+                let total_events: i64 = components
+                    .iter()
+                    .filter_map(|c| c.metrics.as_ref())
+                    .map(|m| m.events_processed as i64)
+                    .sum();
+                let total_bytes: i64 = components
+                    .iter()
+                    .filter_map(|c| c.metrics.as_ref())
+                    .map(|m| m.bytes_transferred as i64)
+                    .sum();
+                let average_rate = if info.elapsed_secs > 0 {
+                    total_events as f64 / info.elapsed_secs as f64
+                } else {
+                    0.0
+                };
+
+                info.stats = RunStats {
+                    total_events,
+                    total_bytes,
+                    average_rate,
+                };
+            }
+            Some(info)
+        } else {
+            None
+        }
+    };
+
+    // Get next run number and last run info from MongoDB (for multi-client sync)
+    let (next_run_number, last_run_info) = if let Some(ref repo) = state.run_repo {
+        let next = repo
+            .get_next_run_number_for_experiment(&state.config.experiment_name)
+            .await
+            .ok();
+        let last = match repo
+            .get_last_run_info_for_experiment(&state.config.experiment_name)
+            .await
+        {
+            Ok(info) => info,
+            Err(e) => {
+                tracing::warn!("Failed to get last_run_info: {}", e);
+                None
+            }
+        };
+        (next, last)
+    } else {
+        (None, None)
+    };
 
     Json(SystemStatus {
         components,
         system_state,
         run_info,
+        experiment_name: state.config.experiment_name.clone(),
+        next_run_number,
+        last_run_info,
     })
 }
 
@@ -291,6 +356,7 @@ async fn start(
     Json(request): Json<StartRequest>,
 ) -> (StatusCode, Json<ApiResponse>) {
     let run_number = request.run_number;
+    let comment = request.comment;
 
     // Check current state
     let components = state.client.get_all_status(&state.components).await;
@@ -322,19 +388,37 @@ async fn start(
         }
     }
 
-    // Now start with the run number
-    let results = state.client.start_all(&state.components, run_number).await;
-    let response = ApiResponse::success(format!("Start command sent for run {}", run_number))
-        .with_results(results);
+    // Now start with the run number (sequential: wait for each component to reach Running)
+    let start_result = state
+        .client
+        .start_all_sync(&state.components, run_number, state.config.start_timeout_ms)
+        .await;
+
+    let response = match start_result {
+        Ok(results) => {
+            ApiResponse::success(format!("Start command sent for run {}", run_number))
+                .with_results(results)
+        }
+        Err(e) => {
+            return (
+                StatusCode::REQUEST_TIMEOUT,
+                Json(ApiResponse::error(format!("Start failed: {}", e))),
+            );
+        }
+    };
 
     let status = if response.success {
+        let exp_name = &state.config.experiment_name;
+
         // Record run start in MongoDB and update current_run
         if let Some(ref repo) = state.run_repo {
+            let mongo_start = std::time::Instant::now();
             match repo
-                .start_run(run_number as i32, "", "", None)
+                .start_run(run_number as i32, exp_name, &comment, None)
                 .await
             {
                 Ok(doc) => {
+                    tracing::info!("MongoDB start_run took {:?}", mongo_start.elapsed());
                     let info = CurrentRunInfo::from_document(&doc);
                     *state.current_run.write().await = Some(info);
                 }
@@ -343,12 +427,13 @@ async fn start(
                     // Still set current_run for in-memory tracking
                     *state.current_run.write().await = Some(CurrentRunInfo {
                         run_number: run_number as i32,
-                        exp_name: String::new(),
-                        comment: String::new(),
+                        exp_name: exp_name.clone(),
+                        comment: comment.clone(),
                         start_time: chrono::Utc::now(),
                         elapsed_secs: 0,
                         status: RunStatus::Running,
                         stats: RunStats::default(),
+                        notes: Vec::new(),
                     });
                 }
             }
@@ -356,12 +441,13 @@ async fn start(
             // No MongoDB, just track in memory
             *state.current_run.write().await = Some(CurrentRunInfo {
                 run_number: run_number as i32,
-                exp_name: String::new(),
-                comment: String::new(),
+                exp_name: exp_name.clone(),
+                comment,
                 start_time: chrono::Utc::now(),
                 elapsed_secs: 0,
                 status: RunStatus::Running,
                 stats: RunStats::default(),
+                notes: Vec::new(),
             });
         }
         StatusCode::OK
@@ -418,7 +504,12 @@ async fn stop(State(state): State<Arc<AppState>>) -> (StatusCode, Json<ApiRespon
             };
 
             if let Err(e) = repo
-                .end_run(run_info.run_number, RunStatus::Completed, stats)
+                .end_run(
+                    run_info.run_number,
+                    &run_info.exp_name,
+                    RunStatus::Completed,
+                    stats,
+                )
                 .await
             {
                 tracing::warn!("Failed to record run end in MongoDB: {}", e);
@@ -881,4 +972,71 @@ async fn get_next_run_number(
     Ok(Json(NextRunNumberResponse {
         next_run_number: next,
     }))
+}
+
+/// Request body for adding a note
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct AddNoteRequest {
+    /// Note text to add
+    pub text: String,
+}
+
+/// Add a note to the current running run
+#[utoipa::path(
+    post,
+    path = "/api/runs/current/note",
+    tag = "Run History",
+    request_body = AddNoteRequest,
+    responses(
+        (status = 200, description = "Note added", body = RunNote),
+        (status = 400, description = "No run is currently active", body = ApiResponse),
+        (status = 503, description = "MongoDB not available", body = ApiResponse)
+    )
+)]
+async fn add_run_note(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<AddNoteRequest>,
+) -> Result<Json<RunNote>, (StatusCode, Json<ApiResponse>)> {
+    // Check if there's a current run
+    let current_run = state.current_run.read().await.clone();
+    let run_info = current_run.ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error("No run is currently active")),
+        )
+    })?;
+
+    if run_info.status != RunStatus::Running {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error("Run is not in running state")),
+        ));
+    }
+
+    let repo = state.run_repo.as_ref().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ApiResponse::error("MongoDB not configured")),
+        )
+    })?;
+
+    let note = repo
+        .add_note(run_info.run_number, &request.text)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(format!("Failed to add note: {}", e))),
+            )
+        })?;
+
+    // Update in-memory cache
+    {
+        let mut current = state.current_run.write().await;
+        if let Some(ref mut info) = *current {
+            info.notes.push(note.clone());
+        }
+    }
+
+    Ok(Json(note))
 }

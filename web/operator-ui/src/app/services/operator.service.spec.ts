@@ -44,6 +44,8 @@ describe('OperatorService', () => {
       },
     ],
     system_state: 'Running',
+    experiment_name: 'TestExp',
+    next_run_number: 2,
   };
 
   const mockApiResponse: ApiResponse = {
@@ -120,6 +122,8 @@ describe('OperatorService', () => {
           { name: 'Reader-0', address: 'tcp://localhost:5555', state: 'Idle', online: true },
         ],
         system_state: 'Idle',
+        experiment_name: 'TestExp',
+        next_run_number: 1,
       };
       service.status.set(statusWithoutMetrics);
       expect(service.totalEvents()).toBe(0);

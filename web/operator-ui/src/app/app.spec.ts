@@ -30,6 +30,8 @@ describe('App', () => {
       },
     ],
     system_state: 'Running',
+    experiment_name: 'TestExp',
+    next_run_number: 43,
   };
 
   beforeEach(async () => {

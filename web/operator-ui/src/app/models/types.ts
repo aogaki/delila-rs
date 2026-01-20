@@ -54,6 +54,12 @@ export interface RunStats {
   average_rate: number;
 }
 
+// Run note entry (append-only logbook style)
+export interface RunNote {
+  time: number; // UNIX timestamp in milliseconds
+  text: string;
+}
+
 // Current run information
 export interface CurrentRunInfo {
   run_number: number;
@@ -63,6 +69,14 @@ export interface CurrentRunInfo {
   elapsed_secs: number;
   status: RunStatus;
   stats: RunStats;
+  notes: RunNote[];
+}
+
+// Last run info for pre-filling comment field
+export interface LastRunInfo {
+  run_number: number;
+  comment: string;
+  notes: RunNote[];
 }
 
 // System-wide status
@@ -70,6 +84,12 @@ export interface SystemStatus {
   components: ComponentStatus[];
   system_state: SystemState;
   run_info?: CurrentRunInfo;
+  /** Experiment name (server-authoritative, from config file) */
+  experiment_name: string;
+  /** Next run number (from MongoDB, for multi-client sync) */
+  next_run_number?: number;
+  /** Last run info for pre-filling comment (comment + notes from previous run) */
+  last_run_info?: LastRunInfo;
 }
 
 // Configure request

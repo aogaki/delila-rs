@@ -119,9 +119,111 @@
 
 ---
 
+### Phase 7: Run履歴・Comment永続化 ✅
+
+**実装日:** 2026-01-19
+
+**MongoDB統合:**
+- [x] MongoDB接続（docker-compose.ymlでdelila_mongo）
+- [x] RunRepository（run_repository.rs）
+  - start_run, end_run, add_note, get_last_run_info
+  - UNIX timestamp (i64) でシンプル化
+- [x] Operator起動時に`--mongodb-uri`オプション
+- [x] start_daq.shでDocker/MongoDB自動起動
+
+**Comment auto-fill機能:**
+- [x] last_run_info（前回runのcomment + notes）をUI表示
+- [x] Start APIにcommentフィールド追加
+- [x] ブラウザリロード時もrun_info.commentから復元
+
+**Run Notes（logbook）:**
+- [x] POST /api/runs/current/note でノート追加
+- [x] MongoDBに保存（notes配列）
+- [x] Stop後に次runのsuggestedCommentに反映
+
+**実装ファイル:**
+- `src/operator/run_repository.rs`: MongoDB操作
+- `src/operator/routes.rs`: REST API
+- `src/operator/mod.rs`: StartRequest拡張
+- `web/operator-ui/src/app/components/control-panel/control-panel.component.ts`
+- `web/operator-ui/src/app/services/operator.service.ts`
+- `docker/docker-compose.yml`: MongoDB + Mongo Express
+
+---
+
+### Phase 8: Pipeline順序制御 ✅
+
+**実装日:** 2026-01-19
+
+**問題:** Start時にMonitor/Recorderがメモリ爆発（10GB超）
+
+**原因:**
+- Emulatorが先にRunningになりデータ生成開始
+- Monitor/Recorderがまだ初期化中でZMQバッファに蓄積
+
+**解決策:**
+- [x] `start_all_sequential`: 各コンポーネントがRunningになるまで待ってから次を起動
+- [x] 起動順序: downstream first (order=3→2→1)
+  - Recorder, Monitor (order=3)
+  - Merger (order=2)
+  - Emulator (order=1)
+- [x] ZMQバッファドレイン修正（常にsocket.next()を呼ぶ）
+
+**実装ファイル:**
+- `src/operator/client.rs`: start_all_sequential, start_all_sync
+- `src/recorder/mod.rs`: ZMQ drain fix
+- `src/monitor/mod.rs`: ZMQ drain fix
+- `src/merger/mod.rs`: ZMQ drain fix
+- `config.toml`: pipeline_orderコメント修正
+
+---
+
 ## 未着手
 
-### Phase 7: rust-embed統合
+### Phase 9: 同一pipeline_order並列実行 ✅
+
+**実装日:** 2026-01-20
+
+**目的:** 同じpipeline_orderを持つコンポーネントを並列に起動・設定する
+
+**実装内容:**
+- [x] `group_by_pipeline_order_desc/asc`: コンポーネントをpipeline_orderでグループ化
+- [x] `start_all_sequential`: 同一orderは`futures::future::join_all`で並列実行
+- [x] `configure_all`, `arm_all`, `stop_all`: 同様の並列実行パターン適用
+- [x] ログ出力でグループ化を明示
+
+**実行順序:**
+```
+Start (downstream first):
+  order=3: [Recorder, Monitor] → parallel start, wait all Running
+  order=2: [Merger] → start, wait Running
+  order=1: [Emulator-0, Emulator-1] → parallel start, wait all Running
+
+Stop (upstream first):
+  order=1: [Emulator-0, Emulator-1] → parallel stop
+  order=2: [Merger] → stop
+  order=3: [Recorder, Monitor] → parallel stop
+```
+
+**ログ出力例:**
+```
+Start order (downstream first): [(3, ["Recorder", "Monitor"]), (2, ["Merger"]), (1, ["digitizer-0", "digitizer-1"])]
+Starting group order=3: ["Recorder", "Monitor"] in parallel...
+Group order=3 (["Recorder", "Monitor"]) all Running
+Starting group order=2: ["Merger"] in parallel...
+Group order=2 (["Merger"]) all Running
+Starting group order=1: ["digitizer-0", "digitizer-1"] in parallel...
+Group order=1 (["digitizer-0", "digitizer-1"]) all Running
+```
+
+**実装ファイル:**
+- `src/operator/client.rs`:
+  - `group_by_pipeline_order_desc()`, `group_by_pipeline_order_asc()`
+  - `start_all_sequential()`, `configure_all()`, `arm_all()`, `stop_all()`
+
+---
+
+### Phase 10: rust-embed統合
 
 - [ ] `rust-embed` クレートで静的ファイル埋め込み
 - [ ] Operatorバイナリでの配信設定

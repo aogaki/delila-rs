@@ -39,6 +39,22 @@ pub struct ErrorLogEntry {
     pub message: String,
 }
 
+/// Run note entry (append-only logbook style)
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct RunNote {
+    /// UNIX timestamp in milliseconds
+    pub time: i64,
+    pub text: String,
+}
+
+/// Last run info for pre-filling comment field
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct LastRunInfo {
+    pub run_number: i32,
+    pub comment: String,
+    pub notes: Vec<RunNote>,
+}
+
 /// Run document stored in MongoDB
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunDocument {
@@ -60,6 +76,9 @@ pub struct RunDocument {
     pub config_snapshot: Option<serde_json::Value>,
     #[serde(default)]
     pub errors: Vec<ErrorLogEntry>,
+    /// Append-only notes (logbook style)
+    #[serde(default)]
+    pub notes: Vec<RunNote>,
 }
 
 /// Current run info (in-memory, for API responses)
@@ -73,6 +92,9 @@ pub struct CurrentRunInfo {
     pub elapsed_secs: i64,
     pub status: RunStatus,
     pub stats: RunStats,
+    /// Append-only notes (logbook style)
+    #[serde(default)]
+    pub notes: Vec<RunNote>,
 }
 
 impl CurrentRunInfo {
@@ -89,6 +111,7 @@ impl CurrentRunInfo {
             elapsed_secs: elapsed,
             status: doc.status,
             stats: doc.stats.clone(),
+            notes: doc.notes.clone(),
         }
     }
 }
@@ -133,6 +156,7 @@ impl RunRepository {
     }
 
     /// Start a new run
+    /// Note: Same run_number can be reused (e.g., for retakes). Each start creates a new document.
     pub async fn start_run(
         &self,
         run_number: i32,
@@ -140,14 +164,8 @@ impl RunRepository {
         comment: &str,
         config_snapshot: Option<serde_json::Value>,
     ) -> Result<RunDocument, RepositoryError> {
-        // Check if run already exists
-        if let Some(_existing) = self
-            .collection
-            .find_one(doc! { "run_number": run_number })
-            .await?
-        {
-            return Err(RepositoryError::AlreadyExists(run_number));
-        }
+        // No duplicate check - same run_number can be reused for retakes
+        // Each start creates a new document with unique start_time
 
         let doc = RunDocument {
             id: None,
@@ -161,6 +179,7 @@ impl RunRepository {
             stats: RunStats::default(),
             config_snapshot,
             errors: Vec::new(),
+            notes: Vec::new(),
         };
 
         self.collection.insert_one(&doc).await?;
@@ -174,23 +193,38 @@ impl RunRepository {
     pub async fn end_run(
         &self,
         run_number: i32,
+        exp_name: &str,
         status: RunStatus,
         stats: RunStats,
     ) -> Result<(), RepositoryError> {
         let now = Utc::now();
 
-        // Get start time to calculate duration
-        let doc = self
-            .collection
-            .find_one(doc! { "run_number": run_number })
+        // Get start time to calculate duration (filter by exp_name + run_number)
+        // Use raw Document to handle both BSON Date and string formats
+        use mongodb::bson::Document;
+        let raw_collection = self.collection.clone_with_type::<Document>();
+        let raw_doc = raw_collection
+            .find_one(doc! { "run_number": run_number, "exp_name": exp_name })
             .await?
             .ok_or(RepositoryError::NotFound(run_number))?;
 
-        let duration = now.signed_duration_since(doc.start_time).num_seconds() as i32;
+        // Extract start_time - handle both BSON DateTime and string formats
+        let start_time = if let Ok(bson_dt) = raw_doc.get_datetime("start_time") {
+            DateTime::<Utc>::from_timestamp_millis(bson_dt.timestamp_millis())
+                .unwrap_or_else(Utc::now)
+        } else if let Ok(s) = raw_doc.get_str("start_time") {
+            DateTime::parse_from_rfc3339(s)
+                .map(|dt| dt.with_timezone(&Utc))
+                .unwrap_or_else(|_| Utc::now())
+        } else {
+            Utc::now()
+        };
+
+        let duration = now.signed_duration_since(start_time).num_seconds() as i32;
 
         self.collection
             .update_one(
-                doc! { "run_number": run_number },
+                doc! { "run_number": run_number, "exp_name": exp_name },
                 doc! {
                     "$set": {
                         "end_time": mongodb::bson::DateTime::from_millis(now.timestamp_millis()),
@@ -204,6 +238,7 @@ impl RunRepository {
 
         info!(
             run_number = run_number,
+            exp_name = exp_name,
             status = ?status,
             duration_secs = duration,
             "Run ended"
@@ -264,6 +299,37 @@ impl RunRepository {
         );
 
         Ok(())
+    }
+
+    /// Add a note to the current run (append-only)
+    pub async fn add_note(&self, run_number: i32, text: &str) -> Result<RunNote, RepositoryError> {
+        let time_ms = Utc::now().timestamp_millis();
+
+        let result = self
+            .collection
+            .update_one(
+                doc! { "run_number": run_number, "status": "running" },
+                doc! {
+                    "$push": {
+                        "notes": {
+                            "time": time_ms,
+                            "text": text,
+                        }
+                    }
+                },
+            )
+            .await?;
+
+        if result.matched_count == 0 {
+            return Err(RepositoryError::NotFound(run_number));
+        }
+
+        info!(run_number = run_number, "Note added");
+
+        Ok(RunNote {
+            time: time_ms,
+            text: text.to_string(),
+        })
     }
 
     /// Get current running run (if any)
@@ -333,6 +399,91 @@ impl RunRepository {
 
         Ok(doc.map(|d| d.run_number + 1).unwrap_or(1))
     }
+
+    /// Get next run number for a specific experiment
+    /// Returns the run_number + 1 of the most recent run (by start_time), not the max run_number.
+    /// This allows re-running the same run number (e.g., for retakes).
+    pub async fn get_next_run_number_for_experiment(
+        &self,
+        exp_name: &str,
+    ) -> Result<i32, RepositoryError> {
+        use mongodb::bson::Document;
+        use mongodb::options::FindOneOptions;
+
+        // Use raw Document to avoid deserialization issues with projection
+        let collection = self.collection.clone_with_type::<Document>();
+
+        // Sort by start_time descending to get the most recent run
+        let options = FindOneOptions::builder()
+            .sort(doc! { "start_time": -1 })
+            .projection(doc! { "run_number": 1 })
+            .build();
+
+        let doc = collection
+            .find_one(doc! { "exp_name": exp_name })
+            .with_options(options)
+            .await?;
+
+        Ok(doc
+            .and_then(|d| d.get_i32("run_number").ok())
+            .map(|n| n + 1)
+            .unwrap_or(1))
+    }
+
+    /// Get the most recent run info for a specific experiment (for pre-filling comment)
+    /// Returns the comment and notes from the last run.
+    pub async fn get_last_run_info_for_experiment(
+        &self,
+        exp_name: &str,
+    ) -> Result<Option<LastRunInfo>, RepositoryError> {
+        use mongodb::options::FindOneOptions;
+
+        // Use projection to only fetch needed fields, avoiding DateTime deserialization issues
+        let options = FindOneOptions::builder()
+            .sort(doc! { "start_time": -1 })
+            .projection(doc! {
+                "run_number": 1,
+                "comment": 1,
+                "notes": 1,
+            })
+            .build();
+
+        // Use raw BSON document to avoid type issues
+        let raw_collection = self
+            .collection
+            .clone_with_type::<mongodb::bson::Document>();
+
+        let doc = raw_collection
+            .find_one(doc! { "exp_name": exp_name })
+            .with_options(options)
+            .await?;
+
+        Ok(doc.map(|d| {
+            let run_number = d.get_i32("run_number").unwrap_or(0);
+            let comment = d.get_str("comment").unwrap_or("").to_string();
+            let notes: Vec<RunNote> = d
+                .get_array("notes")
+                .ok()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| {
+                            let doc = v.as_document()?;
+                            Some(RunNote {
+                                time: doc.get_i64("time").ok()?,
+                                text: doc.get_str("text").ok()?.to_string(),
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            LastRunInfo {
+                run_number,
+                comment,
+                notes,
+            }
+        }))
+    }
 }
 
 #[cfg(test)]
@@ -372,6 +523,7 @@ mod tests {
             stats: RunStats::default(),
             config_snapshot: None,
             errors: Vec::new(),
+            notes: Vec::new(),
         };
 
         let info = CurrentRunInfo::from_document(&doc);

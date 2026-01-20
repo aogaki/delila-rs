@@ -24,7 +24,8 @@ use clap::Parser;
 use delila_rs::common::OperatorArgs;
 use delila_rs::config::Config;
 use delila_rs::operator::{
-    create_router, create_router_with_mongodb, ComponentConfig, OperatorConfig, RunRepository,
+    create_router_with_config, create_router_with_mongodb, ComponentConfig, OperatorConfig,
+    RunRepository,
 };
 use tracing::{info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
@@ -47,12 +48,17 @@ struct Args {
     mongodb_database: String,
 }
 
-/// Load component configuration from config file or use defaults
-fn load_components(config_file: &str) -> Vec<ComponentConfig> {
+/// Load component configuration and operator config from config file or use defaults
+fn load_config(config_file: &str) -> (Vec<ComponentConfig>, OperatorConfig) {
     // Try to load from config file
     if let Ok(config) = Config::load(config_file) {
         info!("Loaded configuration from {}", config_file);
-        return build_components_from_config(&config);
+        let components = build_components_from_config(&config);
+        let operator_config = OperatorConfig {
+            experiment_name: config.operator.experiment_name,
+            ..OperatorConfig::default()
+        };
+        return (components, operator_config);
     }
 
     warn!(
@@ -62,7 +68,7 @@ fn load_components(config_file: &str) -> Vec<ComponentConfig> {
 
     // Default component configuration
     // pipeline_order: 1 = upstream (data sources), higher = downstream
-    vec![
+    let components = vec![
         ComponentConfig {
             name: "Emulator 0".to_string(),
             address: "tcp://localhost:5560".to_string(),
@@ -88,7 +94,8 @@ fn load_components(config_file: &str) -> Vec<ComponentConfig> {
             address: "tcp://localhost:5590".to_string(),
             pipeline_order: 3, // downstream (data sink)
         },
-    ]
+    ];
+    (components, OperatorConfig::default())
 }
 
 /// Build ComponentConfig list from parsed Config
@@ -168,12 +175,13 @@ async fn main() -> anyhow::Result<()> {
         .finish();
     tracing::subscriber::set_global_default(subscriber)?;
 
-    // Load component configuration
-    let components = load_components(&args.operator.common.config_file);
+    // Load component and operator configuration
+    let (components, operator_config) = load_config(&args.operator.common.config_file);
     info!("Loaded {} component(s)", components.len());
     for comp in &components {
         info!("  {} -> {}", comp.name, comp.address);
     }
+    info!("Experiment name: {}", operator_config.experiment_name);
 
     // Connect to MongoDB if URI is provided
     let run_repo = if let Some(ref uri) = args.mongodb_uri {
@@ -199,12 +207,13 @@ async fn main() -> anyhow::Result<()> {
     let app = if let Some(repo) = run_repo {
         create_router_with_mongodb(
             components,
-            OperatorConfig::default(),
+            operator_config,
             PathBuf::from("./config/digitizers"),
             repo,
         )
     } else {
-        create_router(components)
+        // Without MongoDB, use with_config to pass experiment_name
+        create_router_with_config(components, operator_config)
     };
 
     // Start server

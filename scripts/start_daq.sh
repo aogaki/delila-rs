@@ -61,10 +61,26 @@ fi
 MONGO_AVAILABLE=false
 if [ "$SKIP_MONGO" = false ]; then
     echo ""
-    echo -e "${CYAN}=== Checking MongoDB ===${NC}"
+    echo -e "${CYAN}=== Checking Docker/MongoDB ===${NC}"
 
-    # Check if MongoDB container is running
-    if command -v docker &> /dev/null; then
+    # Check if Docker is available, if not try to start Colima (macOS)
+    if ! docker info &>/dev/null; then
+        if command -v colima &> /dev/null; then
+            echo -e "  ${YELLOW}Docker not running, starting Colima...${NC}"
+            colima start 2>/dev/null
+            sleep 2
+            if docker info &>/dev/null; then
+                echo -e "  ${GREEN}Colima started successfully${NC}"
+            else
+                echo -e "  ${RED}Failed to start Colima${NC}"
+            fi
+        else
+            echo -e "  ${YELLOW}Docker not available${NC}"
+        fi
+    fi
+
+    # Check if MongoDB container is running, start if needed
+    if docker info &>/dev/null; then
         if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "delila_mongo"; then
             # Verify MongoDB is responding
             if docker exec delila_mongo mongosh --quiet --eval "db.runCommand('ping').ok" &>/dev/null; then
@@ -74,8 +90,22 @@ if [ "$SKIP_MONGO" = false ]; then
                 echo -e "  ${YELLOW}MongoDB container exists but not responding${NC}"
             fi
         else
-            echo -e "  ${YELLOW}MongoDB not running${NC}"
-            echo -e "  ${YELLOW}To start MongoDB: cd docker && docker-compose up -d${NC}"
+            # Try to start MongoDB container
+            echo -e "  ${YELLOW}MongoDB not running, starting...${NC}"
+            SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+            PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+            if [ -f "$PROJECT_DIR/docker/docker-compose.yml" ]; then
+                (cd "$PROJECT_DIR/docker" && docker compose up -d 2>/dev/null || docker-compose up -d 2>/dev/null)
+                sleep 3
+                if docker exec delila_mongo mongosh --quiet --eval "db.runCommand('ping').ok" &>/dev/null; then
+                    echo -e "  ${GREEN}MongoDB started successfully${NC}"
+                    MONGO_AVAILABLE=true
+                else
+                    echo -e "  ${YELLOW}MongoDB container started but not responding yet${NC}"
+                fi
+            else
+                echo -e "  ${YELLOW}docker-compose.yml not found${NC}"
+            fi
         fi
     else
         echo -e "  ${YELLOW}Docker not available${NC}"

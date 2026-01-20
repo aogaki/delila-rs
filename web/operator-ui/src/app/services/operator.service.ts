@@ -8,6 +8,8 @@ import {
   getButtonStates,
   ButtonStates,
   CurrentRunInfo,
+  RunNote,
+  LastRunInfo,
 } from '../models/types';
 
 @Injectable({
@@ -27,6 +29,12 @@ export class OperatorService {
   readonly components = computed(() => this.status()?.components ?? []);
   readonly buttonStates = computed<ButtonStates>(() => getButtonStates(this.systemState()));
   readonly runInfo = computed<CurrentRunInfo | null>(() => this.status()?.run_info ?? null);
+  /** Experiment name (server-authoritative, from config file) */
+  readonly experimentName = computed(() => this.status()?.experiment_name ?? '');
+  /** Next run number from MongoDB (for multi-client sync) */
+  readonly nextRunNumber = computed(() => this.status()?.next_run_number ?? null);
+  /** Last run info for pre-filling comment (from MongoDB) */
+  readonly lastRunInfo = computed<LastRunInfo | null>(() => this.status()?.last_run_info ?? null);
 
   // Aggregate metrics
   readonly totalEvents = computed(() => {
@@ -88,9 +96,9 @@ export class OperatorService {
   }
 
   // Note: arm() removed - backend auto-arms on start()
-  // run_number is passed at start time to allow changing it without re-configure
-  start(runNumber: number): Observable<ApiResponse> {
-    return this.http.post<ApiResponse>(`${this.baseUrl}/start`, { run_number: runNumber });
+  // run_number and comment are passed at start time
+  start(runNumber: number, comment: string = ''): Observable<ApiResponse> {
+    return this.http.post<ApiResponse>(`${this.baseUrl}/start`, { run_number: runNumber, comment });
   }
 
   stop(): Observable<ApiResponse> {
@@ -104,5 +112,10 @@ export class OperatorService {
   // Get next available run number from MongoDB
   getNextRunNumber(): Observable<{ next_run_number: number }> {
     return this.http.get<{ next_run_number: number }>(`${this.baseUrl}/runs/next`);
+  }
+
+  // Add a note to the current running run
+  addNote(text: string): Observable<RunNote> {
+    return this.http.post<RunNote>(`${this.baseUrl}/runs/current/note`, { text });
   }
 }

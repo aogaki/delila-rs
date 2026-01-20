@@ -77,7 +77,7 @@ export class ControlPageComponent {
   }
 
   onTimerStarted(): void {
-    const runNumber = this.controlPanel.runNumber;
+    const runNumber = this.controlPanel.displayRunNumber();
     this.operator.start(runNumber).subscribe({
       next: (res) => {
         if (res.success) {
@@ -98,9 +98,7 @@ export class ControlPageComponent {
       next: (res) => {
         if (res.success) {
           // Backend handles run_info update automatically
-          if (this.controlPanel.autoIncrement()) {
-            this.controlPanel.runNumber++;
-          }
+          // Run number will be updated via polling from server
         }
       },
     });

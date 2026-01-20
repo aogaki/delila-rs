@@ -53,6 +53,7 @@ bytes = "1.11.0"
 
 # MongoDB
 mongodb = "3"
+bson = "2"
 chrono = { version = "0.4", features = ["serde"] }
 
 [build-dependencies]

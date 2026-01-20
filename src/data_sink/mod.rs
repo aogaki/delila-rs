@@ -376,6 +376,9 @@ impl DataSink {
     }
 
     /// Receiver task: SUB → channel (non-blocking)
+    ///
+    /// IMPORTANT: Always drains ZMQ socket to prevent internal buffer growth.
+    /// When not Running, data is discarded immediately.
     async fn receiver_task(
         mut socket: subscribe::Subscribe,
         tx: mpsc::UnboundedSender<ProcessorMessage>,
@@ -400,9 +403,16 @@ impl DataSink {
                     continue;
                 }
 
-                msg = socket.next(), if is_running => {
+                // Always receive from ZMQ to drain the socket buffer
+                // Data is only forwarded when Running, otherwise discarded
+                msg = socket.next() => {
                     match msg {
                         Some(Ok(multipart)) => {
+                            // Not running - discard data to prevent ZMQ buffer growth
+                            if !is_running {
+                                continue;
+                            }
+
                             if let Some(data) = multipart.into_iter().next() {
                                 match Message::from_msgpack(&data) {
                                     Ok(Message::Data(batch)) => {

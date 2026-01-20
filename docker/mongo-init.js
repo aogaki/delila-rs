@@ -66,9 +66,10 @@ db.createCollection('runs', {
 });
 
 // Create indexes
-db.runs.createIndex({ run_number: 1 }, { unique: true });
-db.runs.createIndex({ exp_name: 1 });
-db.runs.createIndex({ start_time: -1 });
+// Non-unique index for querying by exp_name and run_number
+// (same run_number can be reused for retakes, creating multiple documents)
+db.runs.createIndex({ exp_name: 1, run_number: 1 });
+db.runs.createIndex({ exp_name: 1, start_time: -1 });  // For next_run_number query
 db.runs.createIndex({ status: 1 });
 
 print('DELILA database initialized successfully');

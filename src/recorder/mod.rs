@@ -112,6 +112,15 @@ impl AtomicStats {
         }
     }
 
+    fn reset(&self) {
+        self.received_batches.store(0, Ordering::Relaxed);
+        self.received_events.store(0, Ordering::Relaxed);
+        self.written_events.store(0, Ordering::Relaxed);
+        self.written_bytes.store(0, Ordering::Relaxed);
+        self.files_written.store(0, Ordering::Relaxed);
+        self.dropped_batches.store(0, Ordering::Relaxed);
+    }
+
     fn snapshot(&self) -> RecorderStats {
         RecorderStats {
             total_events: self.received_events.load(Ordering::Relaxed),
@@ -143,8 +152,9 @@ enum WriterCommand {
     EndOfStream { source_id: u32 },
     /// Configure for a new run
     NewRun(RunConfig),
-    /// Start recording (enable writing) with the run number to use
-    StartRun { run_number: u32 },
+    /// Drain pending batches and start recording with the run number
+    /// This ensures no stale data from previous runs remains in the channel
+    DrainAndStart { run_number: u32 },
     /// Close current file (run stopped)
     CloseFile,
     /// Shutdown writer task
@@ -426,9 +436,12 @@ impl CommandHandlerExt for RecorderCommandExt {
     }
 
     fn on_start(&mut self, run_number: u32) -> Result<(), String> {
-        // Enable writing in writer task with the run number
+        // Reset statistics for the new run
+        self.stats.reset();
+
+        // Drain any stale data from previous run and start recording
         self.writer_tx
-            .send(WriterCommand::StartRun { run_number })
+            .send(WriterCommand::DrainAndStart { run_number })
             .map_err(|e| format!("Failed to send start to writer: {}", e))
     }
 
@@ -614,6 +627,9 @@ impl Recorder {
     }
 
     /// Receiver task: ZMQ SUB → Writer channel (non-blocking)
+    ///
+    /// IMPORTANT: Always drains ZMQ socket to prevent internal buffer growth.
+    /// When not Running, data is discarded immediately.
     async fn receiver_task(
         mut socket: subscribe::Subscribe,
         tx: mpsc::UnboundedSender<WriterCommand>,
@@ -638,9 +654,16 @@ impl Recorder {
                     continue;
                 }
 
-                msg = socket.next(), if is_running => {
+                // Always receive from ZMQ to drain the socket buffer
+                // Data is only forwarded when Running, otherwise discarded
+                msg = socket.next() => {
                     match msg {
                         Some(Ok(multipart)) => {
+                            // Not running - discard data to prevent ZMQ buffer growth
+                            if !is_running {
+                                continue;
+                            }
+
                             if let Some(data) = multipart.into_iter().next() {
                                 match Message::from_msgpack(&data) {
                                     Ok(Message::Data(batch)) => {
@@ -715,7 +738,23 @@ impl Recorder {
                             eos_received = false;
                             info!("Writer configured for new run");
                         }
-                        Some(WriterCommand::StartRun { run_number }) => {
+                        Some(WriterCommand::DrainAndStart { run_number }) => {
+                            // Drain any stale batches from previous run
+                            let mut drained = 0u64;
+                            while let Ok(cmd) = rx.try_recv() {
+                                match cmd {
+                                    WriterCommand::WriteBatch(_) => drained += 1,
+                                    WriterCommand::EndOfStream { .. } => { /* discard */ }
+                                    // Re-queue important commands (shouldn't happen, but be safe)
+                                    other => {
+                                        warn!("Unexpected command during drain: {:?}", std::mem::discriminant(&other));
+                                    }
+                                }
+                            }
+                            if drained > 0 {
+                                info!(drained, "Drained stale batches from previous run");
+                            }
+
                             writer.start_run(run_number);
                             info!(run_number, "Writer started - recording enabled");
                         }

@@ -492,10 +492,26 @@ Stop Order: ASCENDING (upstream first)
 
 ```rust
 /// Start all components in pipeline order (descending: downstream first)
-pub async fn start_all(&self, configs: &[ComponentConfig]) -> Vec<CommandResult> {
+/// IMPORTANT: Sequential start - wait for each component to reach Running
+/// before starting the next. This prevents ZMQ buffer overflow.
+pub async fn start_all_sequential(
+    &self,
+    configs: &[ComponentConfig],
+    run_number: u32,
+    per_component_timeout_ms: u64,
+) -> Result<Vec<CommandResult>, String> {
     let mut sorted: Vec<_> = configs.iter().collect();
     sorted.sort_by(|a, b| b.pipeline_order.cmp(&a.pipeline_order));
-    // Send Start command to each in order
+
+    for config in sorted {
+        // Send start command
+        let result = self.start(config, run_number).await;
+        if !result.success { return Err(...); }
+
+        // Wait for this component to reach Running state
+        self.wait_for_state(&[config], ComponentState::Running, per_component_timeout_ms).await?;
+    }
+    Ok(results)
 }
 
 /// Stop all components in pipeline order (ascending: upstream first)
@@ -504,6 +520,23 @@ pub async fn stop_all(&self, configs: &[ComponentConfig]) -> Vec<CommandResult> 
     sorted.sort_by(|a, b| a.pipeline_order.cmp(&b.pipeline_order));
     // Send Stop command to each in order
 }
+```
+
+### Sequential Start Importance
+
+Without sequential start:
+```
+❌ Problem: All Start commands sent quickly
+   Recorder receives Start → begins initialization (100ms)
+   Emulator receives Start → immediately Running → generates data
+   → ZMQ buffer fills up → Memory explosion (10GB+)
+
+✅ Solution: Wait for Running before next
+   Recorder receives Start → waits for Running (initialized)
+   Monitor receives Start → waits for Running
+   Merger receives Start → waits for Running
+   Emulator receives Start → now all downstream ready
+   → No buffer overflow
 ```
 
 ### Why This Matters
@@ -590,7 +623,81 @@ pipeline_order = 3        # Downstream (data sink)
 10. All data written, run complete
 ```
 
-## 11. Summary
+## 11. Run History (MongoDB Integration)
+
+### Overview
+
+Run history is persisted to MongoDB for:
+- Multi-client synchronization (next_run_number)
+- Run metadata storage (comment, notes, duration)
+- Historical queries (by experiment name)
+
+### Data Model
+
+```rust
+struct RunDocument {
+    run_number: i32,
+    exp_name: String,
+    comment: String,
+    start_time: DateTime<Utc>,
+    end_time: Option<DateTime<Utc>>,
+    status: String,        // "running", "completed", "error", "aborted"
+    duration_secs: Option<i64>,
+    notes: Vec<RunNote>,   // Append-only logbook entries
+    stats: Option<RunStats>,
+}
+
+struct RunNote {
+    time: i64,             // UNIX timestamp in milliseconds
+    text: String,
+}
+```
+
+### API Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/runs/next` | GET | Get next available run number |
+| `/api/runs/current/note` | POST | Add note to current run |
+| `/api/start` | POST | Start run (includes comment) |
+| `/api/stop` | POST | End run (updates status, duration) |
+
+### Start Request with Comment
+
+```typescript
+// Frontend sends comment with start request
+POST /api/start
+{
+  "run_number": 123,
+  "comment": "Beam/target info for this run"
+}
+```
+
+### Comment Auto-fill
+
+Previous run's comment and notes are provided for the next run:
+
+```
+Run N: Comment = "Target A, Beam 10MeV"
+       Notes = ["[10:15] Beam unstable", "[10:30] Recovered"]
+
+Run N+1: Suggested Comment =
+  "Target A, Beam 10MeV
+   ---
+   [10:15] Beam unstable
+   [10:30] Recovered"
+```
+
+### MongoDB Connection
+
+```bash
+# Operator startup with MongoDB
+./target/release/operator --config config.toml \
+    --mongodb-uri "mongodb://user:pass@localhost:27017" \
+    --mongodb-database "delila"
+```
+
+## 12. Summary
 
 | Aspect | Design Choice | Rationale |
 |--------|---------------|-----------|
@@ -601,6 +708,9 @@ pipeline_order = 3        # Downstream (data sink)
 | Heartbeat | Sender + Monitor | Detect failures without polling |
 | Start Sync | Two-phase commit | Hardware synchronization |
 | Pipeline Ordering | `pipeline_order` field | Ensures data integrity at Start/Stop |
+| Sequential Start | Wait for Running | Prevents memory explosion |
+| Run History | MongoDB | Multi-client sync, persistence |
+| Note Timestamp | UNIX ms (i64) | Simple, query-friendly |
 | Error Recovery | Reset to Idle | Clean slate approach |
 | Component ID | type_host_index | Unique, descriptive naming |
 
