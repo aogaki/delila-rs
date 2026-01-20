@@ -42,6 +42,20 @@ describe('OperatorService', () => {
         },
         online: true,
       },
+      {
+        name: 'Recorder',
+        address: 'tcp://localhost:5580',
+        state: 'Running',
+        run_number: 1,
+        metrics: {
+          events_processed: 1950,
+          bytes_transferred: 97500,
+          queue_size: 0,
+          queue_max: 100,
+          event_rate: 195.5,
+        },
+        online: true,
+      },
     ],
     system_state: 'Running',
     experiment_name: 'TestExp',
@@ -100,19 +114,19 @@ describe('OperatorService', () => {
 
     it('should compute components from status', () => {
       service.status.set(mockSystemStatus);
-      expect(service.components().length).toBe(2);
+      expect(service.components().length).toBe(3);
       expect(service.components()[0].name).toBe('Reader-0');
     });
 
-    it('should compute totalEvents from all components', () => {
+    it('should compute totalEvents from Recorder metrics', () => {
       service.status.set(mockSystemStatus);
-      // 1000 + 950 = 1950
+      // Recorder is the authoritative source for total events
       expect(service.totalEvents()).toBe(1950);
     });
 
-    it('should compute totalRate from all components', () => {
+    it('should compute totalRate from Recorder metrics', () => {
       service.status.set(mockSystemStatus);
-      // 100.5 + 95.0 = 195.5
+      // Recorder is the authoritative source for event rate
       expect(service.totalRate()).toBe(195.5);
     });
 
