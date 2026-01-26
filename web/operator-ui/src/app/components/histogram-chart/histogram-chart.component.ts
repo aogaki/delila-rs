@@ -176,7 +176,7 @@ export class HistogramChartComponent implements OnChanges {
     // Always use full histogram range for axis limits (allows zoom out)
     const config = this.histogram?.config;
     const fullXMin = config?.min_value ?? 0;
-    const fullXMax = config?.max_value ?? 65535;
+    const fullXMax = config?.max_value ?? 65536;
 
     // Determine visible X range
     const xMin = this.xRange === 'auto' ? fullXMin : this.xRange.min;
@@ -408,7 +408,7 @@ export class HistogramChartComponent implements OnChanges {
         nameLocation: 'middle',
         nameGap: 25,
         min: 0,
-        max: 65535, // Default, will be updated from histogram config
+        max: 65536, // Default, will be updated from histogram config
       },
       yAxis: {
         type: 'value',

@@ -44,7 +44,7 @@ clap = { version = "4", features = ["derive", "env"] }
 
 # Web API
 axum = "0.7"
-tower-http = { version = "0.5", features = ["cors"] }
+tower-http = { version = "0.5", features = ["cors", "compression-gzip"] }
 
 # Swagger / OpenAPI
 utoipa = { version = "4", features = ["axum_extras"] }

@@ -26,6 +26,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tmq::{subscribe, Context};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
+use tower_http::compression::CompressionLayer;
 use tower_http::cors::{Any, CorsLayer};
 use tracing::{debug, info, warn};
 
@@ -88,9 +89,9 @@ pub struct HistogramConfig {
 impl Default for HistogramConfig {
     fn default() -> Self {
         Self {
-            num_bins: 4096,
+            num_bins: 65536,
             min_value: 0.0,
-            max_value: 65535.0, // 16-bit ADC max
+            max_value: 65536.0, // 1 bin per ADC channel (16-bit)
         }
     }
 }
@@ -560,6 +561,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/waveforms", get(list_waveforms))
         .route("/api/waveforms/:module_id/:channel_id", get(get_waveform))
         .layer(cors)
+        .layer(CompressionLayer::new())
         .with_state(state)
 }
 
@@ -930,9 +932,9 @@ mod tests {
     #[test]
     fn test_histogram_config_default() {
         let config = HistogramConfig::default();
-        assert_eq!(config.num_bins, 4096);
+        assert_eq!(config.num_bins, 65536);
         assert_eq!(config.min_value, 0.0);
-        assert_eq!(config.max_value, 65535.0);
+        assert_eq!(config.max_value, 65536.0);
     }
 
     #[test]
