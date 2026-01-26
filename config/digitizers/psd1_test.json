@@ -1,0 +1,34 @@
+{
+  "digitizer_id": 0,
+  "name": "PSD1 Ch4 Pulser Test (DT5730B)",
+  "firmware": "PSD1",
+  "num_channels": 8,
+  "board": {
+    "record_length": 1024,
+    "waveforms_enabled": false,
+    "extra": {
+      "startmode": "START_MODE_SW",
+      "extras": "TRUE"
+    }
+  },
+  "channel_defaults": {
+    "enabled": "false",
+    "dc_offset": 50.0,
+    "polarity": "Negative",
+    "trigger_threshold": 500,
+    "gate_long_ns": 200,
+    "gate_short_ns": 50,
+    "gate_pre_ns": 30,
+    "extra": {
+      "ch_extras_opt": "EXTRAS_OPT_TT48_FLAGS_FINETT"
+    }
+  },
+  "channel_overrides": {
+    "4": {
+      "enabled": "true",
+      "extra": {
+        "ch_self_trg_enable": "TRUE"
+      }
+    }
+  }
+}

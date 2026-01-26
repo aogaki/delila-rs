@@ -237,7 +237,7 @@ fn test_commands(handle: &CaenHandle) {
 fn test_data_readout(handle: &CaenHandle, decode_enabled: bool) {
     // Step 1: Configure endpoint for RAW data
     println!("  Configuring RAW endpoint...");
-    let endpoint = match handle.configure_endpoint() {
+    let endpoint = match handle.configure_endpoint(true) {
         Ok(ep) => {
             println!("  [OK] Endpoint configured (handle: {})", ep.raw());
             ep

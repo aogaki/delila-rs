@@ -364,6 +364,34 @@ impl CaenHandle {
         CaenError::check(ret)
     }
 
+    /// Read a user register value
+    ///
+    /// # Arguments
+    /// * `address` - Register address (e.g., 0xEF24)
+    ///
+    /// # Note
+    /// This is a low-level operation. Use with caution.
+    pub fn get_user_register(&self, address: u32) -> Result<u32, CaenError> {
+        let mut value: u32 = 0;
+        let ret = unsafe { ffi::CAEN_FELib_GetUserRegister(self.handle, address, &mut value) };
+        CaenError::check(ret)?;
+        Ok(value)
+    }
+
+    /// Write a user register value
+    ///
+    /// # Arguments
+    /// * `address` - Register address (e.g., 0xEF24 for software reset)
+    /// * `value` - Value to write
+    ///
+    /// # Note
+    /// This is a low-level operation. Use with caution.
+    /// Desktop digitizers only: writing any value to 0xEF24 triggers a software reset.
+    pub fn set_user_register(&self, address: u32, value: u32) -> Result<(), CaenError> {
+        let ret = unsafe { ffi::CAEN_FELib_SetUserRegister(self.handle, address, value) };
+        CaenError::check(ret)
+    }
+
     /// Get a sub-handle for a given path
     ///
     /// # Arguments
@@ -429,8 +457,12 @@ impl CaenHandle {
     /// Configure endpoint for RAW data reading
     ///
     /// This sets up the RAW endpoint and returns an EndpointHandle for data reading.
-    /// Follows the C++ pattern from Digitizer2::EndpointConfigure()
-    pub fn configure_endpoint(&self) -> Result<EndpointHandle, CaenError> {
+    /// Follows the C++ pattern from Digitizer1/Digitizer2::EndpointConfigure()
+    ///
+    /// # Arguments
+    /// * `include_n_events` - If true, include N_EVENTS in the read format (DIG2).
+    ///   If false, use DATA + SIZE only (DIG1).
+    pub fn configure_endpoint(&self, include_n_events: bool) -> Result<EndpointHandle, CaenError> {
         // Get endpoint handle
         let ep_handle = self.get_handle("/endpoint/RAW")?;
 
@@ -443,12 +475,21 @@ impl CaenHandle {
         // Get fresh handle for read operations
         let read_data_handle = self.get_handle("/endpoint/RAW")?;
 
-        // Set data format (RAW format with DATA, SIZE, N_EVENTS)
-        let format_json = r#"[
+        // Set data format based on digitizer generation
+        let format_json = if include_n_events {
+            // DIG2 (VX2730 etc.): DATA, SIZE, N_EVENTS
+            r#"[
             {"name": "DATA", "type": "U8", "dim": 1},
             {"name": "SIZE", "type": "SIZE_T", "dim": 0},
             {"name": "N_EVENTS", "type": "U32", "dim": 0}
-        ]"#;
+        ]"#
+        } else {
+            // DIG1 (DT5730 etc.): DATA, SIZE only
+            r#"[
+            {"name": "DATA", "type": "U8", "dim": 1},
+            {"name": "SIZE", "type": "SIZE_T", "dim": 0}
+        ]"#
+        };
 
         let c_format = CString::new(format_json).map_err(|_| CaenError {
             code: -2,

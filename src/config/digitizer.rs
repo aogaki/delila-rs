@@ -520,9 +520,19 @@ impl DigitizerConfig {
         }
 
         if let Some(ref v) = config.polarity {
+            // PSD1 uses register-style enum: POLARITY_NEGATIVE / POLARITY_POSITIVE
+            // PSD2 uses human-friendly: Negative / Positive
+            let polarity_value = match self.firmware {
+                FirmwareType::PSD1 => match v.to_lowercase().as_str() {
+                    "negative" => "POLARITY_NEGATIVE".to_string(),
+                    "positive" => "POLARITY_POSITIVE".to_string(),
+                    _ => v.clone(), // pass through if already register-style
+                },
+                _ => v.clone(),
+            };
             params.push(CaenParameter {
                 path: format!("{}/{}", ch_path, polarity_name),
-                value: v.clone(),
+                value: polarity_value,
             });
         }
 
@@ -833,6 +843,32 @@ mod tests {
         assert!(params
             .iter()
             .any(|p| p.path == "/ch/0..7/par/ch_enabled" && p.value == "TRUE"));
+        assert!(params
+            .iter()
+            .any(|p| p.path == "/ch/0..7/par/ch_polarity" && p.value == "POLARITY_NEGATIVE"));
+    }
+
+    #[test]
+    fn test_psd1_polarity_value_mapping() {
+        // PSD1 maps user-friendly polarity values to register-style enums
+        let mut config = DigitizerConfig::new(0, "Test", FirmwareType::PSD1);
+        config.channel_defaults.polarity = Some("Negative".to_string());
+
+        let params = config.to_caen_parameters();
+        assert!(params
+            .iter()
+            .any(|p| p.path == "/ch/0..7/par/ch_polarity" && p.value == "POLARITY_NEGATIVE"));
+
+        // Also test Positive
+        config.channel_defaults.polarity = Some("Positive".to_string());
+        let params = config.to_caen_parameters();
+        assert!(params
+            .iter()
+            .any(|p| p.path == "/ch/0..7/par/ch_polarity" && p.value == "POLARITY_POSITIVE"));
+
+        // Pass-through for already register-style values
+        config.channel_defaults.polarity = Some("POLARITY_NEGATIVE".to_string());
+        let params = config.to_caen_parameters();
         assert!(params
             .iter()
             .any(|p| p.path == "/ch/0..7/par/ch_polarity" && p.value == "POLARITY_NEGATIVE"));

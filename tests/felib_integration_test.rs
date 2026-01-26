@@ -216,7 +216,7 @@ fn test_configure_endpoint() {
 
     // Configure RAW endpoint for data reading
     let endpoint = handle
-        .configure_endpoint()
+        .configure_endpoint(true)
         .expect("Failed to configure endpoint");
 
     println!(
@@ -234,7 +234,7 @@ fn test_arm_disarm() {
 
     // Configure endpoint first
     let _endpoint = handle
-        .configure_endpoint()
+        .configure_endpoint(true)
         .expect("Failed to configure endpoint");
 
     // Arm acquisition
@@ -261,7 +261,7 @@ fn test_arm_start_stop() {
 
     // Configure endpoint
     let _endpoint = handle
-        .configure_endpoint()
+        .configure_endpoint(true)
         .expect("Failed to configure endpoint");
 
     // Arm
@@ -320,7 +320,7 @@ fn test_read_data_with_test_pulse() {
 
     // Configure endpoint
     let endpoint = handle
-        .configure_endpoint()
+        .configure_endpoint(true)
         .expect("Failed to configure endpoint");
 
     // Arm and start
@@ -394,7 +394,7 @@ fn test_decode_test_pulse_events() {
         .expect("Set width");
 
     // Configure endpoint
-    let endpoint = handle.configure_endpoint().expect("Configure endpoint");
+    let endpoint = handle.configure_endpoint(true).expect("Configure endpoint");
 
     // Create decoder
     let mut decoder = Psd2Decoder::new(Psd2Config {
@@ -624,7 +624,7 @@ fn test_ch4_pulser_signal() {
     }
 
     // Configure endpoint and decoder
-    let endpoint = handle.configure_endpoint().expect("Configure endpoint");
+    let endpoint = handle.configure_endpoint(true).expect("Configure endpoint");
     let mut decoder = Psd2Decoder::new(Psd2Config {
         time_step_ns: 2.0,
         module_id: 0,

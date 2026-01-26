@@ -32,8 +32,8 @@ Web UIからのパラメータ設定、ハードウェア制御、状態監視�
 | VX2745 | DPP-PSD2 | CAEN_FELib | 64 | Future |
 | VX2740 | DPP-PSD2 | CAEN_FELib | 64 | Future |
 | VX2730 | DPP-PHA2 | CAEN_FELib | 32 | Future (CAEN未リリース) |
-| x725 | DPP-PSD1 | CAEN_FELib | 8/16 | Future |
-| x730 | DPP-PSD1 | CAEN_FELib | 8/16 | Future |
+| x725 | DPP-PSD1 | CAEN_FELib | 8/16 | **Planning** |
+| x730 | DPP-PSD1 | CAEN_FELib | 8/16 | **Planning** |
 | x725 | DPP-PHA1 | CAEN_FELib | 8/16 | Future |
 | x730 | DPP-PHA1 | CAEN_FELib | 8/16 | Future |
 | VX1743 | Custom | CAEN Digitizer Library | 16 | Future (※1) |
@@ -44,17 +44,46 @@ Web UIからのパラメータ設定、ハードウェア制御、状態監視�
 
 ### 2.2 Connection Interfaces
 
-| Interface | URL Scheme | Example | Library | Platform |
-|-----------|------------|---------|---------|----------|
-| Ethernet | `dig2://` | `dig2://172.18.4.56` | CAEN_FELib | All (**MVP**) |
-| USB (Direct) | `dig2://` | `dig2://caen.internal/usb/<pid>` | CAEN_FELib | All |
-| Optical (A4818) | `dig1://` | `dig1://caen.internal/usb_a4818?link_num=0` | CAEN_DIG1 | Linux/Windows |
-| Optical (A3818) | `dig1://` | `dig1://caen.internal/pcie_a3818?link_num=0` | CAEN_DIG1 | Linux/Windows (PCIe) |
+FELibは2層構造で、スキームによって使用ライブラリが異なる（GD9764 Rev.2 参照）:
+- **`dig2://`** → CAEN Dig2 ライブラリ（Digitizer 2.0: x27xx系）
+- **`dig1://`** → CAEN Dig1 ライブラリ（Digitizer 1.0: x17xx, DT57xx系）
+
+#### DIG2 接続（Digitizer 2.0: x2730, x2740, x2745）
+
+| Interface | URL Example | Notes |
+|-----------|------------|-------|
+| Ethernet (IPv4) | `dig2://172.18.4.56` | **MVP** - IP直指定推奨 |
+| Ethernet (IPv6) | `dig2://[2001:db8::1]` | |
+| Ethernet (mDNS) | `dig2://caendgtz-eth-<pid>` | OS依存（Linuxは`.local`要） |
+| USB 3.0 | `dig2://caendgtz-usb-<pid>` | `<pid>` = シリアル番号 |
+| USB 3.0 (alt) | `dig2://caen.internal/usb/<pid>` | 同上、別形式 |
+| OpenARM (embedded) | `dig2://caen.internal/openarm` | Docker内部IP 172.17.0.1 相当 |
+
+#### DIG1 接続（Digitizer 1.0: x725, x730, DT5730 等）
+
+authorityは `/eth_v4718` 以外すべて `caen.internal`。
+
+| Interface | URL Example | Notes |
+|-----------|------------|-------|
+| USB (Direct) | `dig1://caen.internal/usb?link_num=<num>` | USB 2.0直結 |
+| Optical Link | `dig1://caen.internal/optical_link?link_num=<num>` | CONET2（A3818等） |
+| USB A4818 | `dig1://caen.internal/usb_a4818?link_num=<pid>` | USB-CONET2ブリッジ |
+| A4818 + V2718 | `dig1://caen.internal/usb_a4818_v2718?link_num=<pid>&conet_node=<n>&vme_base_address=<addr>` | VME経由 |
+| A4818 + V3718 | `dig1://caen.internal/usb_a4818_v3718?...` | VME経由 |
+| A4818 + V4718 | `dig1://caen.internal/usb_a4818_v4718?...` | VME経由 |
+| ETH V4718 | `dig1://<IP>/eth_v4718` | authorityはV4718のIP |
+| USB V4718 | `dig1://caen.internal/usb_v4718?link_num=<pid>` | |
+
+**クエリパラメータ（dig1）:**
+- `link_num=<num>` — リンク番号（A4818/USB V4718ではPID）
+- `conet_node=<num>` — CONETノード番号
+- `vme_base_address=<addr>` — VMEベースアドレス（例: `0x32100000`）
+
+**接続制限:** 同一ホスト名への接続は1つのみ。別インスタンスからOpenすると既存接続を強制切断。
 
 **開発・テスト方針:**
-- **MVP開発 (Mac):** Ethernet接続 (`dig2://`) を使用
-- **A4818テスト:** Linux/Windowsマシンで実施（CAEN_DIG1ライブラリ必須）
-- **理由:** CAEN_DIG1ライブラリはMac非対応（Linux/Windows用バイナリのみ提供）
+- **MVP開発:** Ethernet接続 (`dig2://`) + USB接続 (`dig1://`, `dig2://`) を使用
+- **Optical link:** Linux/Windowsマシンで実施（CAEN_DIG1ライブラリ必須）
 
 ### 2.3 Scale
 
@@ -540,6 +569,7 @@ interface DigitizerStatus {
   - `a00101.html` - Supported Commands
   - `a00102.html` - Supported Endpoints (Raw, DPPPSD, Stats)
   - `a00103.html` - Supported Parameters (全パラメータ詳細)
+- **PSD1 Decoder Specification:** `docs/psd1_decoder_spec.md`
 - CAEN FELib User Guide: `legacy/GD9764_FELib_User_Guide.pdf`
 - DELILA2 C++ Implementation (`DELILA2/PSD2.conf`, `DELILA2/PSD1.conf`)
 - DevTree JSON examples: `docs/devtree_examples/`

@@ -9,7 +9,7 @@ Claudeセッション開始時に必ず読み込まれます。
 
 ## ~~最優先: PSD2 デコーダ バグフィックス~~ ✅ 完了 (2026-01-26)
 
-**Linux移行後の実機検証で発見されたバグ** → `TODO/00_psd2_decoder_bugfix.md`
+**Linux移行後の実機検証で発見されたバグ** → `TODO/archive/phase3_psd_decoders/00_psd2_decoder_bugfix.md`
 
 C++ リファレンス (`external/caen-dig2/src/endpoints/dpppsd.cpp`) との比較で
 以下の重大バグを確認:
@@ -47,9 +47,28 @@ C++ リファレンス (`external/caen-dig2/src/endpoints/dpppsd.cpp`) との比
 
 ---
 
+## ~~PSD1 デコーダ実装~~ ✅ 全Phase完了 (2026-01-26)
+
+**仕様書:** `docs/psd1_decoder_spec.md`
+**実装計画:** `TODO/archive/phase3_psd_decoders/17_psd1_decoder_implementation.md`
+**ハードウェア:** DT5730B (Serial: 990, DPP-PSD1, USB, 8ch, 14-bit, 500 MS/s)
+
+### Phase 1: デコーダコア ✅ → Phase 2: Reader統合 ✅ → Phase 3: 実機検証 ✅
+
+**Phase 1 完了 (2026-01-26):** 46 テスト pass, Board/Channel/Event の 3 層デコーダ実装
+**Phase 2 完了 (2026-01-26):** DecoderKind enum dispatch, from_config() mapping, Arm=Start 対応
+**Phase 3 完了 (2026-01-26):** 実機検証成功 — 14/14 パラメータ適用, ~10.4k evt/s, ヒストグラム表示確認
+
+Phase 3 で修正した主な課題:
+1. DIG1 endpoint: DATA+SIZE のみ (N_EVENTS 除外)
+2. START_MODE_SW: Arm コマンドを Start フェーズで実行
+3. Watch channel 状態スキップ: `(_, Running)` パターンで対応
+4. PSD1 パラメータ値フォーマット: ポラリティ/extras/self_trg の値マッピング
+
+---
+
 ## 次のセッション
 
-- Phase 5 残り: PSD1 対応
 - Phase 6: Web UI Settings (Angular UI からデジタイザパラメータ変更)
 - Phase 10: Angular UI の rust-embed 統合 (現在は `ng serve` で別途起動が必要)
 
@@ -59,8 +78,7 @@ C++ リファレンス (`external/caen-dig2/src/endpoints/dpppsd.cpp`) との比
 
 | Priority | File | Status | Summary |
 |----------|------|--------|---------|
-| **P0** | [00_psd2_decoder_bugfix.md](00_psd2_decoder_bugfix.md) | **Completed** | PSD2 デコーダ重大バグ修正 (single-word event, special event, STOP signal, flags mask, waveform) |
-| **1** | [15_digitizer_implementation.md](15_digitizer_implementation.md) | **In Progress** | VX2730 (PSD2) 実機デジタイザ実装 |
+| 1 | [15_digitizer_implementation.md](15_digitizer_implementation.md) | **In Progress** | VX2730 (PSD2) 実機デジタイザ実装 |
 | 2 | [11_operator_web_ui.md](11_operator_web_ui.md) | **In Progress** | Operator Web UI (Angular + Material) |
 | - | [16_linux_migration_checklist.md](16_linux_migration_checklist.md) | Reference | Linux移行チェックリスト |
 
@@ -79,7 +97,7 @@ C++ リファレンス (`external/caen-dig2/src/endpoints/dpppsd.cpp`) との比
 | 2 | DevTree Read/Write | ✅ Complete |
 | 3 | Config Storage & Apply (MongoDB) | ✅ Complete |
 | 4 | Data Acquisition | ✅ Complete |
-| 5 | Reader + Master/Slave + PSD1 | ⏳ In Progress (Master/Slave ✅) ← **MVP完了ライン** |
+| 5 | Reader + Master/Slave + PSD1 | ✅ Complete (Master/Slave ✅, PSD1 全Phase ✅) ← **MVP完了ライン** |
 | 6 | Web UI Settings | Pending |
 | 7 | Future (Templates, Monitoring) | Future |
 
@@ -103,6 +121,7 @@ C++ リファレンス (`external/caen-dig2/src/endpoints/dpppsd.cpp`) との比
 - PSD2 デコーダ バグフィックス (single-word event, special event, STOP signal, flags, waveform)
 - PSD2 実機動作確認 (VX2730, ch4 パルサー 10kHz)
 - ヒストグラム表示修正 (max-value downsampling for sub-pixel bar rendering)
+- PSD1 デコーダ実装 + Reader統合 + DT5730B 実機検証 (10kHz パルサー, 全パラメータ適用成功)
 
 ---
 
@@ -114,14 +133,15 @@ C++ リファレンス (`external/caen-dig2/src/endpoints/dpppsd.cpp`) との比
 | `archive/phase1_components/` | CLIリファクタリング、CAEN FFI、Monitor、Merger |
 | `archive/phase1_control_system/` | コントロールシステム設計 |
 | `archive/phase2_infrastructure/` | タイムスタンプソート、Metrics API、Source設定管理 |
+| `archive/phase3_psd_decoders/` | PSD2 バグフィックス、PSD1 デコーダ実装+実機検証 |
 
 ---
 
 ## Notes
 
 - **MVP目標:** 2026年3月中旬
-- **現在のフェーズ:** PSD2 実機動作確認済み → Web UI 統合 / PSD1 対応
-- **実機確認済み:** VX2730 (Serial: 52622, DPP_PSD, 32ch, 14-bit, 500MS/s)
+- **現在のフェーズ:** PSD2 実機動作確認済み / PSD1 全Phase完了 (デコーダ+Reader統合+実機検証)
+- **実機確認済み:** VX2730 (Serial: 52622, DPP_PSD2, 32ch), DT5730B (Serial: 990, DPP_PSD1, 8ch, USB)
 - **動作環境:** Linux (Ubuntu, Rust 1.93.0) - Mac から移行済み
 
 ## Reference Documents

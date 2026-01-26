@@ -10,7 +10,9 @@ pub mod decoder;
 
 // Re-exports
 pub use caen::{CaenError, CaenHandle, EndpointHandle};
-pub use decoder::{DataType, DecodeResult, EventData, Psd2Config, Psd2Decoder, Waveform};
+pub use decoder::{
+    DataType, DecodeResult, EventData, Psd1Config, Psd1Decoder, Psd2Config, Psd2Decoder, Waveform,
+};
 
 use crate::common::{
     handle_command, run_command_task, CommandHandlerExt, ComponentSharedState, ComponentState,
@@ -54,10 +56,32 @@ pub enum ReaderError {
 pub enum FirmwareType {
     /// PSD2 firmware (x27xx series, 64-bit words)
     Psd2,
-    /// PSD1 firmware (x725/x730, 32-bit words) - not yet implemented
+    /// PSD1 firmware (x725/x730, 32-bit words)
     Psd1,
     /// PHA1 firmware - not yet implemented
     Pha1,
+}
+
+/// Enum-based decoder dispatch (KISS: only PSD1/PSD2/PHA1, no trait object needed)
+enum DecoderKind {
+    Psd2(Psd2Decoder),
+    Psd1(Psd1Decoder),
+}
+
+impl DecoderKind {
+    fn classify(&self, raw: &decoder::RawData) -> DataType {
+        match self {
+            Self::Psd2(d) => d.classify(raw),
+            Self::Psd1(d) => d.classify(raw),
+        }
+    }
+
+    fn decode(&mut self, raw: &decoder::RawData) -> Vec<decoder::EventData> {
+        match self {
+            Self::Psd2(d) => d.decode(raw),
+            Self::Psd1(d) => d.decode(raw),
+        }
+    }
 }
 
 /// Reader configuration
@@ -113,12 +137,20 @@ impl ReaderConfig {
         let source = config.get_source(source_id)?;
         let url = source.digitizer_url.as_ref()?;
 
+        let firmware = match source.source_type {
+            crate::config::SourceType::Psd2 => FirmwareType::Psd2,
+            crate::config::SourceType::Psd1 => FirmwareType::Psd1,
+            crate::config::SourceType::Pha1 => FirmwareType::Pha1,
+            // Emulator/Zle sources shouldn't create a Reader — caller should handle
+            _ => return None,
+        };
+
         Some(Self {
             url: url.clone(),
             data_address: source.bind.clone(),
             command_address: source.command_address(),
             source_id,
-            firmware: FirmwareType::Psd2, // Currently only PSD2 is supported
+            firmware,
             module_id: source.module_id.unwrap_or(source_id as u8),
             read_timeout_ms: 100,
             buffer_size: 1024 * 1024, // 1MB
@@ -372,7 +404,9 @@ impl Reader {
         info!("Connected to digitizer");
 
         // Configure endpoint for RAW data
-        let endpoint = handle.configure_endpoint()?;
+        // DIG1 (PSD1/PHA1): DATA + SIZE only; DIG2 (PSD2): DATA + SIZE + N_EVENTS
+        let include_n_events = config.firmware == FirmwareType::Psd2;
+        let endpoint = handle.configure_endpoint(include_n_events)?;
         info!("Endpoint configured");
 
         // Track digitizer hardware state
@@ -425,17 +459,73 @@ impl Reader {
                     // Arm digitizer when entering Armed state
                     (_, ComponentState::Armed) => {
                         if !hw_armed {
-                            info!("Arming digitizer");
-                            handle.send_command("/cmd/armacquisition")?;
+                            match config.firmware {
+                                FirmwareType::Psd1 | FirmwareType::Pha1 => {
+                                    // DIG1: Check startmode parameter
+                                    // For START_MODE_SW, defer arm command to Start
+                                    let startmode = handle
+                                        .get_value("/par/startmode")
+                                        .unwrap_or_default();
+                                    if startmode == "START_MODE_SW" {
+                                        info!(
+                                            "START_MODE_SW detected - deferring arm to Start"
+                                        );
+                                    } else {
+                                        info!("Arming digitizer (DIG1, mode={})", startmode);
+                                        handle.send_command("/cmd/armacquisition")?;
+                                    }
+                                }
+                                FirmwareType::Psd2 => {
+                                    info!("Arming digitizer (PSD2)");
+                                    handle.send_command("/cmd/armacquisition")?;
+                                }
+                            }
                             hw_armed = true;
                         }
                     }
 
                     // Start acquisition when entering Running state
-                    (ComponentState::Armed, ComponentState::Running) => {
-                        if hw_armed && !hw_running {
-                            info!("Starting digitizer acquisition");
-                            handle.send_command("/cmd/swstartacquisition")?;
+                    // Use (_, Running) to handle both Armed→Running and
+                    // Configured→Running (when watch channel misses Armed state)
+                    (_, ComponentState::Running) => {
+                        if !hw_running {
+                            // Arm if not yet armed (handles skipped Armed state)
+                            if !hw_armed {
+                                match config.firmware {
+                                    FirmwareType::Psd1 | FirmwareType::Pha1 => {
+                                        let startmode = handle
+                                            .get_value("/par/startmode")
+                                            .unwrap_or_default();
+                                        if startmode != "START_MODE_SW" {
+                                            info!("Arming digitizer (DIG1, mode={})", startmode);
+                                            handle.send_command("/cmd/armacquisition")?;
+                                        }
+                                    }
+                                    FirmwareType::Psd2 => {
+                                        info!("Arming digitizer (PSD2)");
+                                        handle.send_command("/cmd/armacquisition")?;
+                                    }
+                                }
+                                hw_armed = true;
+                            }
+                            // Start acquisition
+                            match config.firmware {
+                                FirmwareType::Psd2 => {
+                                    info!("Starting digitizer acquisition (PSD2)");
+                                    handle.send_command("/cmd/swstartacquisition")?;
+                                }
+                                FirmwareType::Psd1 | FirmwareType::Pha1 => {
+                                    let startmode = handle
+                                        .get_value("/par/startmode")
+                                        .unwrap_or_default();
+                                    if startmode == "START_MODE_SW" {
+                                        info!("Starting acquisition (DIG1, START_MODE_SW)");
+                                        handle.send_command("/cmd/armacquisition")?;
+                                    } else {
+                                        info!("DIG1 acquisition already started on Arm");
+                                    }
+                                }
+                            }
                             hw_running = true;
                         }
                     }
@@ -533,12 +623,15 @@ impl Reader {
                     module_id: config.module_id,
                     dump_enabled: false,
                 };
-                Psd2Decoder::new(psd2_config)
+                DecoderKind::Psd2(Psd2Decoder::new(psd2_config))
             }
             FirmwareType::Psd1 => {
-                return Err(ReaderError::Config(
-                    "PSD1 decoder not yet implemented".to_string(),
-                ));
+                let psd1_config = Psd1Config {
+                    time_step_ns: config.time_step_ns,
+                    module_id: config.module_id,
+                    dump_enabled: false,
+                };
+                DecoderKind::Psd1(Psd1Decoder::new(psd1_config))
             }
             FirmwareType::Pha1 => {
                 return Err(ReaderError::Config(
@@ -813,6 +906,69 @@ mod tests {
         assert_eq!(timestamp_ns, 1234567.0);
         assert_eq!(flags, 0x01);
         assert!(minimal.waveform.is_none());
+    }
+
+    #[test]
+    fn test_from_config_psd2_maps_firmware() {
+        let toml = r#"
+            [[network.sources]]
+            id = 0
+            type = "psd2"
+            bind = "tcp://*:5555"
+            digitizer_url = "dig2://172.18.4.56"
+
+            [network.merger]
+            subscribe = ["tcp://localhost:5555"]
+            publish = "tcp://*:5557"
+
+            [network.recorder]
+            subscribe = "tcp://localhost:5557"
+        "#;
+        let config = crate::config::Config::from_toml(toml).unwrap();
+        let reader_config = ReaderConfig::from_config(&config, 0).unwrap();
+        assert_eq!(reader_config.firmware, FirmwareType::Psd2);
+    }
+
+    #[test]
+    fn test_from_config_psd1_maps_firmware() {
+        let toml = r#"
+            [[network.sources]]
+            id = 0
+            type = "psd1"
+            bind = "tcp://*:5555"
+            digitizer_url = "dig1://caen.internal/usb?link_num=0"
+
+            [network.merger]
+            subscribe = ["tcp://localhost:5555"]
+            publish = "tcp://*:5557"
+
+            [network.recorder]
+            subscribe = "tcp://localhost:5557"
+        "#;
+        let config = crate::config::Config::from_toml(toml).unwrap();
+        let reader_config = ReaderConfig::from_config(&config, 0).unwrap();
+        assert_eq!(reader_config.firmware, FirmwareType::Psd1);
+    }
+
+    #[test]
+    fn test_from_config_emulator_returns_none() {
+        let toml = r#"
+            [[network.sources]]
+            id = 0
+            type = "emulator"
+            bind = "tcp://*:5555"
+            digitizer_url = "dig2://172.18.4.56"
+
+            [network.merger]
+            subscribe = ["tcp://localhost:5555"]
+            publish = "tcp://*:5557"
+
+            [network.recorder]
+            subscribe = "tcp://localhost:5557"
+        "#;
+        let config = crate::config::Config::from_toml(toml).unwrap();
+        // Emulator sources should NOT create a ReaderConfig
+        assert!(ReaderConfig::from_config(&config, 0).is_none());
     }
 
     #[test]
