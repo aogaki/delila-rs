@@ -1,33 +1,57 @@
 # Current Sprint - TODO Index
 
-**Updated:** 2026-01-23
+**Updated:** 2026-01-26
 
 このファイルは現在のスプリントの概要を示すインデックスです。
 Claudeセッション開始時に必ず読み込まれます。
 
 ---
 
-## 次回セッション (月曜日)
+## ~~最優先: PSD2 デコーダ バグフィックス~~ ✅ 完了 (2026-01-26)
 
-**PSD2動作確認** - PSD1実装前の検証
+**Linux移行後の実機検証で発見されたバグ** → `TODO/00_psd2_decoder_bugfix.md`
 
-```bash
-# 1. 実機用設定に切り替え
-cp config/config_psd2_real.toml config.toml
+C++ リファレンス (`external/caen-dig2/src/endpoints/dpppsd.cpp`) との比較で
+以下の重大バグを確認:
 
-# 2. DAQ起動
-./scripts/start_daq.sh
+1. **[P0] Single-word event 未対応** - 高レート時にデコーダがデシンクしてデータ全損
+2. **[P0] Special event 未フィルタ** - 統計イベントが物理データに混入
+3. **[P1] STOP シグナル無視** - ハードウェア停止が検出されない
+4. **[P2] FLAGS マスク誤り** - flag_low_priority が 11bit (正しくは 12bit)
+5. **[P2] Waveform 欠落** - convert_event() が波形データを落としている
 
-# 3. 状態確認
-curl http://localhost:8080/api/status | jq
-```
+**実機確認済み:**
+- ハードウェア接続: OK (VX2730, dig2://172.18.4.56)
+- データ読み出し: OK (9000イベント/テスト)
+- タイムスタンプ: 正常 (10μs間隔)
+- energy=0: ゲートパラメータ未設定が原因 (psd2_test.json 適用で解消見込み)
 
-4. Swagger UI (`http://localhost:8080/swagger-ui/`) でパラメータ変更テスト
-5. データ取得が正常に動作するか確認
+---
+
+## ~~PSD2 実機動作確認~~ ✅ 完了 (2026-01-26)
+
+- DAQフルパイプライン動作確認: Reader → Merger → Recorder → Monitor (10kHz)
+- Operator REST API 経由で Configure → Arm → Start → Running 遷移
+- ch4 パルサー信号でヒストグラム表示確認 (energy ≈ 34, bin[2])
+- Angular UI (port 4200) + Monitor API (port 8081) 動作確認
+
+**ヒストグラム表示バグ修正** (2026-01-26):
+- bin[2] (16.7Mカウント) がチャート上で欠落する問題を修正
+- 原因: 4096バーをサブピクセル幅 (~0.2px) で描画 → ECharts large-mode で隣接バーに上書きされピーク消失
+- 対策: max-value ダウンサンプリング (ROOT TH1::Draw() と同じアプローチ) + largeThreshold 引き上げ
+- 修正ファイル: `web/operator-ui/src/app/components/histogram-chart/histogram-chart.component.ts`
 
 **設定ファイル:**
-- `config/config_psd2_real.toml` - 実機テスト用 (TestPulse trigger)
-- `config/digitizers/psd2_test.json` - デジタイザ設定
+- `config/config_psd2_test.toml` - 実機テスト用 (ChSelfTrigger)
+- `config/digitizers/psd2_test.json` - デジタイザ設定 (ch4有効, threshold=1000)
+
+---
+
+## 次のセッション
+
+- Phase 5 残り: PSD1 対応
+- Phase 6: Web UI Settings (Angular UI からデジタイザパラメータ変更)
+- Phase 10: Angular UI の rust-embed 統合 (現在は `ng serve` で別途起動が必要)
 
 ---
 
@@ -35,6 +59,7 @@ curl http://localhost:8080/api/status | jq
 
 | Priority | File | Status | Summary |
 |----------|------|--------|---------|
+| **P0** | [00_psd2_decoder_bugfix.md](00_psd2_decoder_bugfix.md) | **Completed** | PSD2 デコーダ重大バグ修正 (single-word event, special event, STOP signal, flags mask, waveform) |
 | **1** | [15_digitizer_implementation.md](15_digitizer_implementation.md) | **In Progress** | VX2730 (PSD2) 実機デジタイザ実装 |
 | 2 | [11_operator_web_ui.md](11_operator_web_ui.md) | **In Progress** | Operator Web UI (Angular + Material) |
 | - | [16_linux_migration_checklist.md](16_linux_migration_checklist.md) | Reference | Linux移行チェックリスト |
@@ -75,6 +100,9 @@ curl http://localhost:8080/api/status | jq
 - MongoDB統合 (Run履歴、Comment永続化、Notes logbook)
 - Source Config Management (SourceType enum, config_file, RuntimeConfig)
 - Metrics API + RateTracker
+- PSD2 デコーダ バグフィックス (single-word event, special event, STOP signal, flags, waveform)
+- PSD2 実機動作確認 (VX2730, ch4 パルサー 10kHz)
+- ヒストグラム表示修正 (max-value downsampling for sub-pixel bar rendering)
 
 ---
 
@@ -92,8 +120,9 @@ curl http://localhost:8080/api/status | jq
 ## Notes
 
 - **MVP目標:** 2026年3月中旬
-- **現在のフェーズ:** デジタイザ実機実装
-- **実機確認済み:** VX2730 (Serial: 52622, DPP_PSD, 32ch, 14-bit)
+- **現在のフェーズ:** PSD2 実機動作確認済み → Web UI 統合 / PSD1 対応
+- **実機確認済み:** VX2730 (Serial: 52622, DPP_PSD, 32ch, 14-bit, 500MS/s)
+- **動作環境:** Linux (Ubuntu, Rust 1.93.0) - Mac から移行済み
 
 ## Reference Documents
 

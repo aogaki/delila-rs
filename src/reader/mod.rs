@@ -14,7 +14,7 @@ pub use decoder::{DataType, DecodeResult, EventData, Psd2Config, Psd2Decoder, Wa
 
 use crate::common::{
     handle_command, run_command_task, CommandHandlerExt, ComponentSharedState, ComponentState,
-    EventData as CommonEventData, EventDataBatch, Message,
+    EventData as CommonEventData, EventDataBatch, Message, Waveform as CommonWaveform,
 };
 use futures::SinkExt;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -285,14 +285,35 @@ impl Reader {
 
     /// Convert EventData to CommonEventData
     fn convert_event(event: &EventData) -> CommonEventData {
-        CommonEventData::new(
-            event.module,
-            event.channel,
-            event.energy,
-            event.energy_short,
-            event.timestamp_ns,
-            event.flags as u64,
-        )
+        if let Some(ref wf) = event.waveform {
+            CommonEventData::with_waveform(
+                event.module,
+                event.channel,
+                event.energy,
+                event.energy_short,
+                event.timestamp_ns,
+                event.flags as u64,
+                CommonWaveform {
+                    analog_probe1: wf.analog_probe1.clone(),
+                    analog_probe2: wf.analog_probe2.clone(),
+                    digital_probe1: wf.digital_probe1.clone(),
+                    digital_probe2: wf.digital_probe2.clone(),
+                    digital_probe3: wf.digital_probe3.clone(),
+                    digital_probe4: wf.digital_probe4.clone(),
+                    time_resolution: wf.time_resolution,
+                    trigger_threshold: wf.trigger_threshold,
+                },
+            )
+        } else {
+            CommonEventData::new(
+                event.module,
+                event.channel,
+                event.energy,
+                event.energy_short,
+                event.timestamp_ns,
+                event.flags as u64,
+            )
+        }
     }
 
     /// Publish a message via ZMQ
@@ -791,5 +812,40 @@ mod tests {
         assert_eq!(energy_short, 800);
         assert_eq!(timestamp_ns, 1234567.0);
         assert_eq!(flags, 0x01);
+        assert!(minimal.waveform.is_none());
+    }
+
+    #[test]
+    fn test_convert_event_with_waveform() {
+        let wf = Waveform {
+            analog_probe1: vec![100, 200, -300],
+            analog_probe2: vec![10, 20, -30],
+            digital_probe1: vec![1, 0, 1],
+            digital_probe2: vec![0, 1, 0],
+            digital_probe3: vec![1, 1, 0],
+            digital_probe4: vec![0, 0, 1],
+            time_resolution: 2,
+            trigger_threshold: 500,
+        };
+
+        let event = EventData {
+            timestamp_ns: 999.0,
+            module: 0,
+            channel: 3,
+            energy: 2000,
+            energy_short: 1500,
+            fine_time: 100,
+            flags: 0x00,
+            waveform: Some(wf),
+        };
+
+        let converted = Reader::convert_event(&event);
+        assert!(converted.waveform.is_some(), "Waveform should be preserved");
+        let cwf = converted.waveform.unwrap();
+        assert_eq!(cwf.analog_probe1, vec![100, 200, -300]);
+        assert_eq!(cwf.analog_probe2, vec![10, 20, -30]);
+        assert_eq!(cwf.digital_probe1, vec![1, 0, 1]);
+        assert_eq!(cwf.time_resolution, 2);
+        assert_eq!(cwf.trigger_threshold, 500);
     }
 }

@@ -182,9 +182,13 @@ export class HistogramChartComponent implements OnChanges {
     const xMin = this.xRange === 'auto' ? fullXMin : this.xRange.min;
     const xMax = this.xRange === 'auto' ? fullXMax : this.xRange.max;
 
-    // Y axis: calculate max within visible X range
+    // Y axis: calculate max within visible X range (use full-resolution data)
     const maxInRange = this.getMaxCountInRange(xMin, xMax);
     const yMax = this.yRange === 'auto' ? maxInRange * 1.1 : this.yRange.max;
+
+    // Downsample for display: max-pool bins that map to the same pixel
+    // This prevents sub-pixel bars from hiding peaks (same approach as ROOT TH1)
+    const displayData = this.downsampleForDisplay(data, xMin, xMax);
 
     // Y axis label formatter - different for log vs linear
     const yAxisFormatter = this.logScale
@@ -209,7 +213,7 @@ export class HistogramChartComponent implements OnChanges {
     const mergeOpts: EChartsCoreOption = {
       series: [
         {
-          data: data,
+          data: displayData,
         },
         // Fit curve series (empty if no fit)
         {
@@ -311,6 +315,43 @@ export class HistogramChartComponent implements OnChanges {
     return maxCount || 100;
   }
 
+  /**
+   * Downsample histogram data for display using max-value aggregation.
+   * When bins outnumber available pixels, multiple bins map to the same pixel.
+   * ECharts' large-mode batch rendering can overwrite tall bars with shorter
+   * neighbors. Max-pooling preserves peaks — the same approach ROOT uses
+   * internally for TH1::Draw().
+   */
+  private downsampleForDisplay(
+    data: number[][],
+    xMin: number,
+    xMax: number,
+    maxBars: number = 1024,
+  ): number[][] {
+    // Filter to visible range
+    const visible = data.filter(([x]) => x >= xMin && x <= xMax);
+    if (visible.length <= maxBars) return visible;
+
+    const groupSize = Math.ceil(visible.length / maxBars);
+    const result: number[][] = [];
+
+    for (let i = 0; i < visible.length; i += groupSize) {
+      const end = Math.min(i + groupSize, visible.length);
+      let maxCount = 0;
+      let sumX = 0;
+
+      for (let j = i; j < end; j++) {
+        maxCount = Math.max(maxCount, visible[j][1]);
+        sumX += visible[j][0];
+      }
+
+      // Average x position, max count (preserves peaks)
+      result.push([sumX / (end - i), maxCount]);
+    }
+
+    return result;
+  }
+
   /** Generate fit curve data points (Gaussian + linear background) */
   private generateFitCurve(xMin: number, xMax: number): number[][] {
     if (!this.fitResult) {
@@ -392,7 +433,7 @@ export class HistogramChartComponent implements OnChanges {
             color: '#1976d2',
           },
           large: true,
-          largeThreshold: 500,
+          largeThreshold: 2000,
         },
         {
           type: 'line',

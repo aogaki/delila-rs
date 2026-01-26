@@ -19,14 +19,19 @@ mod constants {
     pub const TOTAL_SIZE_MASK: u64 = 0xFFFFFFFF;
 
     // Event first word
+    pub const LAST_WORD_SHIFT: u32 = 63;
     pub const CHANNEL_SHIFT: u32 = 56;
     pub const CHANNEL_MASK: u64 = 0x7F;
+    pub const SPECIAL_EVENT_SHIFT: u32 = 55;
+    pub const SPECIAL_EVENT_MASK: u64 = 0x1;
     pub const TIMESTAMP_MASK: u64 = 0xFFFFFFFFFFFF;
+    // Single-word event: timestamp is reduced to 32 bits
+    pub const TIMESTAMP_REDUCED_MASK: u64 = 0xFFFFFFFF;
 
     // Event second word
     pub const WAVEFORM_FLAG_SHIFT: u32 = 62;
     pub const FLAGS_LOW_PRIORITY_SHIFT: u32 = 50;
-    pub const FLAGS_LOW_PRIORITY_MASK: u64 = 0x7FF;
+    pub const FLAGS_LOW_PRIORITY_MASK: u64 = 0xFFF; // 12 bits (C++ dpppsd.hpp: flag_low_priority{12})
     pub const FLAGS_HIGH_PRIORITY_SHIFT: u32 = 42;
     pub const FLAGS_HIGH_PRIORITY_MASK: u64 = 0xFF;
     pub const ENERGY_SHORT_SHIFT: u32 = 26;
@@ -65,8 +70,11 @@ mod constants {
     pub const STOP_SIGNAL_TYPE: u64 = 0x3;
     pub const STOP_SIGNAL_SUBTYPE: u64 = 0x2;
 
+    // Single-word event: flag_high is at bits 55:48 of first word (not same as 2nd word position)
+    pub const SINGLE_WORD_FLAG_HIGH_SHIFT: u32 = 48;
+
     // Validation
-    pub const MIN_DATA_SIZE: usize = 3 * WORD_SIZE;
+    pub const MIN_DATA_SIZE: usize = 2 * WORD_SIZE; // header + 1 single-word event minimum
     pub const START_SIGNAL_SIZE: usize = 4 * WORD_SIZE;
     pub const STOP_SIGNAL_SIZE: usize = 3 * WORD_SIZE;
 }
@@ -180,10 +188,9 @@ impl Psd2Decoder {
         while word_index < total_size {
             if let Some(event) = self.decode_event(&raw.data, &mut word_index) {
                 events.push(event);
-            } else {
-                // Failed to decode event, skip remaining
-                break;
             }
+            // None means: special event filtered, or decode error.
+            // In all cases word_index has been advanced, so continue.
         }
 
         // Sort by timestamp
@@ -285,40 +292,88 @@ impl Psd2Decoder {
         true
     }
 
-    /// Decode a single event (2 words + optional waveform)
+    /// Decode a single event from raw data.
+    ///
+    /// Handles three event formats:
+    /// 1. Single-word event (EnDataReduction=True): bit 63 of first word is set
+    /// 2. Special event (EnStatEvents=True): bit 55 of first word is set, filtered out
+    /// 3. Standard 2+ word event: normal physics data
+    ///
+    /// Reference: external/caen-dig2/src/endpoints/dpppsd.cpp decode_hit()
     fn decode_event(&self, data: &[u8], word_index: &mut usize) -> Option<EventData> {
-        // Check bounds for at least 2 words
-        if *word_index + 2 > data.len() / constants::WORD_SIZE {
+        let total_words = data.len() / constants::WORD_SIZE;
+
+        // Need at least 1 word
+        if *word_index >= total_words {
             return None;
         }
 
-        // Read first word (channel and timestamp)
+        // Read first word
         let first_word = self.read_u64(data, *word_index);
         *word_index += 1;
 
-        // Read second word (flags and energy)
+        // Check last_word bit (bit 63) - indicates single-word compressed event
+        let is_last_word = ((first_word >> constants::LAST_WORD_SHIFT) & 0x1) != 0;
+
+        // Extract channel (same position in both formats)
+        let channel = ((first_word >> constants::CHANNEL_SHIFT) & constants::CHANNEL_MASK) as u8;
+
+        if is_last_word {
+            // Single-word event (EnDataReduction=True)
+            // Layout: [63:last=1][62:56 channel][55:48 flag_high][47:16 timestamp_reduced][15:0 energy]
+            return self.decode_single_word_event(first_word, channel);
+        }
+
+        // Standard multi-word event
+        // Check special_event flag (bit 55)
+        let is_special_event = ((first_word >> constants::SPECIAL_EVENT_SHIFT)
+            & constants::SPECIAL_EVENT_MASK)
+            != 0;
+
+        // Extract raw timestamp (48 bits)
+        let raw_timestamp = first_word & constants::TIMESTAMP_MASK;
+
+        // Need second word
+        if *word_index >= total_words {
+            return None;
+        }
+
         let second_word = self.read_u64(data, *word_index);
         *word_index += 1;
 
-        // Extract channel
-        let channel = ((first_word >> constants::CHANNEL_SHIFT) & constants::CHANNEL_MASK) as u8;
+        // Check last_word of second word to see if there are extra words
+        let has_waveform = ((second_word >> constants::WAVEFORM_FLAG_SHIFT) & 0x1) != 0;
+        let mut is_last = ((second_word >> constants::LAST_WORD_SHIFT) & 0x1) != 0;
 
-        // Extract raw timestamp
-        let raw_timestamp = first_word & constants::TIMESTAMP_MASK;
+        // Consume extra words (time_info, counter_info for special events; wave_info for normal)
+        while !is_last {
+            if *word_index >= total_words {
+                break;
+            }
+            let extra_word = self.read_u64(data, *word_index);
+            *word_index += 1;
+            is_last = ((extra_word >> constants::LAST_WORD_SHIFT) & 0x1) != 0;
+        }
 
-        // Extract flags
+        // Filter out special events (statistics data, not physics)
+        if is_special_event {
+            if self.config.dump_enabled {
+                println!("[PSD2] Special event filtered (ch={})", channel);
+            }
+            return None;
+        }
+
+        // Decode standard event from second word
         let flags_low = (second_word >> constants::FLAGS_LOW_PRIORITY_SHIFT)
             & constants::FLAGS_LOW_PRIORITY_MASK;
         let flags_high = (second_word >> constants::FLAGS_HIGH_PRIORITY_SHIFT)
             & constants::FLAGS_HIGH_PRIORITY_MASK;
-        let flags = ((flags_high << 11) | flags_low) as u32;
+        let flags = ((flags_high << 12) | flags_low) as u32;
 
-        // Extract energies
         let energy = (second_word & constants::ENERGY_MASK) as u16;
         let energy_short =
             ((second_word >> constants::ENERGY_SHORT_SHIFT) & constants::ENERGY_SHORT_MASK) as u16;
 
-        // Extract fine time and calculate precise timestamp
         let fine_time =
             ((second_word >> constants::FINE_TIME_SHIFT) & constants::FINE_TIME_MASK) as u16;
         let coarse_time_ns = (raw_timestamp as f64) * self.config.time_step_ns;
@@ -326,8 +381,7 @@ impl Psd2Decoder {
             (fine_time as f64 / constants::FINE_TIME_SCALE) * self.config.time_step_ns;
         let timestamp_ns = coarse_time_ns + fine_time_ns;
 
-        // Check for waveform
-        let has_waveform = ((second_word >> constants::WAVEFORM_FLAG_SHIFT) & 0x1) != 0;
+        // Decode waveform if present
         let waveform = if has_waveform {
             self.decode_waveform(data, word_index)
         } else {
@@ -357,6 +411,47 @@ impl Psd2Decoder {
             fine_time,
             flags,
             waveform,
+        })
+    }
+
+    /// Decode a single-word compressed event (EnDataReduction=True)
+    ///
+    /// Single-word layout (from dpppsd.cpp:244-257):
+    /// ```text
+    /// [63:last=1][62:56 channel][55:48 flag_high_priority][47:16 timestamp_reduced][15:0 energy]
+    /// ```
+    /// No energy_short, fine_time, flags_low, or waveform in this format.
+    fn decode_single_word_event(
+        &self,
+        word: u64,
+        channel: u8,
+    ) -> Option<EventData> {
+        let flags_high = ((word >> constants::SINGLE_WORD_FLAG_HIGH_SHIFT)
+            & constants::FLAGS_HIGH_PRIORITY_MASK) as u32;
+        let timestamp_reduced = (word >> constants::FINE_TIME_SHIFT)
+            & constants::TIMESTAMP_REDUCED_MASK;
+        let energy = (word & constants::ENERGY_MASK) as u16;
+
+        let timestamp_ns = (timestamp_reduced as f64) * self.config.time_step_ns;
+        let flags = flags_high << 12; // high priority only, low priority not available
+
+        if self.config.dump_enabled {
+            println!("--- Single-word Event ---");
+            println!("  Channel:      {}", channel);
+            println!("  Timestamp:    {:.3} ns", timestamp_ns);
+            println!("  Energy:       {}", energy);
+            println!("  Flags (high): 0x{:02x}", flags_high);
+        }
+
+        Some(EventData {
+            timestamp_ns,
+            module: self.config.module_id,
+            channel,
+            energy,
+            energy_short: 0,
+            fine_time: 0,
+            flags,
+            waveform: None,
         })
     }
 
@@ -531,8 +626,8 @@ mod tests {
     fn test_classify_small_data() {
         let decoder = Psd2Decoder::with_defaults();
         let raw = RawData {
-            data: vec![0; 16], // Too small (< 24 bytes = 3 words)
-            size: 16,
+            data: vec![0; 8], // Too small (< 16 bytes = 2 words)
+            size: 8,
             n_events: 0,
         };
         assert_eq!(decoder.classify(&raw), DataType::Unknown);
@@ -541,10 +636,10 @@ mod tests {
     #[test]
     fn test_classify_minimum_size() {
         let decoder = Psd2Decoder::with_defaults();
-        // Exactly 24 bytes (3 words) - minimum for event data
+        // Exactly 16 bytes (2 words) - minimum for single-word event
         let raw = RawData {
-            data: vec![0; 24],
-            size: 24,
+            data: vec![0; 16],
+            size: 16,
             n_events: 0,
         };
         // Not a start/stop signal, so should be Event
@@ -715,7 +810,7 @@ mod tests {
     #[test]
     fn test_constants_word_size() {
         assert_eq!(constants::WORD_SIZE, 8);
-        assert_eq!(constants::MIN_DATA_SIZE, 24); // 3 * 8
+        assert_eq!(constants::MIN_DATA_SIZE, 16); // 2 * 8
         assert_eq!(constants::START_SIGNAL_SIZE, 32); // 4 * 8
         assert_eq!(constants::STOP_SIGNAL_SIZE, 24); // 3 * 8
     }
@@ -733,6 +828,200 @@ mod tests {
         assert_eq!(constants::START_SIGNAL_SUBTYPE, 0x0);
         assert_eq!(constants::STOP_SIGNAL_TYPE, 0x3);
         assert_eq!(constants::STOP_SIGNAL_SUBTYPE, 0x2);
+    }
+
+    /// Helper: build a big-endian byte vector from u64 words
+    fn words_to_bytes(words: &[u64]) -> Vec<u8> {
+        words.iter().flat_map(|w| w.to_be_bytes()).collect()
+    }
+
+    /// Build a data header word (type=0x2, total_size in 64-bit words)
+    fn make_header(total_words: u32) -> u64 {
+        (0x2u64 << 60) | (total_words as u64)
+    }
+
+    /// Build a standard first word (last=0, channel, timestamp_48bit)
+    fn make_first_word(channel: u8, timestamp: u64) -> u64 {
+        ((channel as u64) << 56) | (timestamp & 0xFFFFFFFFFFFF)
+    }
+
+    /// Build a standard second word
+    fn make_second_word(
+        last_word: bool,
+        has_waveform: bool,
+        flags_low: u16,
+        flags_high: u8,
+        energy_short: u16,
+        fine_time: u16,
+        energy: u16,
+    ) -> u64 {
+        ((last_word as u64) << 63)
+            | ((has_waveform as u64) << 62)
+            | (((flags_low as u64) & 0xFFF) << 50)
+            | ((flags_high as u64) << 42)
+            | ((energy_short as u64) << 26)
+            | (((fine_time as u64) & 0x3FF) << 16)
+            | (energy as u64)
+    }
+
+    /// Build a single-word event (last=1, channel, flag_high, timestamp_reduced, energy)
+    fn make_single_word_event(channel: u8, flag_high: u8, timestamp: u32, energy: u16) -> u64 {
+        (1u64 << 63)
+            | ((channel as u64) << 56)
+            | ((flag_high as u64) << 48)
+            | ((timestamp as u64) << 16)
+            | (energy as u64)
+    }
+
+    /// Build a special event first word (special_event=1)
+    fn make_special_first_word(channel: u8, timestamp: u64) -> u64 {
+        ((channel as u64) << 56) | (1u64 << 55) | (timestamp & 0xFFFFFFFFFFFF)
+    }
+
+    /// Build an extra word (last_word flag, extra_type, extra_data)
+    fn make_extra_word(last_word: bool, extra_type: u8) -> u64 {
+        ((last_word as u64) << 63) | (((extra_type as u64) & 0x7) << 60)
+    }
+
+    #[test]
+    fn test_decode_single_word_event() {
+        let mut decoder = Psd2Decoder::with_defaults();
+
+        // Single-word event: last=1, channel=10, flag_high=0x03, timestamp=5000, energy=2000
+        let data = words_to_bytes(&[
+            make_header(2),                              // header: 2 words total
+            make_single_word_event(10, 0x03, 5000, 2000), // single-word event
+        ]);
+
+        let raw = RawData {
+            size: data.len(),
+            data,
+            n_events: 1,
+        };
+
+        let events = decoder.decode(&raw);
+        assert_eq!(events.len(), 1);
+
+        let event = &events[0];
+        assert_eq!(event.channel, 10);
+        assert_eq!(event.energy, 2000);
+        assert_eq!(event.energy_short, 0); // not available in single-word
+        assert_eq!(event.fine_time, 0); // not available in single-word
+        assert_eq!(event.flags, 0x03 << 12); // high priority shifted by 12
+        assert_eq!(event.timestamp_ns, 5000.0 * 2.0); // timestamp * time_step
+        assert!(event.waveform.is_none());
+    }
+
+    #[test]
+    fn test_decode_special_event_filtered() {
+        let mut decoder = Psd2Decoder::with_defaults();
+
+        // Special event with one extra word (time_info)
+        let data = words_to_bytes(&[
+            make_header(4), // 4 words total
+            make_special_first_word(3, 1000), // special event, channel=3
+            make_second_word(false, false, 0, 0, 0, 0, 0), // 2nd word, last=0
+            make_extra_word(true, 1), // extra: last=1, type=time_info
+        ]);
+
+        let raw = RawData {
+            size: data.len(),
+            data,
+            n_events: 1,
+        };
+
+        let events = decoder.decode(&raw);
+        assert_eq!(events.len(), 0, "Special events should be filtered out");
+    }
+
+    #[test]
+    fn test_decode_special_event_with_following_normal_event() {
+        let mut decoder = Psd2Decoder::with_defaults();
+
+        // Special event followed by a normal event
+        let data = words_to_bytes(&[
+            make_header(6), // 6 words total
+            // Special event (3 words)
+            make_special_first_word(3, 1000),
+            make_second_word(false, false, 0, 0, 0, 0, 0),
+            make_extra_word(true, 1),
+            // Normal event (2 words)
+            make_first_word(5, 2000),
+            make_second_word(true, false, 0, 0, 0, 0, 1500),
+        ]);
+
+        let raw = RawData {
+            size: data.len(),
+            data,
+            n_events: 2,
+        };
+
+        let events = decoder.decode(&raw);
+        assert_eq!(events.len(), 1, "Only normal event should remain");
+        assert_eq!(events[0].channel, 5);
+        assert_eq!(events[0].energy, 1500);
+    }
+
+    #[test]
+    fn test_decode_flags_12bit_mask() {
+        let mut decoder = Psd2Decoder::with_defaults();
+
+        // Event with all 12 flags_low bits set and flags_high = 0xAB
+        let data = words_to_bytes(&[
+            make_header(3),
+            make_first_word(1, 500),
+            make_second_word(true, false, 0xFFF, 0xAB, 100, 50, 3000),
+        ]);
+
+        let raw = RawData {
+            size: data.len(),
+            data,
+            n_events: 1,
+        };
+
+        let events = decoder.decode(&raw);
+        assert_eq!(events.len(), 1);
+
+        let event = &events[0];
+        assert_eq!(event.energy, 3000);
+        assert_eq!(event.energy_short, 100);
+        assert_eq!(event.fine_time, 50);
+
+        // flags = (flags_high << 12) | flags_low = (0xAB << 12) | 0xFFF
+        let expected_flags = (0xABu32 << 12) | 0xFFF;
+        assert_eq!(
+            event.flags, expected_flags,
+            "flags should use 12-bit shift: got 0x{:05x}, expected 0x{:05x}",
+            event.flags, expected_flags
+        );
+    }
+
+    #[test]
+    fn test_decode_mixed_single_and_standard_events() {
+        let mut decoder = Psd2Decoder::with_defaults();
+
+        // Mix: standard event + single-word event
+        let data = words_to_bytes(&[
+            make_header(4),                        // 4 words
+            make_first_word(1, 100),               // standard: 1st word
+            make_second_word(true, false, 0, 0, 0, 0, 500), // standard: 2nd word
+            make_single_word_event(2, 0, 200, 800), // single-word event
+        ]);
+
+        let raw = RawData {
+            size: data.len(),
+            data,
+            n_events: 2,
+        };
+
+        let events = decoder.decode(&raw);
+        assert_eq!(events.len(), 2);
+
+        // Events sorted by timestamp
+        assert_eq!(events[0].channel, 1); // timestamp 100*2=200ns
+        assert_eq!(events[0].energy, 500);
+        assert_eq!(events[1].channel, 2); // timestamp 200*2=400ns
+        assert_eq!(events[1].energy, 800);
     }
 
     #[test]

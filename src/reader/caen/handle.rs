@@ -601,8 +601,12 @@ impl EndpointHandle {
             // Timeout
             Ok(None)
         } else if ret == -12 {
-            // Stop signal (end of run)
-            Ok(None)
+            // Stop signal - propagate as Err so read_loop can detect it
+            Err(CaenError::from_code(ret).unwrap_or(CaenError {
+                code: ret,
+                name: "Stop".to_string(),
+                description: "Acquisition stopped".to_string(),
+            }))
         } else {
             Err(CaenError::from_code(ret).unwrap_or(CaenError {
                 code: ret,

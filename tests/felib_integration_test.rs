@@ -554,3 +554,204 @@ fn test_sync_parameters_readback() {
         println!("  GPIOMode: {}", v);
     }
 }
+
+// =============================================================================
+// ch4 External Pulser Signal Test
+// =============================================================================
+
+/// Test ch4 external pulser signal readout
+///
+/// Expects: ~20ns negative pulse at 10-11 kHz on ch4
+/// Sets ch4 to ChSelfTrigger with appropriate gate settings.
+/// Does NOT set GlobalTriggerSource (avoids TestPulse interference).
+#[test]
+#[ignore = "Requires CAEN hardware"]
+fn test_ch4_pulser_signal() {
+    use delila_rs::reader::decoder::{Psd2Config, Psd2Decoder, RawData};
+
+    let url = get_test_url();
+    let handle = CaenHandle::open(&url).expect("Failed to open device");
+
+    // Disable all channels except ch4
+    for ch in 0..32 {
+        if ch != 4 {
+            let _ = handle.set_value(&format!("/ch/{}/par/ChEnable", ch), "False");
+        }
+    }
+
+    // Configure ch4 for self-trigger on external pulser
+    // NOTE: GlobalTriggerSource is NOT set — avoids TestPulse triggers
+    handle
+        .set_value("/ch/4/par/ChEnable", "True")
+        .expect("Enable ch4");
+    handle
+        .set_value("/ch/4/par/EventTriggerSource", "ChSelfTrigger")
+        .expect("Set ch4 EventTriggerSource to ChSelfTrigger");
+    handle
+        .set_value("/ch/4/par/PulsePolarity", "Negative")
+        .expect("Set ch4 polarity Negative");
+    handle
+        .set_value("/ch/4/par/DCOffset", "50")
+        .expect("Set ch4 DC offset 50%");
+    handle
+        .set_value("/ch/4/par/TriggerThr", "1000")
+        .expect("Set ch4 trigger threshold");
+    handle
+        .set_value("/ch/4/par/GateLongLengthT", "400")
+        .expect("Set ch4 gate long 400ns");
+    handle
+        .set_value("/ch/4/par/GateShortLengthT", "100")
+        .expect("Set ch4 gate short 100ns");
+
+    // Readback key parameters for verification
+    println!("\n=== ch4 Parameter Readback ===");
+    for param in &[
+        "ChEnable",
+        "EventTriggerSource",
+        "PulsePolarity",
+        "DCOffset",
+        "TriggerThr",
+        "GateLongLengthT",
+        "GateShortLengthT",
+    ] {
+        if let Ok(v) = handle.get_value(&format!("/ch/4/par/{}", param)) {
+            println!("  ch4/{}: {}", param, v);
+        }
+    }
+    // Also readback GlobalTriggerSource to confirm it's not TestPulse
+    if let Ok(v) = handle.get_value("/par/globaltriggersource") {
+        println!("  GlobalTriggerSource: {}", v);
+    }
+
+    // Configure endpoint and decoder
+    let endpoint = handle.configure_endpoint().expect("Configure endpoint");
+    let mut decoder = Psd2Decoder::new(Psd2Config {
+        time_step_ns: 2.0,
+        module_id: 0,
+        dump_enabled: false,
+    });
+
+    // Acquire data
+    handle
+        .send_command("/cmd/armacquisition")
+        .expect("Arm");
+    handle
+        .send_command("/cmd/swstartacquisition")
+        .expect("Start");
+
+    // Wait for pulser data to accumulate (~500ms → ~5000-5500 events at 10-11kHz)
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    let mut ch4_events: Vec<delila_rs::reader::decoder::EventData> = Vec::new();
+    let mut other_ch_count = 0u64;
+
+    for _ in 0..30 {
+        match endpoint.read_data(100, 1024 * 1024) {
+            Ok(Some(raw)) => {
+                let decoder_raw = RawData {
+                    data: raw.data,
+                    size: raw.size,
+                    n_events: raw.n_events,
+                };
+                let events = decoder.decode(&decoder_raw);
+                for event in events {
+                    if event.channel == 4 {
+                        ch4_events.push(event);
+                    } else {
+                        other_ch_count += 1;
+                    }
+                }
+            }
+            Ok(None) => {}
+            Err(_) => break,
+        }
+    }
+
+    // Stop acquisition
+    handle
+        .send_command("/cmd/disarmacquisition")
+        .expect("Stop");
+
+    // Analyze results
+    println!("\n=== ch4 Pulser Signal Analysis ===");
+    println!("ch4 events: {}", ch4_events.len());
+    println!("Other channel events: {}", other_ch_count);
+
+    assert!(
+        ch4_events.len() > 100,
+        "Should have >100 ch4 events from 10-11kHz pulser (got {})",
+        ch4_events.len()
+    );
+
+    // Rate calculation
+    if ch4_events.len() >= 2 {
+        let first_ts = ch4_events.first().unwrap().timestamp_ns;
+        let last_ts = ch4_events.last().unwrap().timestamp_ns;
+        let duration_s = (last_ts - first_ts) / 1e9;
+
+        if duration_s > 0.0 {
+            let rate_hz = (ch4_events.len() - 1) as f64 / duration_s;
+            println!("Duration: {:.3} s", duration_s);
+            println!("Rate: {:.1} Hz (expected: 10000-11000 Hz)", rate_hz);
+
+            // Rate should be approximately 10-11 kHz
+            assert!(
+                rate_hz > 5000.0 && rate_hz < 20000.0,
+                "Rate should be ~10-11 kHz, got {:.1} Hz",
+                rate_hz
+            );
+        }
+    }
+
+    // Energy statistics
+    let energies: Vec<u16> = ch4_events.iter().map(|e| e.energy).collect();
+    let energy_shorts: Vec<u16> = ch4_events.iter().map(|e| e.energy_short).collect();
+    let non_zero: Vec<u16> = energies.iter().filter(|&&e| e > 0).cloned().collect();
+
+    let (e_min, e_max) = (
+        energies.iter().min().copied().unwrap_or(0),
+        energies.iter().max().copied().unwrap_or(0),
+    );
+    let avg_energy = if !non_zero.is_empty() {
+        non_zero.iter().map(|&e| e as f64).sum::<f64>() / non_zero.len() as f64
+    } else {
+        0.0
+    };
+    let (es_min, es_max) = (
+        energy_shorts.iter().min().copied().unwrap_or(0),
+        energy_shorts.iter().max().copied().unwrap_or(0),
+    );
+
+    println!("\nEnergy (long gate):");
+    println!(
+        "  min={}, max={}, avg={:.1}, non-zero={}/{}",
+        e_min,
+        e_max,
+        avg_energy,
+        non_zero.len(),
+        energies.len()
+    );
+    println!("Energy short:");
+    println!("  min={}, max={}", es_min, es_max);
+
+    // Timestamp interval analysis (first 20 intervals)
+    println!("\nTimestamp intervals (first 20):");
+    for i in 0..std::cmp::min(20, ch4_events.len().saturating_sub(1)) {
+        let dt = ch4_events[i + 1].timestamp_ns - ch4_events[i].timestamp_ns;
+        println!(
+            "  [{:2}] dt = {:.2} ns ({:.2} us)",
+            i,
+            dt,
+            dt / 1000.0
+        );
+    }
+
+    // Print first 10 events
+    println!("\nFirst 10 events:");
+    for (i, event) in ch4_events.iter().take(10).enumerate() {
+        println!(
+            "  [{}] ch={}, ts={:.2}ns, energy={}, short={}, flags={:#x}",
+            i, event.channel, event.timestamp_ns, event.energy, event.energy_short, event.flags
+        );
+    }
+}
