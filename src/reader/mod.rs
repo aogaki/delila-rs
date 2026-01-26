@@ -83,6 +83,8 @@ pub struct ReaderConfig {
     pub heartbeat_interval_ms: u64,
     /// Time step in nanoseconds (for timestamp calculation)
     pub time_step_ns: f64,
+    /// Path to digitizer configuration JSON file (optional)
+    pub config_file: Option<String>,
 }
 
 impl Default for ReaderConfig {
@@ -98,6 +100,7 @@ impl Default for ReaderConfig {
             buffer_size: 1024 * 1024, // 1MB
             heartbeat_interval_ms: 1000,
             time_step_ns: 2.0, // 500 MHz ADC = 2ns per sample
+            config_file: None,
         }
     }
 }
@@ -121,6 +124,7 @@ impl ReaderConfig {
             buffer_size: 1024 * 1024, // 1MB
             heartbeat_interval_ms: 1000,
             time_step_ns: source.time_step_ns.unwrap_or(2.0),
+            config_file: source.config_file.clone(),
         })
     }
 }
@@ -370,6 +374,33 @@ impl Reader {
                 info!(from = %prev_state, to = %current_state, "State transition");
 
                 match (prev_state, current_state) {
+                    // Configure digitizer when entering Configured state from Idle
+                    (ComponentState::Idle, ComponentState::Configured) => {
+                        // Apply configuration from JSON file if specified
+                        if let Some(ref config_path) = config.config_file {
+                            info!(path = %config_path, "Loading digitizer configuration");
+                            match crate::config::digitizer::DigitizerConfig::load(config_path) {
+                                Ok(dig_config) => {
+                                    match handle.apply_config(&dig_config) {
+                                        Ok(count) => {
+                                            info!(count, "Digitizer configuration applied");
+                                        }
+                                        Err(e) => {
+                                            error!(error = %e, "Failed to apply digitizer configuration");
+                                            // Continue anyway - some parameters may have been applied
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    error!(error = %e, path = %config_path, "Failed to load digitizer configuration");
+                                    // Continue without configuration
+                                }
+                            }
+                        } else {
+                            info!("No config_file specified, using current digitizer settings");
+                        }
+                    }
+
                     // Arm digitizer when entering Armed state
                     (_, ComponentState::Armed) => {
                         if !hw_armed {

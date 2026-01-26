@@ -136,6 +136,13 @@ pub struct RunRepository {
 }
 
 impl RunRepository {
+    /// Create a new repository using an existing MongoDB client
+    pub fn new(client: &Client, database: &str) -> Self {
+        let db = client.database(database);
+        let collection = db.collection::<RunDocument>("runs");
+        Self { collection }
+    }
+
     /// Connect to MongoDB and return a repository instance
     pub async fn connect(uri: &str, database: &str) -> Result<Self, RepositoryError> {
         let options = ClientOptions::parse(uri).await?;

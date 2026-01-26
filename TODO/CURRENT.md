@@ -1,9 +1,33 @@
 # Current Sprint - TODO Index
 
-**Updated:** 2026-01-20
+**Updated:** 2026-01-23
 
 このファイルは現在のスプリントの概要を示すインデックスです。
 Claudeセッション開始時に必ず読み込まれます。
+
+---
+
+## 次回セッション (月曜日)
+
+**PSD2動作確認** - PSD1実装前の検証
+
+```bash
+# 1. 実機用設定に切り替え
+cp config/config_psd2_real.toml config.toml
+
+# 2. DAQ起動
+./scripts/start_daq.sh
+
+# 3. 状態確認
+curl http://localhost:8080/api/status | jq
+```
+
+4. Swagger UI (`http://localhost:8080/swagger-ui/`) でパラメータ変更テスト
+5. データ取得が正常に動作するか確認
+
+**設定ファイル:**
+- `config/config_psd2_real.toml` - 実機テスト用 (TestPulse trigger)
+- `config/digitizers/psd2_test.json` - デジタイザ設定
 
 ---
 
@@ -11,112 +35,70 @@ Claudeセッション開始時に必ず読み込まれます。
 
 | Priority | File | Status | Summary |
 |----------|------|--------|---------|
-| 1 | [11_operator_web_ui.md](11_operator_web_ui.md) | **In Progress** | Operator Web UI (Angular + Material) |
-| 2 | [09_timestamp_sorting_design.md](09_timestamp_sorting_design.md) | **Phase 3完了** | タイムスタンプソートとファイル書き出し |
+| **1** | [15_digitizer_implementation.md](15_digitizer_implementation.md) | **In Progress** | VX2730 (PSD2) 実機デジタイザ実装 |
+| 2 | [11_operator_web_ui.md](11_operator_web_ui.md) | **In Progress** | Operator Web UI (Angular + Material) |
+| - | [16_linux_migration_checklist.md](16_linux_migration_checklist.md) | Reference | Linux移行チェックリスト |
 
 ---
 
-## Current Status: Web UI Sprint (2026-01-20)
+## Digitizer Implementation (2026-01-23~)
 
-### Recently Completed
-- **Refactoring Plan** ✅ (2026-01-19) → `archive/phase1_components/`
-  - Phase 1: CLIパーサー統合 (clap) - 7バイナリ移行、24テスト
-  - Phase 2: 統一メトリクスフレームワーク - metrics.rs、10テスト
-  - Phase 3: エラー型統合 - error.rs、6テスト
-  - Phase 4: 設定構造体共通化 - KISS原則により見送り
-  - Phase 5: シャットダウン機構統一 - shutdown.rs、5バイナリ移行
+**Spec:** `docs/digitizer_system_spec.md`
+**Target:** VX2730 (DPP-PSD2) via Ethernet (`dig2://`)
+
+### Phases
+
+| Phase | Description | Status |
+|-------|-------------|--------|
+| 1 | FELib Connection Layer | ✅ Complete |
+| 2 | DevTree Read/Write | ✅ Complete |
+| 3 | Config Storage & Apply (MongoDB) | ✅ Complete |
+| 4 | Data Acquisition | ✅ Complete |
+| 5 | Reader + Master/Slave + PSD1 | ⏳ In Progress (Master/Slave ✅) ← **MVP完了ライン** |
+| 6 | Web UI Settings | Pending |
+| 7 | Future (Templates, Monitoring) | Future |
+
+### Principles
+- **KISS:** 最小限の抽象化、動くコードを最短経路で
+- **TDD:** テストファーストで実装
+- **Clean Architecture:** 依存は内向き（KISSと競合時はKISS優先）
 
 ---
 
-## Web UI Status (2026-01-20)
+## Completed Features (Summary)
 
-### Recently Completed
-- **Phase 9: 同一pipeline_order並列実行** ✅ (2026-01-20)
-  - 同じorderのコンポーネントを`join_all`で並列実行
-  - Configure, Arm, Start, Stop すべてに適用
-- **Phase 8: Pipeline順序制御** ✅ (2026-01-19)
-  - sequential start（downstream first）
-  - ZMQバッファドレイン修正
-  - メモリ爆発問題解決
-- **Phase 7: Run履歴・Comment永続化** ✅ (2026-01-19)
-  - MongoDB統合（run history）
-  - Comment auto-fill（last run → next run）
-  - Run Notes（logbook機能）
-  - ブラウザリロード時のcomment復元
-- **Phase 6: Waveformタブ** ✅ (2026-01-19)
-  - 波形表示コンポーネント（ECharts）
-  - 複数チャンネル選択、Analog Probe 1/2 トグル
-  - Shift+ホイール: X軸ズーム、Ctrl+ホイール: Y軸ズーム
-  - Y軸固定範囲（±20000 ADC）
-- **Phase 5: グリッド画像保存機能** ✅ (2026-01-19)
-- **Phase 4: Gaussian Fitting** ✅ (2026-01-16)
-
-### In Progress
-- **Operator Web UI** (Angular + Material Design)
-  - DAQ制御フロントエンド
-  - 設計ドキュメント: `docs/architecture/operator_web_ui.md`
-  - **実装済み:**
-    - Monitorサブタブ（検出器ごとに設定を分離）
-    - ヒストグラムグリッド（NxM、範囲保持）
-    - ガウスフィッティング（JavaScript実装）✅
-    - localStorage永続化
-    - Waveformタブ（波形表示）✅
-    - Run履歴・Comment永続化（MongoDB）✅
-    - Pipeline順序制御（sequential start）✅
-    - 同一pipeline_order並列実行 ✅
-
-### Completed Features
-- Emulator + Reader (CAEN FFI) + ZMQ pipeline
+- Emulator + ZMQ pipeline
 - Merger (zero-copy forwarding)
 - Recorder (sorting + file format v2)
-- Monitor (Web UI + REST API)
+- Monitor (Web UI + REST API + ECharts histogram/waveform)
 - Operator (control system + pipeline ordering)
-- Digitizer configuration REST API
-- `delila-recover` CLIツール (クラッシュリカバリ)
-- EOS (End Of Stream) ベースの停止制御
-- **EventData統一** (MinimalEventData廃止、Option<Waveform>対応)
-- **MongoDB統合** (Run履歴、Comment永続化、Notes logbook)
-- **Sequential Start** (downstream first、メモリ爆発防止)
-
----
-
-## Design Decisions Made
-
-| Decision | Choice | Rationale |
-|----------|--------|-----------|
-| Sorting location | Recorder | Mergerは透過的転送に専念 |
-| Margin ratio | 5% | 50Mイベント中2.5M、十分な余裕 |
-| Header format | MsgPack | データ本体と一貫性 |
-| Checksum | xxHash64 | CRC64より高速、十分な衝突耐性 |
-| Intermediate fsync | 削除 | バッチ単位書き込みでは効果なし |
-| Channel type | unbounded | データ欠損よりメモリ使用を優先 |
-| Start/Stop order | pipeline_order | 上流から停止、下流から開始 |
-| Sequential start | wait for Running | メモリ爆発防止、downstream first |
-| Same-order parallel | join_all | 同一pipeline_orderは並列実行で高速化 |
-| Chart library | ECharts | dataZoom、高パフォーマンス |
-| Fitting | JavaScript (LM) | 4096bins/6params は数十ms |
-| Fit UI | Hybrid (grid+modal) | サマリー表示+拡大モードで精密操作 |
-| Monitor subtabs | Nested tabs | 検出器ごとに設定を分離 |
-| State persistence | localStorage | ページリロードでも復元 |
-| Run history | MongoDB | マルチクライアント同期、永続化 |
-| Note timestamp | UNIX timestamp (i64) | BSONシンプル化、クエリ容易 |
+- MongoDB統合 (Run履歴、Comment永続化、Notes logbook)
+- Source Config Management (SourceType enum, config_file, RuntimeConfig)
+- Metrics API + RateTracker
 
 ---
 
 ## Archived
 
-以下のタスクは `TODO/archive/phase1_components/` に移動済み:
-- 06_caen_driver_design.md - CAEN FFIドライバ実装
-- 07_digitizer_config_design.md - デジタイザ設定REST API
-- 07_refactoring_plan.md - リファクタリング計画（旧）
-- 08_monitor_component.md - Monitorコンポーネント
-- 10_zero_copy_merger.md - ゼロコピーMerger
-- **12_refactoring_plan.md** - コードベースリファクタリング（CLI, Metrics, Error, Shutdown）
+| Directory | Contents |
+|-----------|----------|
+| `archive/phase1_basic_pipeline/` | 基本パイプライン設計 |
+| `archive/phase1_components/` | CLIリファクタリング、CAEN FFI、Monitor、Merger |
+| `archive/phase1_control_system/` | コントロールシステム設計 |
+| `archive/phase2_infrastructure/` | タイムスタンプソート、Metrics API、Source設定管理 |
 
 ---
 
 ## Notes
 
 - **MVP目標:** 2026年3月中旬
-- **現在のフェーズ:** Phase 1完了、Phase 2 (CAEN Driver) 実装済み
-- **次のフェーズ:** Phase 3 (File Writer高度機能) + Phase 4 (Web UI拡充)
+- **現在のフェーズ:** デジタイザ実機実装
+- **実機確認済み:** VX2730 (Serial: 52622, DPP_PSD, 32ch, 14-bit)
+
+## Reference Documents
+
+| Document | Location | Priority |
+|----------|----------|----------|
+| **x2730 DPP-PSD CUP Documentation** | `legacy/documentation_2024092000-2/` | ★★★ |
+| FELib User Guide | `legacy/GD9764_FELib_User_Guide.pdf` | ★★ |
+| Digitizer System Spec | `docs/digitizer_system_spec.md` | ★★★ |

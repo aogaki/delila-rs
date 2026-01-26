@@ -5,7 +5,7 @@
 # Options:
 #   --no-mongo    Skip MongoDB/Docker startup
 
-CONFIG_FILE="${1:-config.toml}"
+CONFIG_FILE="config.toml"
 BINARY_DIR="./target/release"
 SKIP_MONGO=false
 
@@ -14,11 +14,9 @@ for arg in "$@"; do
     case $arg in
         --no-mongo)
             SKIP_MONGO=true
-            shift
             ;;
         *.toml)
             CONFIG_FILE="$arg"
-            shift
             ;;
     esac
 done
@@ -119,20 +117,38 @@ else
     echo -e "${YELLOW}Skipping MongoDB check (--no-mongo)${NC}"
 fi
 
-# Function to check if source has digitizer_url
-has_digitizer_url() {
+# Function to get source type (emulator, psd1, psd2, pha1, zle)
+get_source_type() {
     local src_id=$1
-    # Use awk to check if this source ID has a digitizer_url
+    # Use awk to get the type field for this source ID
     awk -v target_id="$src_id" '
-        /^\[\[network\.sources\]\]/ { in_block=1; in_target=0; next }
-        in_block && /^\[/ { in_block=0; in_target=0 }
+        /^\[\[network\.sources\]\]/ {
+            # When entering a new block, if we were in target, print and exit
+            if (in_target) { print src_type; printed=1; exit }
+            in_block=1; in_target=0; src_type="emulator"; next
+        }
+        in_block && /^\[/ {
+            if (in_target) { print src_type; printed=1; exit }
+            in_block=0; in_target=0
+        }
         in_block && /^id *=/ {
             gsub(/[^0-9]/, "", $3)
             if ($3 == target_id) in_target=1
             else in_target=0
         }
-        in_block && in_target && /^digitizer_url *=/ { print "yes"; exit }
+        in_block && in_target && /^type *=/ {
+            gsub(/.*= *"/, "", $0)
+            gsub(/".*/, "", $0)
+            src_type=$0
+        }
+        END { if (in_target && !printed) print src_type }
     ' "$CONFIG_FILE"
+}
+
+# Function to check if source is emulator
+is_emulator() {
+    local src_type=$(get_source_type $1)
+    [ "$src_type" = "emulator" ] || [ -z "$src_type" ]
 }
 
 # Extract source IDs from config
@@ -150,14 +166,15 @@ mkdir -p "$LOG_DIR"
 rm -f ./logs/latest
 ln -sf "${TIMESTAMP}" ./logs/latest
 
-# Start emulators or readers based on config
+# Start emulators or readers based on source type
 for id in $SOURCE_IDS; do
-    if [ "$(has_digitizer_url $id)" = "yes" ]; then
-        echo "  Starting reader (source_id=$id) [digitizer]..."
-        $BINARY_DIR/reader --config "$CONFIG_FILE" --source-id "$id" > "$LOG_DIR/reader_$id.log" 2>&1 &
-    else
+    src_type=$(get_source_type $id)
+    if is_emulator $id; then
         echo "  Starting emulator (source_id=$id)..."
         $BINARY_DIR/emulator --config "$CONFIG_FILE" --source-id "$id" > "$LOG_DIR/emulator_$id.log" 2>&1 &
+    else
+        echo "  Starting reader (source_id=$id) [type=$src_type]..."
+        $BINARY_DIR/reader --config "$CONFIG_FILE" --source-id "$id" > "$LOG_DIR/reader_$id.log" 2>&1 &
     fi
     sleep 0.3
 done
@@ -197,10 +214,11 @@ echo ""
 echo "Command ports:"
 for id in $SOURCE_IDS; do
     port=$((5560 + id))
-    if [ "$(has_digitizer_url $id)" = "yes" ]; then
-        echo "  Reader $id:   tcp://localhost:$port (digitizer)"
-    else
+    src_type=$(get_source_type $id)
+    if is_emulator $id; then
         echo "  Emulator $id: tcp://localhost:$port"
+    else
+        echo "  Reader $id:   tcp://localhost:$port ($src_type)"
     fi
 done
 echo "  Merger:     tcp://localhost:5570"

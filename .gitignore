@@ -12,3 +12,9 @@ legacy
 
 # IDE settings
 .vscode/
+
+# OS files
+.DS_Store
+
+# Hardware dumps
+devtree.json

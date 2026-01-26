@@ -113,6 +113,58 @@ export interface ButtonStates {
   reset: boolean;
 }
 
+// Firmware types for digitizer
+export type FirmwareType = 'PSD1' | 'PSD2' | 'PHA';
+
+// Board-level configuration
+export interface BoardConfig {
+  start_source?: string;
+  gpio_mode?: string;
+  test_pulse_period?: number;
+  test_pulse_width?: number;
+  global_trigger_source?: string;
+  record_length?: number;
+  waveforms_enabled?: boolean;
+  extra?: Record<string, unknown>;
+}
+
+// Channel configuration
+export interface ChannelConfig {
+  enabled?: string;
+  dc_offset?: number;
+  polarity?: string;
+  trigger_threshold?: number;
+  gate_long_ns?: number;
+  gate_short_ns?: number;
+  gate_pre_ns?: number;
+  event_trigger_source?: string;
+  wave_trigger_source?: string;
+  cfd_delay_ns?: number;
+  extra?: Record<string, unknown>;
+}
+
+// Digitizer configuration
+export interface DigitizerConfig {
+  digitizer_id: number;
+  name: string;
+  firmware: FirmwareType;
+  num_channels: number;
+  board: BoardConfig;
+  channel_defaults: ChannelConfig;
+  channel_overrides?: Record<number, ChannelConfig>;
+}
+
+// Emulator configuration (runtime settings)
+export interface EmulatorConfig {
+  events_per_batch: number;
+  batch_interval_ms: number;
+  enable_waveform: boolean;
+  waveform_probes: number;
+  waveform_samples: number;
+  num_modules: number;
+  channels_per_module: number;
+}
+
 // Get button states based on system state
 export function getButtonStates(state: SystemState): ButtonStates {
   switch (state) {

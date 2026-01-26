@@ -1,0 +1,38 @@
+# DELILA DAQ Configuration - PSD2 Real Hardware Test
+# Usage: ./scripts/start_daq.sh config/config_psd2_test.toml
+
+[operator]
+experiment_name = "PSD2_Test"
+
+[network]
+# Real PSD2 digitizer
+[[network.sources]]
+id = 0
+name = "psd2-real"
+type = "psd2"
+bind = "tcp://*:5555"
+command = "tcp://*:5560"
+digitizer_url = "dig2://172.18.4.56"
+config_file = "config/digitizers/psd2_test.json"
+pipeline_order = 1
+
+# Merger
+[network.merger]
+subscribe = ["tcp://localhost:5555"]
+publish = "tcp://*:5557"
+command = "tcp://*:5570"
+pipeline_order = 2
+
+# Recorder
+[network.recorder]
+subscribe = "tcp://localhost:5557"
+command = "tcp://*:5580"
+output_dir = "./data"
+pipeline_order = 3
+
+# Monitor
+[network.monitor]
+subscribe = "tcp://localhost:5557"
+command = "tcp://*:5590"
+http_port = 8081
+pipeline_order = 3

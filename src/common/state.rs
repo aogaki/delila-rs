@@ -3,7 +3,7 @@
 //! This module provides common state management and command handling
 //! that is shared across all DAQ components (Emulator, Reader, Merger, DataSink).
 
-use super::command::{Command, CommandResponse, ComponentState, RunConfig};
+use super::command::{Command, CommandResponse, ComponentState, EmulatorRuntimeConfig, RunConfig};
 use tokio::sync::watch;
 use tracing::info;
 
@@ -85,6 +85,12 @@ pub trait CommandHandlerExt {
     /// Override this to return actual metrics from the component
     fn get_metrics(&self) -> Option<super::ComponentMetrics> {
         None
+    }
+
+    /// Called when UpdateEmulatorConfig command is received
+    /// Only implemented by Emulator; other components return error
+    fn on_update_emulator_config(&mut self, _config: &EmulatorRuntimeConfig) -> Result<(), String> {
+        Err("UpdateEmulatorConfig not supported by this component".to_string())
     }
 }
 
@@ -249,6 +255,28 @@ pub fn handle_command<E: CommandHandlerExt>(
             }
 
             resp
+        }
+
+        Command::UpdateEmulatorConfig(ref config) => {
+            // This command can be received in any state
+            if let Some(ref mut e) = ext {
+                match e.on_update_emulator_config(config) {
+                    Ok(()) => {
+                        info!(
+                            component = component_name,
+                            events_per_batch = config.events_per_batch,
+                            "Emulator config updated"
+                        );
+                        CommandResponse::success(current, "Config updated")
+                    }
+                    Err(msg) => CommandResponse::error(current, msg),
+                }
+            } else {
+                CommandResponse::error(
+                    current,
+                    "UpdateEmulatorConfig not supported by this component",
+                )
+            }
         }
     }
 }

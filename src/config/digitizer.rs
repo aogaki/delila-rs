@@ -38,6 +38,18 @@ pub struct DigitizerConfig {
     #[serde(default = "default_num_channels")]
     pub num_channels: u8,
 
+    /// Master digitizer flag for synchronized start
+    ///
+    /// In multi-digitizer setups:
+    /// - Master: Receives Start command, generates TrgOut for slaves
+    /// - Slave: Listens on SIN for start signal from master
+    #[serde(default)]
+    pub is_master: bool,
+
+    /// Synchronization settings (optional, for Master/Slave setup)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync: Option<SyncConfig>,
+
     /// Board-level parameters
     pub board: BoardConfig,
 
@@ -48,6 +60,28 @@ pub struct DigitizerConfig {
     /// Per-channel overrides (sparse - only channels that differ from defaults)
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub channel_overrides: HashMap<u8, ChannelConfig>,
+}
+
+/// Synchronization configuration for Master/Slave setups
+///
+/// Controls TrgOut (master) and SIN (slave) behavior for synchronized start.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
+pub struct SyncConfig {
+    /// TrgOut source (master only)
+    /// PSD2: "Run", "TestPulse", "SWcmd", "GlobalTrg", etc.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trgout_source: Option<String>,
+
+    /// SIN source for sync input (slave only)
+    /// PSD2: "Disabled", "SIN", "GPIO", etc.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sin_source: Option<String>,
+
+    /// Start source override
+    /// Master: "SWcmd" (software start)
+    /// Slave: "SIN" (start on SIN signal)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_source: Option<String>,
 }
 
 fn default_num_channels() -> u8 {
@@ -174,7 +208,60 @@ pub struct CaenParameter {
     pub value: String,
 }
 
+/// Error type for digitizer configuration
+#[derive(Debug)]
+pub enum DigitizerConfigError {
+    /// IO error reading config file
+    Io(std::io::Error),
+    /// JSON parse error
+    Json(serde_json::Error),
+}
+
+impl std::fmt::Display for DigitizerConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DigitizerConfigError::Io(e) => write!(f, "Failed to read config file: {}", e),
+            DigitizerConfigError::Json(e) => write!(f, "Failed to parse JSON: {}", e),
+        }
+    }
+}
+
+impl std::error::Error for DigitizerConfigError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            DigitizerConfigError::Io(e) => Some(e),
+            DigitizerConfigError::Json(e) => Some(e),
+        }
+    }
+}
+
+impl From<std::io::Error> for DigitizerConfigError {
+    fn from(err: std::io::Error) -> Self {
+        DigitizerConfigError::Io(err)
+    }
+}
+
+impl From<serde_json::Error> for DigitizerConfigError {
+    fn from(err: serde_json::Error) -> Self {
+        DigitizerConfigError::Json(err)
+    }
+}
+
 impl DigitizerConfig {
+    /// Load digitizer configuration from a JSON file
+    pub fn load<P: AsRef<std::path::Path>>(path: P) -> Result<Self, DigitizerConfigError> {
+        let content = std::fs::read_to_string(path)?;
+        let config: Self = serde_json::from_str(&content)?;
+        Ok(config)
+    }
+
+    /// Save digitizer configuration to a JSON file
+    pub fn save<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), DigitizerConfigError> {
+        let json = serde_json::to_string_pretty(self)?;
+        std::fs::write(path, json)?;
+        Ok(())
+    }
+
     /// Create a new digitizer config with defaults for the given firmware
     pub fn new(digitizer_id: u32, name: impl Into<String>, firmware: FirmwareType) -> Self {
         let num_channels = match firmware {
@@ -187,10 +274,40 @@ impl DigitizerConfig {
             name: name.into(),
             firmware,
             num_channels,
+            is_master: false,
+            sync: None,
             board: BoardConfig::default(),
             channel_defaults: ChannelConfig::default(),
             channel_overrides: HashMap::new(),
         }
+    }
+
+    /// Create a master digitizer config
+    pub fn new_master(
+        digitizer_id: u32,
+        name: impl Into<String>,
+        firmware: FirmwareType,
+    ) -> Self {
+        let mut config = Self::new(digitizer_id, name, firmware);
+        config.is_master = true;
+        config.sync = Some(SyncConfig {
+            trgout_source: Some("Run".to_string()),
+            sin_source: None,
+            start_source: Some("SWcmd".to_string()),
+        });
+        config
+    }
+
+    /// Create a slave digitizer config
+    pub fn new_slave(digitizer_id: u32, name: impl Into<String>, firmware: FirmwareType) -> Self {
+        let mut config = Self::new(digitizer_id, name, firmware);
+        config.is_master = false;
+        config.sync = Some(SyncConfig {
+            trgout_source: None,
+            sin_source: Some("SIN".to_string()),
+            start_source: Some("SIN".to_string()),
+        });
+        config
     }
 
     /// Get effective channel configuration (defaults merged with overrides)
@@ -262,37 +379,67 @@ impl DigitizerConfig {
     fn add_board_parameters(&self, params: &mut Vec<CaenParameter>) {
         let board = &self.board;
 
-        if let Some(ref v) = board.start_source {
-            params.push(CaenParameter {
-                path: "/par/StartSource".to_string(),
-                value: v.clone(),
-            });
+        // Sync parameters (applied before other board params)
+        if let Some(ref sync) = self.sync {
+            // Start source (from sync config takes priority)
+            if let Some(ref v) = sync.start_source {
+                params.push(CaenParameter {
+                    path: "/par/startsource".to_string(),
+                    value: v.clone(),
+                });
+            }
+
+            // TrgOut source (master only)
+            if let Some(ref v) = sync.trgout_source {
+                params.push(CaenParameter {
+                    path: "/par/trgoutsource".to_string(),
+                    value: v.clone(),
+                });
+            }
+
+            // SIN source (slave only)
+            if let Some(ref v) = sync.sin_source {
+                params.push(CaenParameter {
+                    path: "/par/sinsource".to_string(),
+                    value: v.clone(),
+                });
+            }
+        }
+
+        // Board start source (if not set by sync config)
+        if self.sync.as_ref().and_then(|s| s.start_source.as_ref()).is_none() {
+            if let Some(ref v) = board.start_source {
+                params.push(CaenParameter {
+                    path: "/par/startsource".to_string(),
+                    value: v.clone(),
+                });
+            }
         }
 
         if let Some(ref v) = board.gpio_mode {
             params.push(CaenParameter {
-                path: "/par/GPIOMode".to_string(),
+                path: "/par/gpiomode".to_string(),
                 value: v.clone(),
             });
         }
 
         if let Some(v) = board.test_pulse_period {
             params.push(CaenParameter {
-                path: "/par/TestPulsePeriod".to_string(),
+                path: "/par/testpulseperiod".to_string(),
                 value: v.to_string(),
             });
         }
 
         if let Some(v) = board.test_pulse_width {
             params.push(CaenParameter {
-                path: "/par/TestPulseWidth".to_string(),
+                path: "/par/testpulsewidth".to_string(),
                 value: v.to_string(),
             });
         }
 
         if let Some(ref v) = board.global_trigger_source {
             params.push(CaenParameter {
-                path: "/par/GlobalTriggerSource".to_string(),
+                path: "/par/globaltriggersource".to_string(),
                 value: v.clone(),
             });
         }
@@ -301,7 +448,7 @@ impl DigitizerConfig {
         if let Some(v) = board.record_length {
             let param_name = match self.firmware {
                 FirmwareType::PSD1 => "/par/reclen",
-                _ => "/par/RecordLengthS",
+                _ => "/par/chrecordlengths",
             };
             params.push(CaenParameter {
                 path: param_name.to_string(),
@@ -551,10 +698,10 @@ mod tests {
 
         let params = config.to_caen_parameters();
 
-        // Check board parameter
+        // Check board parameter (PSD2 uses lowercase parameter names)
         assert!(params
             .iter()
-            .any(|p| p.path == "/par/StartSource" && p.value == "SWcmd"));
+            .any(|p| p.path == "/par/startsource" && p.value == "SWcmd"));
 
         // Check channel default (should use range syntax)
         assert!(params
@@ -563,6 +710,115 @@ mod tests {
         assert!(params
             .iter()
             .any(|p| p.path == "/ch/0..31/par/PulsePolarity" && p.value == "Negative"));
+    }
+
+    #[test]
+    fn test_master_config_sync_params() {
+        let config = DigitizerConfig::new_master(0, "Master", FirmwareType::PSD2);
+        assert!(config.is_master);
+        assert!(config.sync.is_some());
+
+        let sync = config.sync.as_ref().unwrap();
+        assert_eq!(sync.start_source, Some("SWcmd".to_string()));
+        assert_eq!(sync.trgout_source, Some("Run".to_string()));
+        assert!(sync.sin_source.is_none());
+
+        let params = config.to_caen_parameters();
+
+        // Master should have TrgOut set to Run
+        assert!(params
+            .iter()
+            .any(|p| p.path == "/par/trgoutsource" && p.value == "Run"));
+
+        // Master start source should be SWcmd
+        assert!(params
+            .iter()
+            .any(|p| p.path == "/par/startsource" && p.value == "SWcmd"));
+    }
+
+    #[test]
+    fn test_slave_config_sync_params() {
+        let config = DigitizerConfig::new_slave(0, "Slave", FirmwareType::PSD2);
+        assert!(!config.is_master);
+        assert!(config.sync.is_some());
+
+        let sync = config.sync.as_ref().unwrap();
+        assert_eq!(sync.start_source, Some("SIN".to_string()));
+        assert_eq!(sync.sin_source, Some("SIN".to_string()));
+        assert!(sync.trgout_source.is_none());
+
+        let params = config.to_caen_parameters();
+
+        // Slave should have SIN source set
+        assert!(params
+            .iter()
+            .any(|p| p.path == "/par/sinsource" && p.value == "SIN"));
+
+        // Slave start source should be SIN
+        assert!(params
+            .iter()
+            .any(|p| p.path == "/par/startsource" && p.value == "SIN"));
+    }
+
+    #[test]
+    fn test_sync_config_json_roundtrip() {
+        // Test that sync config can be serialized and deserialized from JSON
+        let json = r#"{
+            "digitizer_id": 0,
+            "name": "Master Digitizer",
+            "firmware": "PSD2",
+            "is_master": true,
+            "sync": {
+                "trgout_source": "Run",
+                "start_source": "SWcmd"
+            },
+            "board": {},
+            "channel_defaults": {}
+        }"#;
+
+        let config: DigitizerConfig = serde_json::from_str(json).unwrap();
+        assert!(config.is_master);
+        assert!(config.sync.is_some());
+
+        let sync = config.sync.as_ref().unwrap();
+        assert_eq!(sync.trgout_source, Some("Run".to_string()));
+        assert_eq!(sync.start_source, Some("SWcmd".to_string()));
+        assert!(sync.sin_source.is_none());
+
+        let params = config.to_caen_parameters();
+        assert!(params.iter().any(|p| p.path == "/par/trgoutsource"));
+        assert!(params
+            .iter()
+            .any(|p| p.path == "/par/startsource" && p.value == "SWcmd"));
+    }
+
+    #[test]
+    fn test_sync_config_slave_json() {
+        let json = r#"{
+            "digitizer_id": 1,
+            "name": "Slave Digitizer",
+            "firmware": "PSD2",
+            "is_master": false,
+            "sync": {
+                "sin_source": "SIN",
+                "start_source": "SIN"
+            },
+            "board": {},
+            "channel_defaults": {}
+        }"#;
+
+        let config: DigitizerConfig = serde_json::from_str(json).unwrap();
+        assert!(!config.is_master);
+
+        let params = config.to_caen_parameters();
+        assert!(params
+            .iter()
+            .any(|p| p.path == "/par/sinsource" && p.value == "SIN"));
+        assert!(params
+            .iter()
+            .any(|p| p.path == "/par/startsource" && p.value == "SIN"));
+        // Slave should NOT have trgout set
+        assert!(!params.iter().any(|p| p.path == "/par/trgoutsource"));
     }
 
     #[test]

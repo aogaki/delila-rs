@@ -48,6 +48,44 @@ pub struct RawData {
     pub n_events: u32,
 }
 
+/// Device information retrieved from digitizer
+#[derive(Debug, Clone)]
+pub struct DeviceInfo {
+    /// Model name (e.g., "VX2730")
+    pub model: String,
+    /// Serial number
+    pub serial_number: String,
+    /// Firmware type (e.g., "DPP_PSD")
+    pub firmware_type: String,
+    /// Number of channels
+    pub num_channels: u32,
+    /// ADC resolution in bits
+    pub adc_bits: u32,
+    /// Sampling rate in samples/sec
+    pub sampling_rate_sps: u64,
+}
+
+/// Parameter metadata from DevTree
+#[derive(Debug, Clone)]
+pub struct ParamInfo {
+    /// Parameter name
+    pub name: String,
+    /// Data type (e.g., "NUMBER", "STRING", "BOOL")
+    pub datatype: String,
+    /// Access mode (e.g., "READ_WRITE", "READ_ONLY")
+    pub access_mode: String,
+    /// Whether parameter can be changed during acquisition
+    pub setinrun: bool,
+    /// Minimum value (for numeric types)
+    pub min_value: Option<String>,
+    /// Maximum value (for numeric types)
+    pub max_value: Option<String>,
+    /// Allowed values (for enum types)
+    pub allowed_values: Vec<String>,
+    /// Unit of measurement
+    pub unit: Option<String>,
+}
+
 impl CaenHandle {
     /// Open a connection to a CAEN device
     ///
@@ -78,6 +116,153 @@ impl CaenHandle {
         self.handle
     }
 
+    /// Check if the handle is connected (non-zero handle value)
+    ///
+    /// Note: This only checks if we have a valid handle. It does not
+    /// verify the connection is still alive. Use get_device_info()
+    /// for active connection verification.
+    pub fn is_connected(&self) -> bool {
+        self.handle != 0
+    }
+
+    /// Get device information
+    ///
+    /// Retrieves model name, serial number, firmware type, and hardware specs.
+    ///
+    /// # Example
+    /// ```no_run
+    /// use delila_rs::reader::caen::CaenHandle;
+    /// let handle = CaenHandle::open("dig2://172.18.4.56").unwrap();
+    /// let info = handle.get_device_info().unwrap();
+    /// println!("Model: {}, FW: {}", info.model, info.firmware_type);
+    /// ```
+    pub fn get_device_info(&self) -> Result<DeviceInfo, CaenError> {
+        let model = self.get_value("/par/ModelName")?;
+        let serial_number = self.get_value("/par/SerialNum")?;
+        let firmware_type = self.get_value("/par/FwType")?;
+        let num_channels: u32 = self.get_value("/par/NumCh")?.parse().unwrap_or(0);
+        let adc_bits: u32 = self.get_value("/par/ADC_Nbit")?.parse().unwrap_or(0);
+        let sampling_rate_sps: u64 = self.get_value("/par/ADC_SamplRate")?.parse().unwrap_or(0);
+
+        Ok(DeviceInfo {
+            model,
+            serial_number,
+            firmware_type,
+            num_channels,
+            adc_bits,
+            sampling_rate_sps,
+        })
+    }
+
+    /// Get parameter metadata from DevTree
+    ///
+    /// Parses the device tree to extract parameter attributes like
+    /// datatype, access mode, setinrun flag, min/max values, etc.
+    ///
+    /// # Arguments
+    /// * `path` - Parameter path (e.g., "/ch/0/par/DCOffset" or "DCOffset")
+    ///
+    /// # Note
+    /// This method parses the full DevTree JSON which can be expensive.
+    /// Consider caching the result if calling frequently.
+    pub fn get_param_info(&self, path: &str) -> Result<ParamInfo, CaenError> {
+        let tree_json = self.get_device_tree()?;
+        let tree: serde_json::Value = serde_json::from_str(&tree_json).map_err(|e| CaenError {
+            code: -1,
+            name: "JsonParseError".to_string(),
+            description: format!("Failed to parse DevTree JSON: {}", e),
+        })?;
+
+        // Extract parameter name from path (last component after /par/)
+        let param_name = path.rsplit('/').find(|s| !s.is_empty()).unwrap_or(path);
+
+        // Search for parameter in DevTree
+        // DevTree structure: { "par": { "ParamName": { ... } }, "ch": { ... } }
+        let param_node = Self::find_param_in_tree(&tree, param_name).ok_or_else(|| CaenError {
+            code: -1,
+            name: "ParamNotFound".to_string(),
+            description: format!("Parameter '{}' not found in DevTree", param_name),
+        })?;
+
+        Self::extract_param_info(param_name, param_node)
+    }
+
+    /// Find a parameter node in the DevTree by name (recursive search)
+    fn find_param_in_tree<'a>(
+        node: &'a serde_json::Value,
+        param_name: &str,
+    ) -> Option<&'a serde_json::Value> {
+        if let Some(obj) = node.as_object() {
+            // Check if this object has the parameter directly
+            if let Some(param) = obj.get(param_name) {
+                // Verify it's a parameter (has datatype or value)
+                if param.get("datatype").is_some() || param.get("value").is_some() {
+                    return Some(param);
+                }
+            }
+
+            // Check in "par" subfolder
+            if let Some(par_folder) = obj.get("par") {
+                if let Some(param) = Self::find_param_in_tree(par_folder, param_name) {
+                    return Some(param);
+                }
+            }
+
+            // Recursively search in child objects
+            for (_key, value) in obj {
+                if let Some(param) = Self::find_param_in_tree(value, param_name) {
+                    return Some(param);
+                }
+            }
+        }
+        None
+    }
+
+    /// Extract ParamInfo from a DevTree parameter node
+    fn extract_param_info(name: &str, node: &serde_json::Value) -> Result<ParamInfo, CaenError> {
+        let get_attr_value = |attr: &str| -> Option<String> {
+            node.get(attr)
+                .and_then(|v| v.get("value"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        };
+
+        let datatype = get_attr_value("datatype").unwrap_or_else(|| "UNKNOWN".to_string());
+        let access_mode = get_attr_value("accessmode").unwrap_or_else(|| "READ_WRITE".to_string());
+        let setinrun = get_attr_value("setinrun")
+            .map(|s| s.to_lowercase() == "true")
+            .unwrap_or(false);
+        let min_value = get_attr_value("minvalue");
+        let max_value = get_attr_value("maxvalue");
+        let unit = get_attr_value("uom").filter(|s| !s.is_empty());
+
+        // Extract allowed values for enum types
+        let mut allowed_values = Vec::new();
+        if let Some(av) = node.get("allowedvalues") {
+            if let Some(obj) = av.as_object() {
+                for (key, val) in obj {
+                    // Skip non-numeric keys (like "handle", "value")
+                    if key.parse::<u32>().is_ok() {
+                        if let Some(v) = val.get("value").and_then(|v| v.as_str()) {
+                            allowed_values.push(v.to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(ParamInfo {
+            name: name.to_string(),
+            datatype,
+            access_mode,
+            setinrun,
+            min_value,
+            max_value,
+            allowed_values,
+            unit,
+        })
+    }
+
     /// Get device tree as JSON string
     pub fn get_device_tree(&self) -> Result<String, CaenError> {
         // First call to get required buffer size
@@ -91,11 +276,12 @@ impl CaenHandle {
             });
         }
 
-        // Allocate buffer and get the actual data
-        let mut buffer = vec![0i8; (size + 1) as usize];
-        let ret = unsafe {
-            ffi::CAEN_FELib_GetDeviceTree(self.handle, buffer.as_mut_ptr(), buffer.len())
-        };
+        // Allocate buffer with extra space and get the actual data
+        // size is returned as number of characters needed (including null terminator)
+        let buffer_size = (size as usize) + 1024; // Extra padding for safety
+        let mut buffer = vec![0i8; buffer_size];
+        let ret =
+            unsafe { ffi::CAEN_FELib_GetDeviceTree(self.handle, buffer.as_mut_ptr(), buffer_size) };
 
         if ret < 0 {
             return Err(CaenError::from_code(ret).unwrap_or(CaenError {
@@ -105,9 +291,16 @@ impl CaenHandle {
             }));
         }
 
-        // Convert to Rust string
-        let c_str = unsafe { std::ffi::CStr::from_ptr(buffer.as_ptr()) };
-        Ok(c_str.to_string_lossy().into_owned())
+        // Find the actual string length (look for null terminator)
+        let actual_len = buffer.iter().position(|&c| c == 0).unwrap_or(buffer.len());
+
+        // Convert to Rust string using the actual length
+        let bytes: Vec<u8> = buffer[..actual_len].iter().map(|&c| c as u8).collect();
+        String::from_utf8(bytes).map_err(|_| CaenError {
+            code: -1,
+            name: "Utf8Error".to_string(),
+            description: "Device tree contains invalid UTF-8".to_string(),
+        })
     }
 
     /// Get a parameter value
@@ -269,6 +462,62 @@ impl CaenHandle {
         Ok(EndpointHandle {
             handle: read_data_handle,
         })
+    }
+
+    /// Apply digitizer configuration
+    ///
+    /// Applies all parameters from DigitizerConfig to the device.
+    /// Parameters are applied in order: board-level first, then channel defaults,
+    /// then channel-specific overrides.
+    ///
+    /// # Arguments
+    /// * `config` - DigitizerConfig to apply
+    ///
+    /// # Returns
+    /// * `Ok(applied_count)` - Number of parameters successfully applied
+    /// * `Err(...)` - Error if a critical parameter fails
+    pub fn apply_config(
+        &self,
+        config: &crate::config::digitizer::DigitizerConfig,
+    ) -> Result<usize, CaenError> {
+        use tracing::{debug, info, warn};
+
+        let params = config.to_caen_parameters();
+        info!("Applying {} parameters to digitizer", params.len());
+
+        let mut applied = 0;
+        let mut errors = Vec::new();
+
+        for param in &params {
+            match self.set_value(&param.path, &param.value) {
+                Ok(()) => {
+                    debug!(path = %param.path, value = %param.value, "Parameter set");
+                    applied += 1;
+                }
+                Err(e) => {
+                    warn!(
+                        path = %param.path,
+                        value = %param.value,
+                        error = %e,
+                        "Failed to set parameter"
+                    );
+                    errors.push((param.path.clone(), e));
+                }
+            }
+        }
+
+        info!(applied, errors = errors.len(), "Configuration applied");
+
+        // Return error if any critical parameters failed
+        // For now, we just warn and continue
+        if !errors.is_empty() {
+            warn!(
+                "Some parameters failed to apply: {:?}",
+                errors.iter().map(|(p, _)| p).collect::<Vec<_>>()
+            );
+        }
+
+        Ok(applied)
     }
 }
 
@@ -469,5 +718,148 @@ mod tests {
         assert!(value_buffer_size >= 128);
         assert!(name_buffer_size >= 16);
         assert!(desc_buffer_size >= 64);
+    }
+
+    #[test]
+    fn test_device_info_struct() {
+        let info = DeviceInfo {
+            model: "VX2730".to_string(),
+            serial_number: "12345".to_string(),
+            firmware_type: "DPP_PSD".to_string(),
+            num_channels: 32,
+            adc_bits: 14,
+            sampling_rate_sps: 125_000_000,
+        };
+        assert_eq!(info.model, "VX2730");
+        assert_eq!(info.num_channels, 32);
+        assert_eq!(info.adc_bits, 14);
+    }
+
+    #[test]
+    fn test_device_info_clone() {
+        let info = DeviceInfo {
+            model: "VX2730".to_string(),
+            serial_number: "12345".to_string(),
+            firmware_type: "DPP_PSD".to_string(),
+            num_channels: 32,
+            adc_bits: 14,
+            sampling_rate_sps: 125_000_000,
+        };
+        let cloned = info.clone();
+        assert_eq!(info.model, cloned.model);
+        assert_eq!(info.serial_number, cloned.serial_number);
+    }
+
+    #[test]
+    fn test_device_info_debug() {
+        let info = DeviceInfo {
+            model: "VX2730".to_string(),
+            serial_number: "12345".to_string(),
+            firmware_type: "DPP_PSD".to_string(),
+            num_channels: 32,
+            adc_bits: 14,
+            sampling_rate_sps: 125_000_000,
+        };
+        let debug = format!("{:?}", info);
+        assert!(debug.contains("VX2730"));
+        assert!(debug.contains("DPP_PSD"));
+    }
+
+    #[test]
+    fn test_param_info_struct() {
+        let info = ParamInfo {
+            name: "DCOffset".to_string(),
+            datatype: "NUMBER".to_string(),
+            access_mode: "READ_WRITE".to_string(),
+            setinrun: true,
+            min_value: Some("0".to_string()),
+            max_value: Some("100".to_string()),
+            allowed_values: vec![],
+            unit: Some("%".to_string()),
+        };
+        assert_eq!(info.name, "DCOffset");
+        assert!(info.setinrun);
+        assert_eq!(info.min_value, Some("0".to_string()));
+    }
+
+    #[test]
+    fn test_param_info_enum_type() {
+        let info = ParamInfo {
+            name: "Polarity".to_string(),
+            datatype: "STRING".to_string(),
+            access_mode: "READ_WRITE".to_string(),
+            setinrun: false,
+            min_value: None,
+            max_value: None,
+            allowed_values: vec!["Positive".to_string(), "Negative".to_string()],
+            unit: None,
+        };
+        assert_eq!(info.allowed_values.len(), 2);
+        assert!(!info.setinrun);
+    }
+
+    #[test]
+    fn test_param_info_clone() {
+        let info = ParamInfo {
+            name: "TriggerThr".to_string(),
+            datatype: "NUMBER".to_string(),
+            access_mode: "READ_WRITE".to_string(),
+            setinrun: true,
+            min_value: Some("0".to_string()),
+            max_value: Some("16383".to_string()),
+            allowed_values: vec![],
+            unit: None,
+        };
+        let cloned = info.clone();
+        assert_eq!(info.name, cloned.name);
+        assert_eq!(info.setinrun, cloned.setinrun);
+    }
+
+    #[test]
+    fn test_extract_param_info_from_json() {
+        // Simulate DevTree parameter node structure
+        let json_str = r#"{
+            "accessmode": { "value": "READ_WRITE" },
+            "datatype": { "value": "NUMBER" },
+            "setinrun": { "value": "true" },
+            "minvalue": { "value": "0" },
+            "maxvalue": { "value": "100" },
+            "uom": { "value": "%" }
+        }"#;
+
+        let node: serde_json::Value = serde_json::from_str(json_str).unwrap();
+        let info = CaenHandle::extract_param_info("DCOffset", &node).unwrap();
+
+        assert_eq!(info.name, "DCOffset");
+        assert_eq!(info.datatype, "NUMBER");
+        assert!(info.setinrun);
+        assert_eq!(info.min_value, Some("0".to_string()));
+        assert_eq!(info.max_value, Some("100".to_string()));
+        assert_eq!(info.unit, Some("%".to_string()));
+    }
+
+    #[test]
+    fn test_extract_param_info_enum() {
+        // Simulate DevTree parameter node with allowed values
+        let json_str = r#"{
+            "accessmode": { "value": "READ_WRITE" },
+            "datatype": { "value": "STRING" },
+            "setinrun": { "value": "false" },
+            "allowedvalues": {
+                "handle": 123,
+                "value": "2",
+                "0": { "value": "Positive" },
+                "1": { "value": "Negative" }
+            }
+        }"#;
+
+        let node: serde_json::Value = serde_json::from_str(json_str).unwrap();
+        let info = CaenHandle::extract_param_info("Polarity", &node).unwrap();
+
+        assert_eq!(info.datatype, "STRING");
+        assert!(!info.setinrun);
+        assert_eq!(info.allowed_values.len(), 2);
+        assert!(info.allowed_values.contains(&"Positive".to_string()));
+        assert!(info.allowed_values.contains(&"Negative".to_string()));
     }
 }

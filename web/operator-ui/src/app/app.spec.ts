@@ -87,10 +87,11 @@ describe('App', () => {
 
   it('should display tab navigation', () => {
     const tabLinks = fixture.nativeElement.querySelectorAll('[mat-tab-link]');
-    expect(tabLinks.length).toBe(3);
+    expect(tabLinks.length).toBe(4);
     expect(tabLinks[0].textContent.trim()).toBe('Control');
     expect(tabLinks[1].textContent.trim()).toBe('Monitor');
     expect(tabLinks[2].textContent.trim()).toBe('Waveform');
+    expect(tabLinks[3].textContent.trim()).toBe('Settings');
   });
 
   it('should display system state in header', () => {

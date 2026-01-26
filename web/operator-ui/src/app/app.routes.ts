@@ -17,4 +17,9 @@ export const routes: Routes = [
     loadComponent: () =>
       import('./pages/waveform/waveform.component').then((m) => m.WaveformPageComponent),
   },
+  {
+    path: 'settings',
+    loadComponent: () =>
+      import('./pages/settings/settings.component').then((m) => m.SettingsPageComponent),
+  },
 ];

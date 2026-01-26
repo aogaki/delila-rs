@@ -181,6 +181,7 @@ async fn main() -> anyhow::Result<()> {
             buffer_size: 1024 * 1024,
             heartbeat_interval_ms: 1000,
             time_step_ns: time_step_ns.unwrap_or(2.0),
+            config_file: None, // No config file when using CLI directly
         }
     };
 

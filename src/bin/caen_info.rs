@@ -19,8 +19,9 @@ fn main() {
         "dig2://172.18.4.56" // Default URL from PSD2.conf
     };
 
-    // Check for --decode flag
+    // Check for flags
     let decode_enabled = args.iter().any(|a| a == "--decode");
+    let devtree_enabled = args.iter().any(|a| a == "--devtree");
 
     println!("===========================================");
     println!("CAEN Digitizer Info");
@@ -28,6 +29,9 @@ fn main() {
     println!("Connecting to: {}", url);
     if decode_enabled {
         println!("Decode mode: ENABLED");
+    }
+    if devtree_enabled {
+        println!("DevTree mode: ENABLED (will save to devtree.json)");
     }
     println!();
 
@@ -68,6 +72,29 @@ fn main() {
                 eprintln!("  {}: Error - {}", path, e);
             }
         }
+    }
+
+    // Get and save DevTree if requested
+    if devtree_enabled {
+        println!();
+        println!("--- DevTree ---");
+        match handle.get_device_tree() {
+            Ok(tree) => {
+                let filename = "devtree.json";
+                match std::fs::write(filename, &tree) {
+                    Ok(_) => println!("  [OK] DevTree saved to {}", filename),
+                    Err(e) => eprintln!("  [ERROR] Failed to save DevTree: {}", e),
+                }
+            }
+            Err(e) => {
+                eprintln!("  [ERROR] Failed to get DevTree: {}", e);
+            }
+        }
+        println!();
+        println!("===========================================");
+        println!("Done (DevTree mode).");
+        println!("===========================================");
+        return;
     }
 
     // Test parameter setting (read-modify-verify cycle)

@@ -108,6 +108,24 @@ pub struct RunConfig {
     pub exp_name: String,
 }
 
+/// Runtime-configurable emulator settings
+///
+/// These settings can be updated while the emulator is running.
+/// Changes take effect immediately on the next batch generation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmulatorRuntimeConfig {
+    /// Events per batch
+    pub events_per_batch: u32,
+    /// Batch interval in milliseconds (0 = maximum speed)
+    pub batch_interval_ms: u64,
+    /// Enable waveform generation
+    pub enable_waveform: bool,
+    /// Waveform probe bitmask (1=analog1, 2=analog2, 3=both, 63=all)
+    pub waveform_probes: u8,
+    /// Number of waveform samples
+    pub waveform_samples: u32,
+}
+
 /// Commands sent from controller to components
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Command {
@@ -124,6 +142,9 @@ pub enum Command {
     Reset,
     /// Query current status
     GetStatus,
+    /// Update emulator runtime configuration (Emulator-specific)
+    /// Can be sent in any state, takes effect on next batch generation
+    UpdateEmulatorConfig(EmulatorRuntimeConfig),
 }
 
 impl std::fmt::Display for Command {
@@ -135,6 +156,9 @@ impl std::fmt::Display for Command {
             Command::Stop => write!(f, "Stop"),
             Command::Reset => write!(f, "Reset"),
             Command::GetStatus => write!(f, "GetStatus"),
+            Command::UpdateEmulatorConfig(cfg) => {
+                write!(f, "UpdateEmulatorConfig(events={})", cfg.events_per_batch)
+            }
         }
     }
 }

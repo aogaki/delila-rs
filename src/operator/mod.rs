@@ -4,11 +4,18 @@
 //! Includes Swagger UI for API documentation.
 
 mod client;
+mod digitizer_repository;
 mod routes;
 mod run_repository;
 
 pub use client::ComponentClient;
-pub use routes::{create_router, create_router_with_config, create_router_with_mongodb};
+pub use digitizer_repository::{
+    DigitizerConfigDocument, DigitizerConfigRepository, DigitizerRepoError, RunConfigSnapshot,
+};
+pub use routes::{
+    create_router, create_router_with_config, create_router_with_emulator_settings,
+    create_router_with_mongodb, EmulatorSettings,
+};
 pub use run_repository::{
     CurrentRunInfo, ErrorLogEntry, LastRunInfo, RepositoryError, RunDocument, RunNote,
     RunRepository, RunStats, RunStatus,
@@ -203,6 +210,14 @@ pub struct ComponentConfig {
     /// - Start: descending order (downstream first, then upstream)
     /// - Stop: ascending order (upstream first, then downstream)
     pub pipeline_order: u32,
+    /// Master flag for synchronized digitizer start
+    ///
+    /// In multi-digitizer setups with TrgOut cascade:
+    /// - Master (is_master=true): Receives SW Start command
+    /// - Slaves (is_master=false): Auto-start via TrgOut cascade
+    ///
+    /// For non-digitizer components (Merger, Recorder, Monitor), this is always false.
+    pub is_master: bool,
 }
 
 /// Operator configuration with timeouts
@@ -435,10 +450,24 @@ mod tests {
             name: "Merger".to_string(),
             address: "tcp://localhost:5570".to_string(),
             pipeline_order: 2,
+            is_master: false,
         };
         assert_eq!(config.name, "Merger");
         assert!(config.address.contains("5570"));
         assert_eq!(config.pipeline_order, 2);
+        assert!(!config.is_master);
+    }
+
+    #[test]
+    fn test_component_config_master() {
+        let config = ComponentConfig {
+            name: "PSD2-Master".to_string(),
+            address: "tcp://localhost:5560".to_string(),
+            pipeline_order: 1,
+            is_master: true,
+        };
+        assert_eq!(config.name, "PSD2-Master");
+        assert!(config.is_master);
     }
 
     #[test]

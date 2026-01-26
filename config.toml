@@ -1,13 +1,6 @@
 # DELILA DAQ Configuration
-# Multi-emulator test configuration
-
-# =============================================================================
-# Operator Settings
-# =============================================================================
 
 [operator]
-# Experiment name (server-authoritative, not editable by UI)
-# This is used to filter run numbers in MongoDB
 experiment_name = "TestExp"
 
 # =============================================================================
@@ -15,28 +8,36 @@ experiment_name = "TestExp"
 # =============================================================================
 
 [network]
-cluster_name = "daq-cluster-1"
-
-# Data sources (emulators or real digitizers)
-# id = module number (0-indexed)
+# Data sources
+# type: emulator, psd1, psd2, pha1, zle
 # pipeline_order: Start順=降順, Stop順=昇順 (1=upstream, 3=downstream)
-# Start: downstream first (3→1), Stop: upstream first (1→3)
+# Emulator source (for testing without hardware)
 [[network.sources]]
 id = 0
-name = "digitizer-0"
+name = "emulator-0"
+type = "emulator"
 bind = "tcp://*:5555"
 command = "tcp://*:5560"
 pipeline_order = 1
 
+# Real PSD2 digitizer (uncomment to use)
+# [[network.sources]]
+# id = 1
+# name = "psd2-real"
+# type = "psd2"
+# bind = "tcp://*:5556"
+# command = "tcp://*:5561"
+# digitizer_url = "dig2://172.18.4.56"
+# config_file = "config/digitizers/psd2_test.json"
+# pipeline_order = 1
+
 [[network.sources]]
 id = 1
-name = "digitizer-1"
+name = "emulator-1"
+type = "emulator"
 bind = "tcp://*:5556"
 command = "tcp://*:5561"
 pipeline_order = 1
-#digitizer_url = "dig2://172.18.4.56"
-#module_id = 1
-#time_step_ns = 2.0
 
 # Merger: receives from all sources, publishes merged stream
 [network.merger]
@@ -60,17 +61,14 @@ http_port = 8081
 pipeline_order = 3
 
 # =============================================================================
-# Operational Settings
+# Emulator Settings (runtime-configurable via Web UI)
 # =============================================================================
 
-[settings]
-source = "file"
-
 [settings.file]
-events_per_batch = 1000    # 500 events/batch
-batch_interval_ms = 0    # 10ms = 100 batches/s per source
+events_per_batch = 5000
+batch_interval_ms = 0
 num_modules = 2
 channels_per_module = 16
-enable_waveform = false    # true: generate waveform for all events
-waveform_probes = 3       # Bitmask: 1=analog1, 2=analog2, 3=both analog, 63=all probes
-waveform_samples = 512    # Number of samples (real experiments: 2000-10000)
+enable_waveform = false
+waveform_probes = 3
+waveform_samples = 512

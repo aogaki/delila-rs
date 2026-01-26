@@ -1,0 +1,27 @@
+{
+  "digitizer_id": 0,
+  "name": "PSD2 Test Config",
+  "firmware": "PSD2",
+  "num_channels": 32,
+  "board": {
+    "start_source": "SWcmd",
+    "global_trigger_source": "TestPulse",
+    "test_pulse_period": 100000,
+    "test_pulse_width": 1000
+  },
+  "channel_defaults": {
+    "enabled": "True",
+    "dc_offset": 50.0,
+    "polarity": "Negative",
+    "trigger_threshold": 100,
+    "gate_long_ns": 400,
+    "gate_short_ns": 100,
+    "event_trigger_source": "GlobalTriggerSource",
+    "wave_trigger_source": "GlobalTriggerSource"
+  },
+  "channel_overrides": {
+    "0": {
+      "trigger_threshold": 50
+    }
+  }
+}

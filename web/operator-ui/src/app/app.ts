@@ -70,6 +70,15 @@ import { HistogramService } from './services/histogram.service';
       >
         Waveform
       </a>
+      <a
+        mat-tab-link
+        routerLink="/settings"
+        routerLinkActive
+        #rla4="routerLinkActive"
+        [active]="rla4.isActive"
+      >
+        Settings
+      </a>
     </nav>
 
     <mat-tab-nav-panel #tabPanel class="tab-content">

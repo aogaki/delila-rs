@@ -23,7 +23,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::common::{
     flags, handle_command, run_command_task, CommandHandlerExt, ComponentSharedState,
-    ComponentState, EventData, EventDataBatch, Message, Waveform,
+    ComponentState, EmulatorRuntimeConfig, EventData, EventDataBatch, Message, Waveform,
 };
 
 /// Waveform probe bit masks
@@ -135,6 +135,62 @@ impl AtomicStats {
     }
 }
 
+/// Runtime-configurable settings that can be updated via ZMQ command
+#[derive(Debug)]
+struct RuntimeSettings {
+    events_per_batch: std::sync::atomic::AtomicUsize,
+    batch_interval_ms: AtomicU64,
+    enable_waveform: std::sync::atomic::AtomicBool,
+    waveform_probes: std::sync::atomic::AtomicU8,
+    waveform_samples: std::sync::atomic::AtomicUsize,
+}
+
+impl RuntimeSettings {
+    fn new(config: &EmulatorConfig) -> Self {
+        Self {
+            events_per_batch: std::sync::atomic::AtomicUsize::new(config.events_per_batch),
+            batch_interval_ms: AtomicU64::new(config.batch_interval_ms),
+            enable_waveform: std::sync::atomic::AtomicBool::new(config.enable_waveform),
+            waveform_probes: std::sync::atomic::AtomicU8::new(config.waveform_probes),
+            waveform_samples: std::sync::atomic::AtomicUsize::new(config.waveform_samples),
+        }
+    }
+
+    fn update(&self, config: &EmulatorRuntimeConfig) {
+        self.events_per_batch
+            .store(config.events_per_batch as usize, Ordering::Relaxed);
+        self.batch_interval_ms
+            .store(config.batch_interval_ms, Ordering::Relaxed);
+        self.enable_waveform
+            .store(config.enable_waveform, Ordering::Relaxed);
+        self.waveform_probes
+            .store(config.waveform_probes, Ordering::Relaxed);
+        self.waveform_samples
+            .store(config.waveform_samples as usize, Ordering::Relaxed);
+    }
+
+    fn events_per_batch(&self) -> usize {
+        self.events_per_batch.load(Ordering::Relaxed)
+    }
+
+    #[allow(dead_code)] // Reserved for future use
+    fn batch_interval_ms(&self) -> u64 {
+        self.batch_interval_ms.load(Ordering::Relaxed)
+    }
+
+    fn enable_waveform(&self) -> bool {
+        self.enable_waveform.load(Ordering::Relaxed)
+    }
+
+    fn waveform_probes(&self) -> u8 {
+        self.waveform_probes.load(Ordering::Relaxed)
+    }
+
+    fn waveform_samples(&self) -> usize {
+        self.waveform_samples.load(Ordering::Relaxed)
+    }
+}
+
 /// Rate tracker for 1-second interval rate calculation
 #[derive(Debug)]
 struct RateTracker {
@@ -187,6 +243,7 @@ impl RateTracker {
 struct EmulatorCommandExt {
     stats: Arc<AtomicStats>,
     rate_tracker: Arc<RateTracker>,
+    runtime_settings: Arc<RuntimeSettings>,
 }
 
 impl CommandHandlerExt for EmulatorCommandExt {
@@ -220,6 +277,17 @@ impl CommandHandlerExt for EmulatorCommandExt {
             data_rate: 0.0,
         })
     }
+
+    fn on_update_emulator_config(&mut self, config: &EmulatorRuntimeConfig) -> Result<(), String> {
+        self.runtime_settings.update(config);
+        info!(
+            events_per_batch = config.events_per_batch,
+            batch_interval_ms = config.batch_interval_ms,
+            enable_waveform = config.enable_waveform,
+            "Runtime settings updated"
+        );
+        Ok(())
+    }
 }
 
 /// Emulator data source
@@ -228,6 +296,7 @@ impl CommandHandlerExt for EmulatorCommandExt {
 /// Supports command control via REP socket in separate task.
 pub struct Emulator {
     config: EmulatorConfig,
+    runtime_settings: Arc<RuntimeSettings>,
     data_socket: publish::Publish,
     shared_state: Arc<Mutex<ComponentSharedState>>,
     state_rx: watch::Receiver<ComponentState>,
@@ -252,9 +321,11 @@ impl Emulator {
         );
 
         let (state_tx, state_rx) = watch::channel(ComponentState::Idle);
+        let runtime_settings = Arc::new(RuntimeSettings::new(&config));
 
         Ok(Self {
             config,
+            runtime_settings,
             data_socket,
             shared_state: Arc::new(Mutex::new(ComponentSharedState::new())),
             state_rx,
@@ -278,8 +349,9 @@ impl Emulator {
     /// The pulse timing is randomized within the waveform window.
     fn generate_waveform(&self, energy: u16) -> Waveform {
         let mut rng = rand::thread_rng();
-        let n = self.config.waveform_samples;
-        let probes = self.config.waveform_probes;
+        // Use runtime settings for waveform parameters
+        let n = self.runtime_settings.waveform_samples();
+        let probes = self.runtime_settings.waveform_probes();
 
         // Pulse parameters
         let baseline: i16 = rng.gen_range(-50..50); // Small baseline fluctuation
@@ -392,10 +464,14 @@ impl Emulator {
     /// useful for testing fitting algorithms.
     fn generate_batch(&mut self) -> EventDataBatch {
         let mut rng = rand::thread_rng();
+        // Use runtime settings for events_per_batch
+        let events_per_batch = self.runtime_settings.events_per_batch();
+        let enable_waveform = self.runtime_settings.enable_waveform();
+
         let mut batch = EventDataBatch::with_capacity(
             self.config.source_id,
             self.sequence_number,
-            self.config.events_per_batch,
+            events_per_batch,
         );
 
         // Module number = source_id (each emulator represents one digitizer module)
@@ -404,7 +480,7 @@ impl Emulator {
         // Background ratio: 30% uniform, 70% Gaussian peak
         const BACKGROUND_RATIO: f64 = 0.3;
 
-        for _ in 0..self.config.events_per_batch {
+        for _ in 0..events_per_batch {
             let channel = rng.gen_range(0..self.config.channels_per_module);
 
             let energy: u16 = if rng.gen_bool(BACKGROUND_RATIO) {
@@ -434,7 +510,7 @@ impl Emulator {
                 0
             };
 
-            let event = if self.config.enable_waveform {
+            let event = if enable_waveform {
                 let waveform = self.generate_waveform(energy);
                 EventData::with_waveform(
                     module,
@@ -548,6 +624,7 @@ impl Emulator {
         let shutdown_for_cmd = shutdown.resubscribe();
         let stats_for_cmd = self.stats.clone();
         let rate_tracker_for_cmd = self.rate_tracker.clone();
+        let runtime_settings_for_cmd = self.runtime_settings.clone();
 
         let cmd_handle = tokio::spawn(async move {
             run_command_task(
@@ -559,6 +636,7 @@ impl Emulator {
                     let mut ext = EmulatorCommandExt {
                         stats: stats_for_cmd.clone(),
                         rate_tracker: rate_tracker_for_cmd.clone(),
+                        runtime_settings: runtime_settings_for_cmd.clone(),
                     };
                     handle_command(state, tx, cmd, Some(&mut ext))
                 },

@@ -24,8 +24,8 @@ use clap::Parser;
 use delila_rs::common::OperatorArgs;
 use delila_rs::config::Config;
 use delila_rs::operator::{
-    create_router_with_config, create_router_with_mongodb, ComponentConfig, OperatorConfig,
-    RunRepository,
+    create_router_with_emulator_settings, ComponentConfig, DigitizerConfigRepository,
+    EmulatorSettings, OperatorConfig, RunRepository,
 };
 use tracing::{info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
@@ -48,8 +48,8 @@ struct Args {
     mongodb_database: String,
 }
 
-/// Load component configuration and operator config from config file or use defaults
-fn load_config(config_file: &str) -> (Vec<ComponentConfig>, OperatorConfig) {
+/// Load component configuration, operator config, and emulator settings from config file
+fn load_config(config_file: &str) -> (Vec<ComponentConfig>, OperatorConfig, EmulatorSettings) {
     // Try to load from config file
     if let Ok(config) = Config::load(config_file) {
         info!("Loaded configuration from {}", config_file);
@@ -58,7 +58,13 @@ fn load_config(config_file: &str) -> (Vec<ComponentConfig>, OperatorConfig) {
             experiment_name: config.operator.experiment_name,
             ..OperatorConfig::default()
         };
-        return (components, operator_config);
+        // Load emulator settings from config
+        let emulator_settings = if let Ok(settings) = config.settings.get_settings() {
+            EmulatorSettings::from(&settings)
+        } else {
+            EmulatorSettings::default()
+        };
+        return (components, operator_config, emulator_settings);
     }
 
     warn!(
@@ -73,29 +79,38 @@ fn load_config(config_file: &str) -> (Vec<ComponentConfig>, OperatorConfig) {
             name: "Emulator 0".to_string(),
             address: "tcp://localhost:5560".to_string(),
             pipeline_order: 1, // upstream (data source)
+            is_master: false,
         },
         ComponentConfig {
             name: "Emulator 1".to_string(),
             address: "tcp://localhost:5561".to_string(),
             pipeline_order: 1, // upstream (data source)
+            is_master: false,
         },
         ComponentConfig {
             name: "Merger".to_string(),
             address: "tcp://localhost:5570".to_string(),
             pipeline_order: 2, // middle
+            is_master: false,
         },
         ComponentConfig {
             name: "Recorder".to_string(),
             address: "tcp://localhost:5580".to_string(),
             pipeline_order: 3, // downstream (data sink)
+            is_master: false,
         },
         ComponentConfig {
             name: "Monitor".to_string(),
             address: "tcp://localhost:5590".to_string(),
             pipeline_order: 3, // downstream (data sink)
+            is_master: false,
         },
     ];
-    (components, OperatorConfig::default())
+    (
+        components,
+        OperatorConfig::default(),
+        EmulatorSettings::default(),
+    )
 }
 
 /// Build ComponentConfig list from parsed Config
@@ -117,6 +132,8 @@ fn build_components_from_config(config: &Config) -> Vec<ComponentConfig> {
             name,
             address,
             pipeline_order: source.pipeline_order,
+            // Only digitizers can be masters (emulators are always non-master)
+            is_master: source.is_master_digitizer(),
         });
     }
 
@@ -131,6 +148,7 @@ fn build_components_from_config(config: &Config) -> Vec<ComponentConfig> {
             name: "Merger".to_string(),
             address,
             pipeline_order: merger.pipeline_order,
+            is_master: false,
         });
     }
 
@@ -145,6 +163,7 @@ fn build_components_from_config(config: &Config) -> Vec<ComponentConfig> {
             name: "Recorder".to_string(),
             address,
             pipeline_order: recorder.pipeline_order,
+            is_master: false,
         });
     }
 
@@ -159,6 +178,7 @@ fn build_components_from_config(config: &Config) -> Vec<ComponentConfig> {
             name: "Monitor".to_string(),
             address,
             pipeline_order: monitor.pipeline_order,
+            is_master: false,
         });
     }
 
@@ -175,49 +195,68 @@ async fn main() -> anyhow::Result<()> {
         .finish();
     tracing::subscriber::set_global_default(subscriber)?;
 
-    // Load component and operator configuration
-    let (components, operator_config) = load_config(&args.operator.common.config_file);
+    // Load component, operator, and emulator configuration
+    let (components, operator_config, emulator_settings) =
+        load_config(&args.operator.common.config_file);
     info!("Loaded {} component(s)", components.len());
     for comp in &components {
         info!("  {} -> {}", comp.name, comp.address);
     }
     info!("Experiment name: {}", operator_config.experiment_name);
+    info!(
+        "Emulator settings: {} events/batch, {}ms interval",
+        emulator_settings.events_per_batch, emulator_settings.batch_interval_ms
+    );
 
     // Connect to MongoDB if URI is provided
-    let run_repo = if let Some(ref uri) = args.mongodb_uri {
-        match RunRepository::connect(uri, &args.mongodb_database).await {
-            Ok(repo) => {
-                info!(
-                    "Connected to MongoDB at {} (database: {})",
-                    uri, args.mongodb_database
-                );
-                Some(repo)
-            }
-            Err(e) => {
-                warn!(
-                    "Failed to connect to MongoDB: {}. Run history will not be available.",
-                    e
-                );
-                None
+    let (run_repo, digitizer_repo) = if let Some(ref uri) = args.mongodb_uri {
+        use mongodb::options::ClientOptions;
+        use mongodb::Client;
+
+        // Try to connect to MongoDB
+        let connect_result: Option<(RunRepository, DigitizerConfigRepository)> = async {
+            let options = ClientOptions::parse(uri).await.ok()?;
+            let client = Client::with_options(options).ok()?;
+
+            // Test connection
+            client
+                .database("admin")
+                .run_command(mongodb::bson::doc! { "ping": 1 })
+                .await
+                .ok()?;
+
+            info!(
+                "Connected to MongoDB at {} (database: {})",
+                uri, args.mongodb_database
+            );
+
+            let run_repo = RunRepository::new(&client, &args.mongodb_database);
+            let digitizer_repo = DigitizerConfigRepository::new(&client, &args.mongodb_database);
+            Some((run_repo, digitizer_repo))
+        }
+        .await;
+
+        match connect_result {
+            Some((run_repo, digitizer_repo)) => (Some(run_repo), Some(digitizer_repo)),
+            None => {
+                warn!("Failed to connect to MongoDB. Run history will not be available.");
+                (None, None)
             }
         }
     } else {
         info!("MongoDB not configured. Run history will not be available.");
-        None
+        (None, None)
     };
 
-    // Create router
-    let app = if let Some(repo) = run_repo {
-        create_router_with_mongodb(
-            components,
-            operator_config,
-            PathBuf::from("./config/digitizers"),
-            repo,
-        )
-    } else {
-        // Without MongoDB, use with_config to pass experiment_name
-        create_router_with_config(components, operator_config)
-    };
+    // Create router with emulator settings
+    let app = create_router_with_emulator_settings(
+        components,
+        operator_config,
+        PathBuf::from("./config/digitizers"),
+        run_repo,
+        digitizer_repo,
+        emulator_settings,
+    );
 
     // Start server
     let port = args.operator.port;
