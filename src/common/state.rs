@@ -291,7 +291,10 @@ pub fn handle_command<E: CommandHandlerExt>(
             if current != ComponentState::Idle {
                 return CommandResponse::error(
                     current,
-                    format!("Detect only available from Idle state, currently {}", current),
+                    format!(
+                        "Detect only available from Idle state, currently {}",
+                        current
+                    ),
                 );
             }
 

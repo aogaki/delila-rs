@@ -24,9 +24,7 @@ fn compute_checksum(ev: &EventData) -> u64 {
 
 /// Verify that every event in a reader passes the checksum.
 /// Returns the total number of events checked.
-fn verify_all_checksums<R: std::io::Read + std::io::Seek>(
-    reader: &mut DataFileReader<R>,
-) -> u64 {
+fn verify_all_checksums<R: std::io::Read + std::io::Seek>(reader: &mut DataFileReader<R>) -> u64 {
     let mut count = 0u64;
     for batch_result in reader.data_blocks() {
         let batch = batch_result.expect("read batch");

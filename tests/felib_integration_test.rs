@@ -325,7 +325,9 @@ fn test_read_data_with_test_pulse() {
 
     // Arm and start
     handle.send_command("/cmd/armacquisition").expect("Arm");
-    handle.send_command("/cmd/swstartacquisition").expect("Start");
+    handle
+        .send_command("/cmd/swstartacquisition")
+        .expect("Start");
     println!("Acquisition started with test pulse");
 
     // Wait for some data
@@ -406,7 +408,9 @@ fn test_decode_test_pulse_events() {
 
     // Start acquisition
     handle.send_command("/cmd/armacquisition").expect("Arm");
-    handle.send_command("/cmd/swstartacquisition").expect("Start");
+    handle
+        .send_command("/cmd/swstartacquisition")
+        .expect("Start");
 
     // Read and decode data
     std::thread::sleep(std::time::Duration::from_millis(100));
@@ -634,9 +638,7 @@ fn test_ch4_pulser_signal() {
     });
 
     // Acquire data
-    handle
-        .send_command("/cmd/armacquisition")
-        .expect("Arm");
+    handle.send_command("/cmd/armacquisition").expect("Arm");
     handle
         .send_command("/cmd/swstartacquisition")
         .expect("Start");
@@ -670,9 +672,7 @@ fn test_ch4_pulser_signal() {
     }
 
     // Stop acquisition
-    handle
-        .send_command("/cmd/disarmacquisition")
-        .expect("Stop");
+    handle.send_command("/cmd/disarmacquisition").expect("Stop");
 
     // Analyze results
     println!("\n=== ch4 Pulser Signal Analysis ===");
@@ -740,12 +740,7 @@ fn test_ch4_pulser_signal() {
     println!("\nTimestamp intervals (first 20):");
     for i in 0..std::cmp::min(20, ch4_events.len().saturating_sub(1)) {
         let dt = ch4_events[i + 1].timestamp_ns - ch4_events[i].timestamp_ns;
-        println!(
-            "  [{:2}] dt = {:.2} ns ({:.2} us)",
-            i,
-            dt,
-            dt / 1000.0
-        );
+        println!("  [{:2}] dt = {:.2} ns ({:.2} us)", i, dt, dt / 1000.0);
     }
 
     // Print first 10 events

@@ -91,10 +91,7 @@ pub(super) async fn get_run_config_snapshot(
         .map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiResponse::error(format!(
-                    "Failed to get snapshot: {}",
-                    e
-                ))),
+                Json(ApiResponse::error(format!("Failed to get snapshot: {}", e))),
             )
         })?
         .ok_or_else(|| {

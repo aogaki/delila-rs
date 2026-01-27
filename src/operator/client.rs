@@ -288,7 +288,11 @@ impl ComponentClient {
 
             let start_names: Vec<_> = to_start.iter().map(|c| c.name.as_str()).collect();
             if !to_start.is_empty() {
-                tracing::info!("Starting group order={}: {:?} in parallel...", order, start_names);
+                tracing::info!(
+                    "Starting group order={}: {:?} in parallel...",
+                    order,
+                    start_names
+                );
             }
 
             // Start only non-slave components in this group in parallel

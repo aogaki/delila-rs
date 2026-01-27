@@ -1,4 +1,4 @@
-import { Injectable, signal } from '@angular/core';
+import { Injectable, inject, signal } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
 import { EmulatorConfig, ApiResponse } from '../models/types';
 import { firstValueFrom } from 'rxjs';
@@ -15,7 +15,7 @@ export class EmulatorService {
   // Flag to use mock data when API is unavailable
   private useMock = false;
 
-  constructor(private http: HttpClient) {}
+  private readonly http = inject(HttpClient);
 
   /**
    * Load emulator configuration from the API

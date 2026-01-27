@@ -300,7 +300,10 @@ impl DigitizerConfigRepository {
     }
 
     /// Delete old config versions (keep only the last N versions per digitizer)
-    pub async fn cleanup_old_versions(&self, keep_versions: u32) -> Result<u64, DigitizerRepoError> {
+    pub async fn cleanup_old_versions(
+        &self,
+        keep_versions: u32,
+    ) -> Result<u64, DigitizerRepoError> {
         // Get all digitizer IDs
         let current_configs = self.list_current_configs().await?;
         let mut total_deleted = 0u64;

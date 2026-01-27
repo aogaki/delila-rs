@@ -304,11 +304,7 @@ impl DigitizerConfig {
     }
 
     /// Create a master digitizer config
-    pub fn new_master(
-        digitizer_id: u32,
-        name: impl Into<String>,
-        firmware: FirmwareType,
-    ) -> Self {
+    pub fn new_master(digitizer_id: u32, name: impl Into<String>, firmware: FirmwareType) -> Self {
         let mut config = Self::new(digitizer_id, name, firmware);
         config.is_master = true;
         config.sync = Some(SyncConfig {
@@ -428,7 +424,12 @@ impl DigitizerConfig {
         }
 
         // Board start source (if not set by sync config)
-        if self.sync.as_ref().and_then(|s| s.start_source.as_ref()).is_none() {
+        if self
+            .sync
+            .as_ref()
+            .and_then(|s| s.start_source.as_ref())
+            .is_none()
+        {
             if let Some(ref v) = board.start_source {
                 params.push(CaenParameter {
                     path: "/par/startsource".to_string(),

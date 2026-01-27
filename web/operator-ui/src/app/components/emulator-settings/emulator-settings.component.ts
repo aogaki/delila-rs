@@ -1,4 +1,4 @@
-import { Component, OnInit, signal, computed } from '@angular/core';
+import { Component, OnInit, computed, inject } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { MatCardModule } from '@angular/material/card';
@@ -310,10 +310,8 @@ export class EmulatorSettingsComponent implements OnInit {
     return `${bytesPerSec.toFixed(0)} B/s`;
   });
 
-  constructor(
-    public emulatorService: EmulatorService,
-    private snackBar: MatSnackBar
-  ) {}
+  readonly emulatorService = inject(EmulatorService);
+  private readonly snackBar = inject(MatSnackBar);
 
   async ngOnInit(): Promise<void> {
     await this.emulatorService.loadConfig();
@@ -334,7 +332,7 @@ export class EmulatorSettingsComponent implements OnInit {
       await this.emulatorService.updateConfig(this.editConfig);
       this.originalConfig = { ...this.editConfig };
       this.snackBar.open('Configuration applied', 'OK', { duration: 2000 });
-    } catch (error) {
+    } catch {
       this.snackBar.open('Failed to apply configuration', 'OK', { duration: 3000 });
     }
   }
@@ -343,7 +341,7 @@ export class EmulatorSettingsComponent implements OnInit {
     try {
       await this.emulatorService.saveConfig();
       this.snackBar.open('Configuration saved to file', 'OK', { duration: 2000 });
-    } catch (error) {
+    } catch {
       this.snackBar.open('Failed to save configuration', 'OK', { duration: 3000 });
     }
   }

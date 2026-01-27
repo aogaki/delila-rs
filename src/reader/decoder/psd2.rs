@@ -207,7 +207,9 @@ impl Psd2Decoder {
                             event.timestamp_ns, event.energy, event.energy_short, event.flags
                         );
                         // Show surrounding raw words
-                        for wi in evt_start.saturating_sub(1)..=(word_index).min(total_words.saturating_sub(1)) {
+                        for wi in evt_start.saturating_sub(1)
+                            ..=(word_index).min(total_words.saturating_sub(1))
+                        {
                             if wi < total_words {
                                 let w = self.read_u64(&raw.data, wi);
                                 let bit63 = (w >> 63) & 1;
@@ -384,9 +386,8 @@ impl Psd2Decoder {
 
         // Standard multi-word event
         // Check special_event flag (bit 55)
-        let is_special_event = ((first_word >> constants::SPECIAL_EVENT_SHIFT)
-            & constants::SPECIAL_EVENT_MASK)
-            != 0;
+        let is_special_event =
+            ((first_word >> constants::SPECIAL_EVENT_SHIFT) & constants::SPECIAL_EVENT_MASK) != 0;
 
         // Extract raw timestamp (48 bits)
         let raw_timestamp = first_word & constants::TIMESTAMP_MASK;
@@ -485,15 +486,11 @@ impl Psd2Decoder {
     /// [63:last=1][62:56 channel][55:48 flag_high_priority][47:16 timestamp_reduced][15:0 energy]
     /// ```
     /// No energy_short, fine_time, flags_low, or waveform in this format.
-    fn decode_single_word_event(
-        &self,
-        word: u64,
-        channel: u8,
-    ) -> Option<EventData> {
+    fn decode_single_word_event(&self, word: u64, channel: u8) -> Option<EventData> {
         let flags_high = ((word >> constants::SINGLE_WORD_FLAG_HIGH_SHIFT)
             & constants::FLAGS_HIGH_PRIORITY_MASK) as u32;
-        let timestamp_reduced = (word >> constants::FINE_TIME_SHIFT)
-            & constants::TIMESTAMP_REDUCED_MASK;
+        let timestamp_reduced =
+            (word >> constants::FINE_TIME_SHIFT) & constants::TIMESTAMP_REDUCED_MASK;
         let energy = (word & constants::ENERGY_MASK) as u16;
 
         let timestamp_ns = (timestamp_reduced as f64) * self.config.time_step_ns;
@@ -964,7 +961,7 @@ mod tests {
 
         // Single-word event: last=1, channel=10, flag_high=0x03, timestamp=5000, energy=2000
         let data = words_to_bytes(&[
-            make_header(2),                              // header: 2 words total
+            make_header(2),                               // header: 2 words total
             make_single_word_event(10, 0x03, 5000, 2000), // single-word event
         ]);
 
@@ -993,10 +990,10 @@ mod tests {
 
         // Special event with one extra word (time_info)
         let data = words_to_bytes(&[
-            make_header(4), // 4 words total
-            make_special_first_word(3, 1000), // special event, channel=3
+            make_header(4),                                // 4 words total
+            make_special_first_word(3, 1000),              // special event, channel=3
             make_second_word(false, false, 0, 0, 0, 0, 0), // 2nd word, last=0
-            make_extra_word(true, 1), // extra: last=1, type=time_info
+            make_extra_word(true, 1),                      // extra: last=1, type=time_info
         ]);
 
         let raw = RawData {
@@ -1077,10 +1074,10 @@ mod tests {
 
         // Mix: standard event + single-word event
         let data = words_to_bytes(&[
-            make_header(4),                        // 4 words
-            make_first_word(1, 100),               // standard: 1st word
+            make_header(4),                                 // 4 words
+            make_first_word(1, 100),                        // standard: 1st word
             make_second_word(true, false, 0, 0, 0, 0, 500), // standard: 2nd word
-            make_single_word_event(2, 0, 200, 800), // single-word event
+            make_single_word_event(2, 0, 200, 800),         // single-word event
         ]);
 
         let raw = RawData {

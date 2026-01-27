@@ -24,13 +24,14 @@ use crate::config::{DigitizerConfig, Settings as ConfigSettings};
 
 use super::{
     ApiResponse, CommandResult, ComponentClient, ComponentConfig, ComponentStatus,
-    ConfigureRequest, CurrentRunInfo, DigitizerConfigRepository,
-    LastRunInfo, OperatorConfig, RunNote, RunRepository, RunStats, RunStatus,
-    StartRequest, SystemState, SystemStatus,
+    ConfigureRequest, CurrentRunInfo, DigitizerConfigRepository, LastRunInfo, OperatorConfig,
+    RunNote, RunRepository, RunStats, RunStatus, StartRequest, SystemState, SystemStatus,
 };
 
 // Re-export public types from sub-modules (used in OpenAPI schemas)
-pub use digitizer::{DetectResponse, DetectedDigitizer, DigitizerConfigHistoryItem, RestoreVersionRequest};
+pub use digitizer::{
+    DetectResponse, DetectedDigitizer, DigitizerConfigHistoryItem, RestoreVersionRequest,
+};
 pub use run::{AddNoteRequest, NextRunNumberResponse};
 
 // Import handler functions from sub-modules (used in router and ApiDoc)
@@ -281,9 +282,15 @@ impl RouterBuilder {
             .route("/api/digitizers/:id", get(get_digitizer))
             .route("/api/digitizers/:id", put(update_digitizer))
             .route("/api/digitizers/:id/save", post(save_digitizer))
-            .route("/api/digitizers/:id/save-to-db", post(save_digitizer_to_mongodb))
+            .route(
+                "/api/digitizers/:id/save-to-db",
+                post(save_digitizer_to_mongodb),
+            )
             .route("/api/digitizers/:id/history", get(get_digitizer_history))
-            .route("/api/digitizers/:id/restore", post(restore_digitizer_version))
+            .route(
+                "/api/digitizers/:id/restore",
+                post(restore_digitizer_version),
+            )
             // Run config snapshots
             .route("/api/runs/:run_number/config", get(get_run_config_snapshot))
             // Emulator settings routes

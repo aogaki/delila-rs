@@ -326,7 +326,7 @@ export class HistogramChartComponent implements OnChanges {
     data: number[][],
     xMin: number,
     xMax: number,
-    maxBars: number = 1024,
+    maxBars = 1024,
   ): number[][] {
     // Filter to visible range
     const visible = data.filter(([x]) => x >= xMin && x <= xMax);

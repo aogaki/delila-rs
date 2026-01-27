@@ -587,7 +587,7 @@ export class DigitizerSettingsComponent {
           duration: 5000,
         });
       }
-    } catch (e) {
+    } catch {
       this.snackBar.open('Failed to detect hardware', 'Close', {
         duration: 5000,
       });

@@ -112,11 +112,7 @@ pub(super) async fn detect_digitizers(
     State(state): State<Arc<AppState>>,
 ) -> (StatusCode, Json<DetectResponse>) {
     // Filter for physical digitizer components
-    let digitizer_components: Vec<_> = state
-        .components
-        .iter()
-        .filter(|c| c.is_digitizer)
-        .collect();
+    let digitizer_components: Vec<_> = state.components.iter().filter(|c| c.is_digitizer).collect();
 
     if digitizer_components.is_empty() {
         return (
@@ -146,24 +142,24 @@ pub(super) async fn detect_digitizers(
                         .and_then(|v| v.as_str())
                         .map(|s| s.to_string());
 
-                    let (config_found, config) =
-                        if let (Some(ref repo), Some(ref serial)) = (&state.digitizer_repo, &serial)
-                        {
-                            match repo.get_config_by_serial(serial).await {
-                                Ok(Some(doc)) => (true, Some(doc.config)),
-                                Ok(None) => (false, None),
-                                Err(e) => {
-                                    tracing::warn!(
-                                        "Failed to lookup config by serial {}: {}",
-                                        serial,
-                                        e
-                                    );
-                                    (false, None)
-                                }
+                    let (config_found, config) = if let (Some(ref repo), Some(ref serial)) =
+                        (&state.digitizer_repo, &serial)
+                    {
+                        match repo.get_config_by_serial(serial).await {
+                            Ok(Some(doc)) => (true, Some(doc.config)),
+                            Ok(None) => (false, None),
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Failed to lookup config by serial {}: {}",
+                                    serial,
+                                    e
+                                );
+                                (false, None)
                             }
-                        } else {
-                            (false, None)
-                        };
+                        }
+                    } else {
+                        (false, None)
+                    };
 
                     detected.push(DetectedDigitizer {
                         component_name: comp.name.clone(),

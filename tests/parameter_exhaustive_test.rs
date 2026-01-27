@@ -414,7 +414,10 @@ fn test_write_safe_parameters() {
         }
 
         // Write test value
-        print!("[TEST] {} : {} -> {} ... ", param.name, original, test_value);
+        print!(
+            "[TEST] {} : {} -> {} ... ",
+            param.name, original, test_value
+        );
 
         match handle.set_value(&path, &test_value) {
             Ok(()) => {

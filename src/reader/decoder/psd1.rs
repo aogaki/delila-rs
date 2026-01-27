@@ -220,8 +220,8 @@ impl Psd1Decoder {
         }
 
         let word0 = read_u32(&raw.data, 0);
-        let header_type = (word0 >> constants::board_header::TYPE_SHIFT)
-            & constants::board_header::TYPE_MASK;
+        let header_type =
+            (word0 >> constants::board_header::TYPE_SHIFT) & constants::board_header::TYPE_MASK;
 
         if header_type == constants::board_header::TYPE_DATA {
             DataType::Event
@@ -324,10 +324,7 @@ impl Psd1Decoder {
                 Ok(mut ch_events) => events.append(&mut ch_events),
                 Err(msg) => {
                     if self.config.dump_enabled {
-                        println!(
-                            "[PSD1] Dual channel pair {} error: {}",
-                            pair_index, msg
-                        );
+                        println!("[PSD1] Dual channel pair {} error: {}", pair_index, msg);
                     }
                     // Skip to block end
                     *offset = block_end;
@@ -384,8 +381,7 @@ impl Psd1Decoder {
     ) -> Result<Vec<EventData>, String> {
         let ch_header = self.decode_dual_channel_header(data, *offset)?;
 
-        let ch_block_end =
-            *offset + (ch_header.block_size as usize) * constants::WORD_SIZE;
+        let ch_block_end = *offset + (ch_header.block_size as usize) * constants::WORD_SIZE;
         let ch_block_end = ch_block_end.min(block_end);
 
         *offset += constants::channel_header::HEADER_SIZE_WORDS * constants::WORD_SIZE;
@@ -430,17 +426,13 @@ impl Psd1Decoder {
             block_size: w0 & constants::channel_header::DUAL_CHANNEL_SIZE_MASK,
             num_samples_wave: (w1 & constants::channel_header::NUM_SAMPLES_MASK) as u16,
             digital_probe1: ((w1 >> constants::channel_header::DIGITAL_PROBE1_SHIFT)
-                & constants::channel_header::DIGITAL_PROBE1_MASK)
-                as u8,
+                & constants::channel_header::DIGITAL_PROBE1_MASK) as u8,
             digital_probe2: ((w1 >> constants::channel_header::DIGITAL_PROBE2_SHIFT)
-                & constants::channel_header::DIGITAL_PROBE2_MASK)
-                as u8,
+                & constants::channel_header::DIGITAL_PROBE2_MASK) as u8,
             analog_probe: ((w1 >> constants::channel_header::ANALOG_PROBE_SHIFT)
-                & constants::channel_header::ANALOG_PROBE_MASK)
-                as u8,
+                & constants::channel_header::ANALOG_PROBE_MASK) as u8,
             extra_option: ((w1 >> constants::channel_header::EXTRA_OPTION_SHIFT)
-                & constants::channel_header::EXTRA_OPTION_MASK)
-                as u8,
+                & constants::channel_header::EXTRA_OPTION_MASK) as u8,
             samples_enabled: ((w1 >> constants::channel_header::SAMPLES_ENABLED_SHIFT) & 1) != 0,
             extras_enabled: ((w1 >> constants::channel_header::EXTRAS_ENABLED_SHIFT) & 1) != 0,
             time_enabled: ((w1 >> constants::channel_header::TIME_ENABLED_SHIFT) & 1) != 0,
@@ -560,15 +552,13 @@ impl Psd1Decoder {
             *offset += constants::WORD_SIZE;
 
             // Lower half: sample 2N
-            let s1_analog =
-                (w & constants::waveform::ANALOG_SAMPLE_MASK) as i16;
+            let s1_analog = (w & constants::waveform::ANALOG_SAMPLE_MASK) as i16;
             let s1_dp1 = ((w >> constants::waveform::DP1_SHIFT) & 1) as u8;
             let s1_dp2 = ((w >> constants::waveform::DP2_SHIFT) & 1) as u8;
 
             // Upper half: sample 2N+1
             let upper = w >> constants::waveform::SECOND_SAMPLE_SHIFT;
-            let s2_analog =
-                (upper & constants::waveform::ANALOG_SAMPLE_MASK) as i16;
+            let s2_analog = (upper & constants::waveform::ANALOG_SAMPLE_MASK) as i16;
             let s2_dp1 = ((upper >> constants::waveform::DP1_SHIFT) & 1) as u8;
             let s2_dp2 = ((upper >> constants::waveform::DP2_SHIFT) & 1) as u8;
 
@@ -614,15 +604,13 @@ fn read_u32(data: &[u8], offset: usize) -> u32 {
 ///
 /// Returns (extended_time, fine_time, flags)
 fn decode_extras_word(word: u32, extra_option: u8) -> (u16, u16, u32) {
-    let extended_time =
-        ((word >> constants::event::EXTENDED_TIME_SHIFT) & constants::event::EXTENDED_TIME_MASK)
-            as u16;
+    let extended_time = ((word >> constants::event::EXTENDED_TIME_SHIFT)
+        & constants::event::EXTENDED_TIME_MASK) as u16;
 
     match extra_option {
         // 0b010: Extended time + flags + fine time
         2 => {
-            let flags =
-                (word >> constants::event::FLAGS_SHIFT) & constants::event::FLAGS_MASK;
+            let flags = (word >> constants::event::FLAGS_SHIFT) & constants::event::FLAGS_MASK;
             let fine_time = (word & constants::event::FINE_TIME_MASK) as u16;
             (extended_time, fine_time, flags)
         }
@@ -1079,7 +1067,7 @@ mod tests {
     #[test]
     fn test_calculate_timestamp_basic() {
         let config = Psd1Config::default(); // 2 ns
-        // trigger_time = 1000, ext = 0, fine = 0
+                                            // trigger_time = 1000, ext = 0, fine = 0
         let ts = calculate_timestamp(&config, 1000, 0, 0);
         assert!((ts - 2000.0).abs() < 0.001); // 1000 * 2 ns
     }

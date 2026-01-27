@@ -9,8 +9,8 @@ pub mod caen;
 pub mod decoder;
 
 // Re-exports
-pub use caen::{CaenError, CaenHandle, EndpointHandle};
 pub use crate::config::FirmwareType;
+pub use caen::{CaenError, CaenHandle, EndpointHandle};
 pub use decoder::{
     DataType, DecodeResult, EventData, Psd1Config, Psd1Decoder, Psd2Config, Psd2Decoder, Waveform,
 };
@@ -273,10 +273,7 @@ impl CommandHandlerExt for ReaderCommandExt {
 ///
 /// For DIG1 (PSD1/PHA) with START_MODE_SW, the actual arm is deferred to start phase.
 /// For DIG2 (PSD2), always sends armacquisition immediately.
-fn send_arm_command(
-    handle: &CaenHandle,
-    firmware: FirmwareType,
-) -> Result<(), caen::CaenError> {
+fn send_arm_command(handle: &CaenHandle, firmware: FirmwareType) -> Result<(), caen::CaenError> {
     if firmware.is_dig1() {
         let startmode = handle.get_value("/par/startmode").unwrap_or_default();
         if startmode == "START_MODE_SW" {
@@ -296,10 +293,7 @@ fn send_arm_command(
 ///
 /// For DIG2 (PSD2), sends swstartacquisition.
 /// For DIG1 (PSD1/PHA) with START_MODE_SW, sends armacquisition (arm=start).
-fn send_start_command(
-    handle: &CaenHandle,
-    firmware: FirmwareType,
-) -> Result<(), caen::CaenError> {
+fn send_start_command(handle: &CaenHandle, firmware: FirmwareType) -> Result<(), caen::CaenError> {
     if firmware.is_dig1() {
         let startmode = handle.get_value("/par/startmode").unwrap_or_default();
         if startmode == "START_MODE_SW" {

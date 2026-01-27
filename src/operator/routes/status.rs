@@ -2,17 +2,13 @@
 
 use std::sync::Arc;
 
-use axum::{
-    extract::State,
-    http::StatusCode,
-    Json,
-};
+use axum::{extract::State, http::StatusCode, Json};
 
 use crate::common::RunConfig;
 
 use super::super::{
-    ApiResponse, ConfigureRequest, CurrentRunInfo, RunStats, RunStatus,
-    StartRequest, SystemState, SystemStatus,
+    ApiResponse, ConfigureRequest, CurrentRunInfo, RunStats, RunStatus, StartRequest, SystemState,
+    SystemStatus,
 };
 use super::AppState;
 
