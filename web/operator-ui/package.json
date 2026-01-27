@@ -39,6 +39,10 @@
     "tslib": "^2.3.0",
     "zone.js": "~0.15.0"
   },
+  "overrides": {
+    "lodash": "^4.17.22",
+    "tar": "^7.5.4"
+  },
   "devDependencies": {
     "@angular/build": "^20.2.0",
     "@angular/cli": "^21.1.0",
