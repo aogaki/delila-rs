@@ -12,10 +12,7 @@ pub use client::ComponentClient;
 pub use digitizer_repository::{
     DigitizerConfigDocument, DigitizerConfigRepository, DigitizerRepoError, RunConfigSnapshot,
 };
-pub use routes::{
-    create_router, create_router_with_config, create_router_with_emulator_settings,
-    create_router_with_mongodb, EmulatorSettings,
-};
+pub use routes::{EmulatorSettings, RouterBuilder};
 pub use run_repository::{
     CurrentRunInfo, ErrorLogEntry, LastRunInfo, RepositoryError, RunDocument, RunNote,
     RunRepository, RunStats, RunStatus,
@@ -218,6 +215,11 @@ pub struct ComponentConfig {
     ///
     /// For non-digitizer components (Merger, Recorder, Monitor), this is always false.
     pub is_master: bool,
+    /// Source ID from config (only for data sources: emulators, readers)
+    /// None for non-source components (Merger, Recorder, Monitor).
+    pub source_id: Option<u32>,
+    /// Whether this source is a physical digitizer (PSD1/PSD2/PHA, not emulator)
+    pub is_digitizer: bool,
 }
 
 /// Operator configuration with timeouts
@@ -451,6 +453,8 @@ mod tests {
             address: "tcp://localhost:5570".to_string(),
             pipeline_order: 2,
             is_master: false,
+            source_id: None,
+            is_digitizer: false,
         };
         assert_eq!(config.name, "Merger");
         assert!(config.address.contains("5570"));
@@ -465,6 +469,8 @@ mod tests {
             address: "tcp://localhost:5560".to_string(),
             pipeline_order: 1,
             is_master: true,
+            source_id: Some(0),
+            is_digitizer: true,
         };
         assert_eq!(config.name, "PSD2-Master");
         assert!(config.is_master);

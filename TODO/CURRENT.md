@@ -67,10 +67,31 @@ Phase 3 で修正した主な課題:
 
 ---
 
+## ~~データ出力検証 (Task B)~~ ✅ 完了 (2026-01-26)
+
+→ `TODO/archive/phase4_data_verification/18_data_verification.md`
+
+- E2E テスト: 4テスト全パス (flags に per-event XOR チェックサム, シード付き乱数)
+- `recover validate`: emulator データ 59,560,000 イベント Valid
+- `recover dump`: flat binary 変換成功 (22 bytes/event, サイズ整合確認)
+- `macros/read_dump.C`: legacy Recorder 互換 TTree (DELILA_Tree)
+
+## ~~Phase 6 — デジタイザ設定 UI~~ ✅ 実装完了 (2026-01-27)
+
+→ `TODO/19_settings_ui.md`
+
+**実装内容:**
+1. Reader Detect コマンド (FELib一時接続 → DeviceInfo取得 → 切断)
+2. MongoDB スキーマ拡張 (serial_number, model + serial検索)
+3. REST API 拡張 (POST /api/digitizers/detect, GET /api/digitizers/by-serial/:serial)
+4. Angular チャンネルテーブルコンポーネント (横スクロール, sticky列, override ハイライト)
+5. digitizer-settings 3タブ化 (Board / Frequent / Advanced)
+6. config expand/compress ロジック (defaults+overrides ↔ flat per-channel)
+
 ## 次のセッション
 
-- Phase 6: Web UI Settings (Angular UI からデジタイザパラメータ変更)
-- Phase 10: Angular UI の rust-embed 統合 (現在は `ng serve` で別途起動が必要)
+- **A:** Multi-digitizer 統合テスト (PSD1 + PSD2)
+- **D:** Phase 10: Angular UI の rust-embed 統合
 
 ---
 
@@ -78,8 +99,9 @@ Phase 3 で修正した主な課題:
 
 | Priority | File | Status | Summary |
 |----------|------|--------|---------|
-| 1 | [15_digitizer_implementation.md](15_digitizer_implementation.md) | **In Progress** | VX2730 (PSD2) 実機デジタイザ実装 |
-| 2 | [11_operator_web_ui.md](11_operator_web_ui.md) | **In Progress** | Operator Web UI (Angular + Material) |
+| 1 | [19_settings_ui.md](19_settings_ui.md) | **Implemented** | Phase 6: デジタイザ設定 UI |
+| 2 | [15_digitizer_implementation.md](15_digitizer_implementation.md) | **In Progress** | VX2730 (PSD2) 実機デジタイザ実装 |
+| 3 | [11_operator_web_ui.md](11_operator_web_ui.md) | **In Progress** | Operator Web UI (Angular + Material) |
 | - | [16_linux_migration_checklist.md](16_linux_migration_checklist.md) | Reference | Linux移行チェックリスト |
 
 ---
@@ -98,7 +120,7 @@ Phase 3 で修正した主な課題:
 | 3 | Config Storage & Apply (MongoDB) | ✅ Complete |
 | 4 | Data Acquisition | ✅ Complete |
 | 5 | Reader + Master/Slave + PSD1 | ✅ Complete (Master/Slave ✅, PSD1 全Phase ✅) ← **MVP完了ライン** |
-| 6 | Web UI Settings | Pending |
+| 6 | Web UI Settings | ✅ Complete |
 | 7 | Future (Templates, Monitoring) | Future |
 
 ### Principles
@@ -122,6 +144,7 @@ Phase 3 で修正した主な課題:
 - PSD2 実機動作確認 (VX2730, ch4 パルサー 10kHz)
 - ヒストグラム表示修正 (max-value downsampling for sub-pixel bar rendering)
 - PSD1 デコーダ実装 + Reader統合 + DT5730B 実機検証 (10kHz パルサー, 全パラメータ適用成功)
+- データ出力検証 (E2E テスト + recover validate/dump + ROOT マクロ)
 
 ---
 
@@ -134,13 +157,14 @@ Phase 3 で修正した主な課題:
 | `archive/phase1_control_system/` | コントロールシステム設計 |
 | `archive/phase2_infrastructure/` | タイムスタンプソート、Metrics API、Source設定管理 |
 | `archive/phase3_psd_decoders/` | PSD2 バグフィックス、PSD1 デコーダ実装+実機検証 |
+| `archive/phase4_data_verification/` | データ出力検証 (E2E テスト、recover dump、ROOT マクロ) |
 
 ---
 
 ## Notes
 
 - **MVP目標:** 2026年3月中旬
-- **現在のフェーズ:** PSD2 実機動作確認済み / PSD1 全Phase完了 (デコーダ+Reader統合+実機検証)
+- **現在のフェーズ:** Phase 6 実装完了 / PSD2 実機動作確認済み / PSD1 全Phase完了 / データ出力検証完了
 - **実機確認済み:** VX2730 (Serial: 52622, DPP_PSD2, 32ch), DT5730B (Serial: 990, DPP_PSD1, 8ch, USB)
 - **動作環境:** Linux (Ubuntu, Rust 1.93.0) - Mac から移行済み
 

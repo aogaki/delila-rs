@@ -55,6 +55,17 @@ enum Commands {
         #[arg(short, long)]
         recursive: bool,
     },
+
+    /// Dump events to flat binary for ROOT analysis
+    Dump {
+        /// Input .delila file(s)
+        #[arg(required = true)]
+        files: Vec<PathBuf>,
+
+        /// Output flat binary path
+        #[arg(short, long)]
+        output: PathBuf,
+    },
 }
 
 fn main() {
@@ -84,6 +95,12 @@ fn main() {
             recursive,
         } => {
             if let Err(e) = list_files(&directory, recursive) {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        }
+        Commands::Dump { files, output } => {
+            if let Err(e) = dump_files(&files, &output) {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
             }
@@ -382,6 +399,89 @@ fn list_files(directory: &Path, recursive: bool) -> Result<(), Box<dyn std::erro
         valid_count, needs_recovery_count, corrupted_count
     );
 
+    Ok(())
+}
+
+/// Flat binary dump magic
+const DUMP_MAGIC: &[u8; 8] = b"DLDUMP01";
+
+/// Per-event record size: module(1) + channel(1) + energy(2) + energy_short(2) + flags(8) + timestamp_ns(8) = 22
+const EVENT_RECORD_SIZE: usize = 22;
+
+fn dump_files(files: &[PathBuf], output: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    // First pass: count total events across all files
+    let mut total_events = 0u64;
+    for path in files {
+        let file = File::open(path)?;
+        let reader = BufReader::new(file);
+        let mut data_reader = DataFileReader::new(reader)?;
+
+        // Try footer first (fast path)
+        if let Ok(footer) = data_reader.read_footer() {
+            if footer.is_complete() {
+                total_events += footer.total_events;
+                continue;
+            }
+        }
+        // Fallback: count via iteration
+        for batch_result in data_reader.data_blocks() {
+            let batch = batch_result?;
+            total_events += batch.events.len() as u64;
+        }
+    }
+
+    println!(
+        "Dumping {} events from {} file(s) to {}",
+        total_events,
+        files.len(),
+        output.display()
+    );
+
+    // Second pass: write flat binary
+    let out_file = File::create(output)?;
+    let mut writer = BufWriter::with_capacity(64 * 1024, out_file);
+
+    // Header: magic (8) + n_events (8) = 16 bytes
+    writer.write_all(DUMP_MAGIC)?;
+    writer.write_all(&total_events.to_le_bytes())?;
+
+    let mut written = 0u64;
+    for path in files {
+        let file = File::open(path)?;
+        let reader = BufReader::new(file);
+        let mut data_reader = DataFileReader::new(reader)?;
+
+        for batch_result in data_reader.data_blocks() {
+            let batch = batch_result?;
+            for ev in &batch.events {
+                // Fixed 22-byte record per event (all Little-Endian)
+                writer.write_all(&[ev.module])?;
+                writer.write_all(&[ev.channel])?;
+                writer.write_all(&ev.energy.to_le_bytes())?;
+                writer.write_all(&ev.energy_short.to_le_bytes())?;
+                writer.write_all(&ev.flags.to_le_bytes())?;
+                writer.write_all(&ev.timestamp_ns.to_le_bytes())?;
+                written += 1;
+            }
+        }
+    }
+
+    writer.flush()?;
+    writer.get_ref().sync_all()?;
+
+    let file_size = std::fs::metadata(output)?.len();
+    let expected_size = 16 + written * EVENT_RECORD_SIZE as u64;
+    println!("  Events written: {}", written);
+    println!("  Output size:    {} bytes", file_size);
+
+    if file_size != expected_size {
+        eprintln!(
+            "  Warning: size mismatch (expected {}, got {})",
+            expected_size, file_size
+        );
+    }
+
+    println!("\x1b[32m✓ Dump complete\x1b[0m");
     Ok(())
 }
 

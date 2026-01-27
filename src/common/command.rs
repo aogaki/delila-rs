@@ -74,7 +74,7 @@ impl ComponentState {
     pub fn valid_commands(&self) -> &'static [&'static str] {
         use ComponentState::*;
         match self {
-            Idle => &["Configure", "GetStatus"],
+            Idle => &["Configure", "Detect", "GetStatus"],
             Configured => &["Arm", "Reset", "GetStatus"],
             Armed => &["Start", "Reset", "GetStatus"],
             Running => &["Stop", "GetStatus"],
@@ -145,6 +145,10 @@ pub enum Command {
     /// Update emulator runtime configuration (Emulator-specific)
     /// Can be sent in any state, takes effect on next batch generation
     UpdateEmulatorConfig(EmulatorRuntimeConfig),
+    /// Detect connected hardware (Reader-only, Idle state)
+    /// Temporarily connects to digitizer, reads DeviceInfo, and disconnects.
+    /// Does not change state.
+    Detect,
 }
 
 impl std::fmt::Display for Command {
@@ -159,6 +163,7 @@ impl std::fmt::Display for Command {
             Command::UpdateEmulatorConfig(cfg) => {
                 write!(f, "UpdateEmulatorConfig(events={})", cfg.events_per_batch)
             }
+            Command::Detect => write!(f, "Detect"),
         }
     }
 }
@@ -181,6 +186,9 @@ pub struct CommandResponse {
     /// Component metrics (for status queries)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metrics: Option<super::ComponentMetrics>,
+    /// Generic data payload (e.g., DeviceInfo from Detect)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<serde_json::Value>,
 }
 
 impl CommandResponse {
@@ -193,6 +201,7 @@ impl CommandResponse {
             run_number: None,
             error_code: None,
             metrics: None,
+            data: None,
         }
     }
 
@@ -209,6 +218,7 @@ impl CommandResponse {
             run_number: Some(run_number),
             error_code: None,
             metrics: None,
+            data: None,
         }
     }
 
@@ -221,6 +231,7 @@ impl CommandResponse {
             run_number: None,
             error_code: None,
             metrics: None,
+            data: None,
         }
     }
 
@@ -237,7 +248,14 @@ impl CommandResponse {
             run_number: None,
             error_code: Some(error_code),
             metrics: None,
+            data: None,
         }
+    }
+
+    /// Add data payload to the response
+    pub fn with_data(mut self, data: serde_json::Value) -> Self {
+        self.data = Some(data);
+        self
     }
 
     /// Add metrics to the response

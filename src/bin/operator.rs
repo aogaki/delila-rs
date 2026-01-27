@@ -24,8 +24,8 @@ use clap::Parser;
 use delila_rs::common::OperatorArgs;
 use delila_rs::config::Config;
 use delila_rs::operator::{
-    create_router_with_emulator_settings, ComponentConfig, DigitizerConfigRepository,
-    EmulatorSettings, OperatorConfig, RunRepository,
+    ComponentConfig, DigitizerConfigRepository, EmulatorSettings, OperatorConfig, RouterBuilder,
+    RunRepository,
 };
 use tracing::{info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
@@ -78,32 +78,42 @@ fn load_config(config_file: &str) -> (Vec<ComponentConfig>, OperatorConfig, Emul
         ComponentConfig {
             name: "Emulator 0".to_string(),
             address: "tcp://localhost:5560".to_string(),
-            pipeline_order: 1, // upstream (data source)
+            pipeline_order: 1,
             is_master: false,
+            source_id: Some(0),
+            is_digitizer: false,
         },
         ComponentConfig {
             name: "Emulator 1".to_string(),
             address: "tcp://localhost:5561".to_string(),
-            pipeline_order: 1, // upstream (data source)
+            pipeline_order: 1,
             is_master: false,
+            source_id: Some(1),
+            is_digitizer: false,
         },
         ComponentConfig {
             name: "Merger".to_string(),
             address: "tcp://localhost:5570".to_string(),
-            pipeline_order: 2, // middle
+            pipeline_order: 2,
             is_master: false,
+            source_id: None,
+            is_digitizer: false,
         },
         ComponentConfig {
             name: "Recorder".to_string(),
             address: "tcp://localhost:5580".to_string(),
-            pipeline_order: 3, // downstream (data sink)
+            pipeline_order: 3,
             is_master: false,
+            source_id: None,
+            is_digitizer: false,
         },
         ComponentConfig {
             name: "Monitor".to_string(),
             address: "tcp://localhost:5590".to_string(),
-            pipeline_order: 3, // downstream (data sink)
+            pipeline_order: 3,
             is_master: false,
+            source_id: None,
+            is_digitizer: false,
         },
     ];
     (
@@ -132,8 +142,9 @@ fn build_components_from_config(config: &Config) -> Vec<ComponentConfig> {
             name,
             address,
             pipeline_order: source.pipeline_order,
-            // Only digitizers can be masters (emulators are always non-master)
             is_master: source.is_master_digitizer(),
+            source_id: Some(source.id),
+            is_digitizer: source.is_digitizer(),
         });
     }
 
@@ -149,6 +160,8 @@ fn build_components_from_config(config: &Config) -> Vec<ComponentConfig> {
             address,
             pipeline_order: merger.pipeline_order,
             is_master: false,
+            source_id: None,
+            is_digitizer: false,
         });
     }
 
@@ -164,6 +177,8 @@ fn build_components_from_config(config: &Config) -> Vec<ComponentConfig> {
             address,
             pipeline_order: recorder.pipeline_order,
             is_master: false,
+            source_id: None,
+            is_digitizer: false,
         });
     }
 
@@ -179,6 +194,8 @@ fn build_components_from_config(config: &Config) -> Vec<ComponentConfig> {
             address,
             pipeline_order: monitor.pipeline_order,
             is_master: false,
+            source_id: None,
+            is_digitizer: false,
         });
     }
 
@@ -248,15 +265,14 @@ async fn main() -> anyhow::Result<()> {
         (None, None)
     };
 
-    // Create router with emulator settings
-    let app = create_router_with_emulator_settings(
-        components,
-        operator_config,
-        PathBuf::from("./config/digitizers"),
-        run_repo,
-        digitizer_repo,
-        emulator_settings,
-    );
+    // Create router with builder
+    let app = RouterBuilder::new(components)
+        .config(operator_config)
+        .config_dir(PathBuf::from("./config/digitizers"))
+        .run_repo(run_repo)
+        .digitizer_repo(digitizer_repo)
+        .emulator_settings(emulator_settings)
+        .build();
 
     // Start server
     let port = args.operator.port;

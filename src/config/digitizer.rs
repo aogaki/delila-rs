@@ -34,6 +34,14 @@ pub struct DigitizerConfig {
     /// Firmware type (e.g., "PSD1", "PSD2", "PHA")
     pub firmware: FirmwareType,
 
+    /// Hardware serial number (populated by Detect command)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serial_number: Option<String>,
+
+    /// Hardware model name (e.g., "VX2730", "DT5730B")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+
     /// Number of channels on this digitizer
     #[serde(default = "default_num_channels")]
     pub num_channels: u8,
@@ -107,6 +115,17 @@ impl FirmwareType {
             FirmwareType::PSD2 => "dig2://",
             FirmwareType::PHA => "dig2://", // PHA uses same scheme as PSD2
         }
+    }
+
+    /// Whether the readout endpoint needs N_EVENTS configured.
+    /// DIG2 (PSD2) requires DATA + SIZE + N_EVENTS; DIG1 (PSD1/PHA) uses DATA + SIZE only.
+    pub fn includes_n_events(&self) -> bool {
+        matches!(self, FirmwareType::PSD2)
+    }
+
+    /// Whether this firmware uses the DIG1 (legacy) protocol.
+    pub fn is_dig1(&self) -> bool {
+        matches!(self, FirmwareType::PSD1 | FirmwareType::PHA)
     }
 }
 
@@ -273,6 +292,8 @@ impl DigitizerConfig {
             digitizer_id,
             name: name.into(),
             firmware,
+            serial_number: None,
+            model: None,
             num_channels,
             is_master: false,
             sync: None,

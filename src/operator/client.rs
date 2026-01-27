@@ -169,85 +169,21 @@ impl ComponentClient {
     }
 
     /// Configure all components with parallel execution for same pipeline_order
-    ///
-    /// Components with the same pipeline_order are configured in parallel.
-    /// Order doesn't matter for Configure (no data flow yet), but we maintain
-    /// consistency with start ordering.
     pub async fn configure_all(
         &self,
         configs: &[ComponentConfig],
         run_config: RunConfig,
     ) -> Vec<CommandResult> {
-        // Group by pipeline_order (descending for consistency with start)
-        let groups = Self::group_by_pipeline_order_desc(configs);
-
-        tracing::info!(
-            "Configure order: {:?}",
-            groups
-                .iter()
-                .map(|(order, cfgs)| (
-                    *order,
-                    cfgs.iter().map(|c| c.name.as_str()).collect::<Vec<_>>()
-                ))
-                .collect::<Vec<_>>()
-        );
-
-        let mut results = Vec::with_capacity(configs.len());
-
-        for (order, group_configs) in groups {
-            let names: Vec<_> = group_configs.iter().map(|c| c.name.as_str()).collect();
-            tracing::info!(
-                "Configuring group order={}: {:?} in parallel...",
-                order,
-                names
-            );
-
-            // Configure all components in this group in parallel
-            let futures: Vec<_> = group_configs
-                .iter()
-                .map(|config| self.configure(config, run_config.clone()))
-                .collect();
-            let group_results = join_all(futures).await;
-
-            results.extend(group_results);
-        }
-
-        results
+        self.execute_on_pipeline_groups(configs, true, "Configure", |_| {
+            Command::Configure(run_config.clone())
+        })
+        .await
     }
 
     /// Arm all components with parallel execution for same pipeline_order
     pub async fn arm_all(&self, configs: &[ComponentConfig]) -> Vec<CommandResult> {
-        // Group by pipeline_order (descending for consistency)
-        let groups = Self::group_by_pipeline_order_desc(configs);
-
-        tracing::info!(
-            "Arm order: {:?}",
-            groups
-                .iter()
-                .map(|(order, cfgs)| (
-                    *order,
-                    cfgs.iter().map(|c| c.name.as_str()).collect::<Vec<_>>()
-                ))
-                .collect::<Vec<_>>()
-        );
-
-        let mut results = Vec::with_capacity(configs.len());
-
-        for (order, group_configs) in groups {
-            let names: Vec<_> = group_configs.iter().map(|c| c.name.as_str()).collect();
-            tracing::info!("Arming group order={}: {:?} in parallel...", order, names);
-
-            // Arm all components in this group in parallel
-            let futures: Vec<_> = group_configs
-                .iter()
-                .map(|config| self.arm(config))
-                .collect();
-            let group_results = join_all(futures).await;
-
-            results.extend(group_results);
-        }
-
-        results
+        self.execute_on_pipeline_groups(configs, true, "Arm", |_| Command::Arm)
+            .await
     }
 
     /// Start all components in pipeline order (descending: downstream first)
@@ -310,7 +246,7 @@ impl ComponentClient {
         let has_master = configs.iter().any(|c| c.is_master);
 
         // Group by pipeline_order (descending: downstream first)
-        let groups = Self::group_by_pipeline_order_desc(configs);
+        let groups = Self::group_by_pipeline_order(configs, true);
 
         tracing::info!(
             "Start order (downstream first): {:?}{}",
@@ -400,9 +336,12 @@ impl ComponentClient {
         Ok(results)
     }
 
-    /// Group components by pipeline_order in descending order (for Start: downstream first)
-    fn group_by_pipeline_order_desc(
+    /// Group components by pipeline_order.
+    /// If `descending` is true, returns groups in descending order (downstream first).
+    /// If false, returns groups in ascending order (upstream first).
+    fn group_by_pipeline_order(
         configs: &[ComponentConfig],
+        descending: bool,
     ) -> Vec<(u32, Vec<ComponentConfig>)> {
         let mut groups: BTreeMap<u32, Vec<ComponentConfig>> = BTreeMap::new();
         for config in configs {
@@ -411,34 +350,35 @@ impl ComponentClient {
                 .or_default()
                 .push(config.clone());
         }
-        // Convert to Vec and reverse for descending order
         let mut result: Vec<_> = groups.into_iter().collect();
-        result.reverse();
+        if descending {
+            result.reverse();
+        }
         result
     }
 
-    /// Group components by pipeline_order in ascending order (for Stop: upstream first)
-    fn group_by_pipeline_order_asc(
+    /// Execute a command on all components grouped by pipeline_order.
+    ///
+    /// Components with the same pipeline_order are executed in parallel.
+    /// Groups are processed sequentially in the specified order.
+    async fn execute_on_pipeline_groups(
+        &self,
         configs: &[ComponentConfig],
-    ) -> Vec<(u32, Vec<ComponentConfig>)> {
-        let mut groups: BTreeMap<u32, Vec<ComponentConfig>> = BTreeMap::new();
-        for config in configs {
-            groups
-                .entry(config.pipeline_order)
-                .or_default()
-                .push(config.clone());
-        }
-        groups.into_iter().collect()
-    }
-
-    /// Stop all components in pipeline order (ascending: upstream first)
-    /// with parallel execution for same pipeline_order
-    pub async fn stop_all(&self, configs: &[ComponentConfig]) -> Vec<CommandResult> {
-        // Group by pipeline_order (ascending: upstream first)
-        let groups = Self::group_by_pipeline_order_asc(configs);
+        descending: bool,
+        action_name: &str,
+        command_fn: impl Fn(&ComponentConfig) -> Command,
+    ) -> Vec<CommandResult> {
+        let groups = Self::group_by_pipeline_order(configs, descending);
+        let direction = if descending {
+            "downstream first"
+        } else {
+            "upstream first"
+        };
 
         tracing::info!(
-            "Stop order (upstream first): {:?}",
+            "{} order ({}): {:?}",
+            action_name,
+            direction,
             groups
                 .iter()
                 .map(|(order, cfgs)| (
@@ -452,12 +392,16 @@ impl ComponentClient {
 
         for (order, group_configs) in groups {
             let names: Vec<_> = group_configs.iter().map(|c| c.name.as_str()).collect();
-            tracing::info!("Stopping group order={}: {:?} in parallel...", order, names);
+            tracing::info!(
+                "{} group order={}: {:?} in parallel...",
+                action_name,
+                order,
+                names
+            );
 
-            // Stop all components in this group in parallel
             let futures: Vec<_> = group_configs
                 .iter()
-                .map(|config| self.stop(config))
+                .map(|config| self.execute_command(config, command_fn(config)))
                 .collect();
             let group_results = join_all(futures).await;
 
@@ -465,6 +409,13 @@ impl ComponentClient {
         }
 
         results
+    }
+
+    /// Stop all components in pipeline order (ascending: upstream first)
+    /// with parallel execution for same pipeline_order
+    pub async fn stop_all(&self, configs: &[ComponentConfig]) -> Vec<CommandResult> {
+        self.execute_on_pipeline_groups(configs, false, "Stop", |_| Command::Stop)
+            .await
     }
 
     /// Reset all components
@@ -535,6 +486,23 @@ impl ComponentClient {
         }
     }
 
+    /// Check results and wait for all components to reach target state.
+    /// Returns early with results if any command failed.
+    async fn wait_after_execute(
+        &self,
+        configs: &[ComponentConfig],
+        results: Vec<CommandResult>,
+        target_state: ComponentState,
+        timeout_ms: u64,
+    ) -> Result<Vec<CommandResult>, String> {
+        if results.iter().any(|r| !r.success) {
+            return Ok(results);
+        }
+        self.wait_for_state(configs, target_state, timeout_ms)
+            .await?;
+        Ok(results)
+    }
+
     /// Two-phase configure: send configure and wait for all to reach Configured
     pub async fn configure_all_sync(
         &self,
@@ -543,17 +511,8 @@ impl ComponentClient {
         timeout_ms: u64,
     ) -> Result<Vec<CommandResult>, String> {
         let results = self.configure_all(configs, run_config).await;
-
-        // Check if any failed immediately
-        if results.iter().any(|r| !r.success) {
-            return Ok(results);
-        }
-
-        // Wait for all to reach Configured state
-        self.wait_for_state(configs, ComponentState::Configured, timeout_ms)
-            .await?;
-
-        Ok(results)
+        self.wait_after_execute(configs, results, ComponentState::Configured, timeout_ms)
+            .await
     }
 
     /// Two-phase arm: send arm and wait for all to reach Armed
@@ -563,17 +522,8 @@ impl ComponentClient {
         timeout_ms: u64,
     ) -> Result<Vec<CommandResult>, String> {
         let results = self.arm_all(configs).await;
-
-        // Check if any failed immediately
-        if results.iter().any(|r| !r.success) {
-            return Ok(results);
-        }
-
-        // Wait for all to reach Armed state (sync point)
-        self.wait_for_state(configs, ComponentState::Armed, timeout_ms)
-            .await?;
-
-        Ok(results)
+        self.wait_after_execute(configs, results, ComponentState::Armed, timeout_ms)
+            .await
     }
 
     /// Sequential start: start each component and wait for Running before next

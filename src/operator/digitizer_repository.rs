@@ -39,6 +39,10 @@ pub struct DigitizerConfigDocument {
     /// Whether this is the current active config (false for historical versions)
     pub is_current: bool,
 
+    /// Hardware serial number (top-level for MongoDB indexing)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serial_number: Option<String>,
+
     /// The actual configuration data
     pub config: DigitizerConfig,
 }
@@ -116,6 +120,7 @@ impl DigitizerConfigRepository {
             .await?;
 
         // Insert new config as current
+        let serial_number = config.serial_number.clone();
         let doc = DigitizerConfigDocument {
             id: None,
             digitizer_id,
@@ -124,6 +129,7 @@ impl DigitizerConfigRepository {
             created_by: created_by.to_string(),
             description,
             is_current: true,
+            serial_number,
             config,
         };
 
@@ -146,6 +152,20 @@ impl DigitizerConfigRepository {
         let doc = self
             .configs
             .find_one(doc! { "digitizer_id": digitizer_id, "is_current": true })
+            .await?;
+        Ok(doc)
+    }
+
+    /// Get the current configuration for a digitizer by its hardware serial number
+    ///
+    /// Used by the Detect flow to restore settings for a previously-seen digitizer.
+    pub async fn get_config_by_serial(
+        &self,
+        serial_number: &str,
+    ) -> Result<Option<DigitizerConfigDocument>, DigitizerRepoError> {
+        let doc = self
+            .configs
+            .find_one(doc! { "serial_number": serial_number, "is_current": true })
             .await?;
         Ok(doc)
     }
@@ -321,6 +341,8 @@ mod tests {
             digitizer_id: id,
             name: format!("Test Digitizer {}", id),
             firmware: FirmwareType::PSD2,
+            serial_number: None,
+            model: None,
             num_channels: 32,
             is_master: false,
             sync: None,
@@ -341,6 +363,7 @@ mod tests {
             created_by: "test".to_string(),
             description: Some("Test config".to_string()),
             is_current: true,
+            serial_number: None,
             config,
         };
 

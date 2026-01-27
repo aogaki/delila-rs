@@ -175,7 +175,7 @@ async fn main() -> anyhow::Result<()> {
             command_address: command_address
                 .unwrap_or_else(|| format!("tcp://*:{}", 5560 + source_id as u16)),
             source_id,
-            firmware: FirmwareType::Psd2,
+            firmware: FirmwareType::PSD2,
             module_id: module_id.unwrap_or(source_id as u8),
             read_timeout_ms: 100,
             buffer_size: 1024 * 1024,

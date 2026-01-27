@@ -1,6 +1,6 @@
 {
   "digitizer_id": 0,
-  "name": "PSD2 Ch4 Pulser Test",
+  "name": "PSD2 Ch16 Pulser Test",
   "firmware": "PSD2",
   "num_channels": 32,
   "board": {
@@ -13,11 +13,11 @@
     "trigger_threshold": 1000,
     "gate_long_ns": 400,
     "gate_short_ns": 100,
-    "event_trigger_source": "GlobalTriggerSource",
-    "wave_trigger_source": "GlobalTriggerSource"
+    "event_trigger_source": "Disabled",
+    "wave_trigger_source": "Disabled"
   },
   "channel_overrides": {
-    "4": {
+    "16": {
       "enabled": "True",
       "event_trigger_source": "ChSelfTrigger"
     }

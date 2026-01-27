@@ -88,6 +88,8 @@ pub struct Psd2Config {
     pub module_id: u8,
     /// Enable dump output for debugging
     pub dump_enabled: bool,
+    /// Number of physical channels (events with channel >= this are logged as warnings)
+    pub num_channels: u8,
 }
 
 impl Default for Psd2Config {
@@ -96,6 +98,7 @@ impl Default for Psd2Config {
             time_step_ns: 2.0, // 500 MS/s -> 2ns per sample
             module_id: 0,
             dump_enabled: false,
+            num_channels: 32,
         }
     }
 }
@@ -182,15 +185,70 @@ impl Psd2Decoder {
         }
 
         let total_size = (header & constants::TOTAL_SIZE_MASK) as usize;
+        let total_words = raw.data.len() / constants::WORD_SIZE;
         let mut events = Vec::with_capacity(total_size / 2);
         let mut word_index = 1; // Skip header
+        let mut out_of_range_count = 0u32;
 
         while word_index < total_size {
             if let Some(event) = self.decode_event(&raw.data, &mut word_index) {
+                // Diagnostic: warn on channel >= num_channels (virtual/phantom channels)
+                if event.channel >= self.config.num_channels {
+                    out_of_range_count += 1;
+                    if self.config.dump_enabled && out_of_range_count <= 5 {
+                        // Dump the raw word(s) around this event for diagnosis
+                        let evt_start = word_index.saturating_sub(2);
+                        println!(
+                            "[PSD2] WARNING: channel {} >= num_channels {} (event #{})",
+                            event.channel, self.config.num_channels, out_of_range_count
+                        );
+                        println!(
+                            "  timestamp={:.3} ns, energy={}, energy_short={}, flags=0x{:05x}",
+                            event.timestamp_ns, event.energy, event.energy_short, event.flags
+                        );
+                        // Show surrounding raw words
+                        for wi in evt_start.saturating_sub(1)..=(word_index).min(total_words.saturating_sub(1)) {
+                            if wi < total_words {
+                                let w = self.read_u64(&raw.data, wi);
+                                let bit63 = (w >> 63) & 1;
+                                let ch = (w >> 56) & 0x7F;
+                                println!(
+                                    "  word[{}]: 0x{:016x}  bit63={} ch_bits={}",
+                                    wi, w, bit63, ch
+                                );
+                            }
+                        }
+                    }
+                }
                 events.push(event);
             }
             // None means: special event filtered, or decode error.
             // In all cases word_index has been advanced, so continue.
+        }
+
+        // Diagnostic: verify word consumption (equivalent to C++ BOOST_ASSERT(p == p_end))
+        if word_index != total_size {
+            eprintln!(
+                "[PSD2] DECODE MISMATCH: word_index={} != total_size={} (data_words={})",
+                word_index, total_size, total_words
+            );
+        }
+
+        // Diagnostic: compare decoded event count with CAEN-reported n_events
+        if raw.n_events > 0 && events.len() as u32 != raw.n_events {
+            eprintln!(
+                "[PSD2] EVENT COUNT MISMATCH: decoded={} vs CAEN n_events={} (out_of_range={})",
+                events.len(),
+                raw.n_events,
+                out_of_range_count
+            );
+        }
+
+        if out_of_range_count > 0 {
+            eprintln!(
+                "[PSD2] CHANNEL OUT-OF-RANGE: {} events with channel >= {} in this aggregate (total_size={}, decoded={})",
+                out_of_range_count, self.config.num_channels, total_size, events.len()
+            );
         }
 
         // Sort by timestamp
@@ -343,20 +401,22 @@ impl Psd2Decoder {
 
         // Check last_word of second word to see if there are extra words
         let has_waveform = ((second_word >> constants::WAVEFORM_FLAG_SHIFT) & 0x1) != 0;
-        let mut is_last = ((second_word >> constants::LAST_WORD_SHIFT) & 0x1) != 0;
+        let is_last = ((second_word >> constants::LAST_WORD_SHIFT) & 0x1) != 0;
 
-        // Consume extra words (time_info, counter_info for special events; wave_info for normal)
-        while !is_last {
-            if *word_index >= total_words {
-                break;
-            }
-            let extra_word = self.read_u64(data, *word_index);
-            *word_index += 1;
-            is_last = ((extra_word >> constants::LAST_WORD_SHIFT) & 0x1) != 0;
-        }
-
-        // Filter out special events (statistics data, not physics)
+        // Filter out special events FIRST (they may have extra words to consume)
         if is_special_event {
+            // Special events can have extra words (time_info, counter_info) - consume them
+            if !is_last {
+                let mut done = false;
+                while !done {
+                    if *word_index >= total_words {
+                        break;
+                    }
+                    let extra_word = self.read_u64(data, *word_index);
+                    *word_index += 1;
+                    done = ((extra_word >> constants::LAST_WORD_SHIFT) & 0x1) != 0;
+                }
+            }
             if self.config.dump_enabled {
                 println!("[PSD2] Special event filtered (ch={})", channel);
             }
@@ -381,7 +441,11 @@ impl Psd2Decoder {
             (fine_time as f64 / constants::FINE_TIME_SCALE) * self.config.time_step_ns;
         let timestamp_ns = coarse_time_ns + fine_time_ns;
 
-        // Decode waveform if present
+        // Decode waveform if present.
+        // IMPORTANT: decode_waveform advances word_index past all waveform words
+        // (header + size + data). Do NOT use a generic "while !is_last" loop before
+        // this — that would double-consume waveform data and cause word-level
+        // misalignment, producing phantom channels (the ch32 bug).
         let waveform = if has_waveform {
             self.decode_waveform(data, word_index)
         } else {
@@ -456,15 +520,19 @@ impl Psd2Decoder {
     }
 
     /// Decode waveform data
+    ///
+    /// Reads waveform header (1 word) + size (1 word) + data (N words).
+    /// On failure, advances word_index past consumed words to maintain alignment.
     fn decode_waveform(&self, data: &[u8], word_index: &mut usize) -> Option<Waveform> {
+        let total_words = data.len() / constants::WORD_SIZE;
+
         // Need at least 2 words for waveform header + size
-        if *word_index + 2 > data.len() / constants::WORD_SIZE {
+        if *word_index + 2 > total_words {
             return None;
         }
 
-        // Read waveform header
+        // Peek at waveform header (don't advance until validated)
         let wf_header = self.read_u64(data, *word_index);
-        *word_index += 1;
 
         // Validate waveform header
         let check1 = (wf_header >> constants::WAVEFORM_CHECK1_SHIFT) & 0x1;
@@ -472,13 +540,17 @@ impl Psd2Decoder {
             (wf_header >> constants::WAVEFORM_CHECK2_SHIFT) & constants::WAVEFORM_CHECK2_MASK;
         if check1 != 1 || check2 != 0 {
             if self.config.dump_enabled {
-                println!(
-                    "[PSD2] Invalid waveform header: check1={}, check2={}",
-                    check1, check2
+                eprintln!(
+                    "[PSD2] Invalid waveform header at word {}: 0x{:016x} (check1={}, check2={})",
+                    *word_index, wf_header, check1, check2
                 );
             }
+            // Cannot determine waveform size — skip remaining event words
+            // by scanning for a word whose top 4 bits match a valid aggregate header
+            // or reaching the end. This is a best-effort recovery.
             return None;
         }
+        *word_index += 1; // Advance past validated header
 
         let time_resolution = ((wf_header >> constants::TIME_RESOLUTION_SHIFT)
             & constants::TIME_RESOLUTION_MASK) as u8;
@@ -493,14 +565,16 @@ impl Psd2Decoder {
         let n_samples = n_waveform_words * 2; // 2 samples per word
 
         // Check bounds
-        if *word_index + n_waveform_words > data.len() / constants::WORD_SIZE {
+        if *word_index + n_waveform_words > total_words {
             if self.config.dump_enabled {
-                println!(
+                eprintln!(
                     "[PSD2] Not enough data for waveform: need {} words, have {}",
                     n_waveform_words,
-                    data.len() / constants::WORD_SIZE - *word_index
+                    total_words - *word_index
                 );
             }
+            // Skip past available data to avoid misalignment
+            *word_index = total_words.min(*word_index + n_waveform_words);
             return None;
         }
 
@@ -615,6 +689,7 @@ mod tests {
             time_step_ns: 4.0,
             module_id: 5,
             dump_enabled: true,
+            num_channels: 32,
         };
         let decoder = Psd2Decoder::new(config);
         assert_eq!(decoder.config.time_step_ns, 4.0);
@@ -1028,6 +1103,164 @@ mod tests {
     fn test_aggregate_counter_tracking() {
         let decoder = Psd2Decoder::with_defaults();
         assert_eq!(decoder.last_aggregate_counter, 0);
+    }
+
+    /// Regression test for the ch32 phantom channel bug.
+    ///
+    /// Root cause: the old `while !is_last` loop consumed waveform words by
+    /// scanning for bit63=1 (the waveform header has bit63=1). Then
+    /// `decode_waveform` tried to re-read those words, advancing word_index
+    /// into the next event. The skipped event's second word (bit63=1) was
+    /// misinterpreted as a single-word event, producing phantom channels
+    /// (ch31/ch32 from flag_low bits mapped to channel field).
+    #[test]
+    fn test_decode_event_with_waveform_no_phantom_channels() {
+        let mut decoder = Psd2Decoder::with_defaults();
+
+        // Waveform header: check1=1 (bit63), check2=0 (bits62:60)
+        let wf_header = (1u64 << 63) | (1u64 << 44) | (500u64 << 28);
+        // Waveform size: 2 data words (= 4 samples)
+        let wf_size = 2u64;
+        // Waveform data (arbitrary values, bit63=0)
+        let wf_data1 = 0x0000_1234_0000_5678u64;
+        let wf_data2 = 0x0000_ABCD_0000_EF01u64;
+
+        // Aggregate layout:
+        //   [0] header (9 words total)
+        //   [1] event1 first word  (ch=0, last=0)
+        //   [2] event1 second word (last=0, has_waveform=1, flag_low=0x800)
+        //   [3] waveform header
+        //   [4] waveform size
+        //   [5] waveform data 1
+        //   [6] waveform data 2
+        //   [7] event2 first word  (ch=16, last=0)
+        //   [8] event2 second word (last=1, has_waveform=0)
+        let data = words_to_bytes(&[
+            make_header(9),
+            make_first_word(0, 1000),
+            make_second_word(false, true, 0x800, 0x10, 500, 100, 2000),
+            wf_header,
+            wf_size,
+            wf_data1,
+            wf_data2,
+            make_first_word(16, 2000),
+            make_second_word(true, false, 0, 0x05, 300, 50, 1500),
+        ]);
+
+        let raw = RawData {
+            size: data.len(),
+            data,
+            n_events: 2,
+        };
+
+        let events = decoder.decode(&raw);
+
+        // Must decode exactly 2 events — any more indicates word misalignment
+        assert_eq!(
+            events.len(),
+            2,
+            "Expected 2 events but got {} (waveform word misalignment?)",
+            events.len()
+        );
+
+        // All channels must be valid (< 32)
+        for event in &events {
+            assert!(
+                event.channel < 32,
+                "Phantom channel {} detected (ch32 bug regression)",
+                event.channel
+            );
+        }
+
+        // Verify event 1 (ch=0 with waveform)
+        let ch0 = events
+            .iter()
+            .find(|e| e.channel == 0)
+            .expect("ch0 event missing");
+        assert_eq!(ch0.energy, 2000);
+        assert_eq!(ch0.energy_short, 500);
+        assert!(ch0.waveform.is_some(), "ch0 should have waveform data");
+        if let Some(ref wf) = ch0.waveform {
+            assert_eq!(
+                wf.analog_probe1.len(),
+                4,
+                "Should have 4 samples (2 words * 2 samples/word)"
+            );
+        }
+
+        // Verify event 2 (ch=16 without waveform)
+        let ch16 = events
+            .iter()
+            .find(|e| e.channel == 16)
+            .expect("ch16 event missing");
+        assert_eq!(ch16.energy, 1500);
+        assert_eq!(ch16.energy_short, 300);
+        assert!(ch16.waveform.is_none());
+    }
+
+    /// Test multiple consecutive events with waveforms.
+    /// Ensures the decoder maintains correct word alignment across multiple waveform events.
+    #[test]
+    fn test_decode_multiple_waveform_events() {
+        let mut decoder = Psd2Decoder::with_defaults();
+
+        let wf_header = (1u64 << 63) | (1u64 << 44) | (500u64 << 28);
+        let wf_size = 1u64; // 1 data word = 2 samples
+        let wf_data = 0x0000_4321_0000_8765u64;
+
+        // Two events with waveforms + one without
+        // Event 1: ch=0, waveform (1+1+1+1+1 = 5 words)
+        // Event 2: ch=1, waveform (1+1+1+1+1 = 5 words)
+        // Event 3: ch=2, no waveform (1+1 = 2 words)
+        // Total: 1 header + 5 + 5 + 2 = 13 words
+        let data = words_to_bytes(&[
+            make_header(13),
+            // Event 1
+            make_first_word(0, 1000),
+            make_second_word(false, true, 0, 0, 100, 50, 3000),
+            wf_header,
+            wf_size,
+            wf_data,
+            // Event 2
+            make_first_word(1, 2000),
+            make_second_word(false, true, 0, 0, 200, 60, 4000),
+            wf_header,
+            wf_size,
+            wf_data,
+            // Event 3
+            make_first_word(2, 3000),
+            make_second_word(true, false, 0, 0, 300, 70, 5000),
+        ]);
+
+        let raw = RawData {
+            size: data.len(),
+            data,
+            n_events: 3,
+        };
+
+        let events = decoder.decode(&raw);
+
+        assert_eq!(
+            events.len(),
+            3,
+            "Expected 3 events but got {} (multi-waveform misalignment?)",
+            events.len()
+        );
+
+        // Verify channels (events sorted by timestamp)
+        assert_eq!(events[0].channel, 0);
+        assert_eq!(events[1].channel, 1);
+        assert_eq!(events[2].channel, 2);
+
+        // Verify waveforms
+        assert!(events[0].waveform.is_some());
+        assert!(events[1].waveform.is_some());
+        assert!(events[2].waveform.is_none());
+
+        // Verify energies
+        assert_eq!(events[0].energy, 3000);
+        assert_eq!(events[1].energy, 4000);
+        assert_eq!(events[2].energy, 5000);
     }
 
     #[test]

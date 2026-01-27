@@ -283,6 +283,7 @@ fn test_data_readout(handle: &CaenHandle, decode_enabled: bool) {
             time_step_ns: 2.0, // 500 MS/s -> 2ns
             module_id: 0,
             dump_enabled: true, // Enable dump for debugging
+            num_channels: 32,
         };
         Some(Psd2Decoder::new(config))
     } else {

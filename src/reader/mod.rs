@@ -10,6 +10,7 @@ pub mod decoder;
 
 // Re-exports
 pub use caen::{CaenError, CaenHandle, EndpointHandle};
+pub use crate::config::FirmwareType;
 pub use decoder::{
     DataType, DecodeResult, EventData, Psd1Config, Psd1Decoder, Psd2Config, Psd2Decoder, Waveform,
 };
@@ -49,17 +50,6 @@ pub enum ReaderError {
 
     #[error("Channel send error")]
     ChannelSend,
-}
-
-/// Firmware type for decoder selection
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FirmwareType {
-    /// PSD2 firmware (x27xx series, 64-bit words)
-    Psd2,
-    /// PSD1 firmware (x725/x730, 32-bit words)
-    Psd1,
-    /// PHA1 firmware - not yet implemented
-    Pha1,
 }
 
 /// Enum-based decoder dispatch (KISS: only PSD1/PSD2/PHA1, no trait object needed)
@@ -118,7 +108,7 @@ impl Default for ReaderConfig {
             data_address: "tcp://*:5555".to_string(),
             command_address: "tcp://*:5556".to_string(),
             source_id: 0,
-            firmware: FirmwareType::Psd2,
+            firmware: FirmwareType::PSD2,
             module_id: 0,
             read_timeout_ms: 100,
             buffer_size: 1024 * 1024, // 1MB
@@ -138,9 +128,9 @@ impl ReaderConfig {
         let url = source.digitizer_url.as_ref()?;
 
         let firmware = match source.source_type {
-            crate::config::SourceType::Psd2 => FirmwareType::Psd2,
-            crate::config::SourceType::Psd1 => FirmwareType::Psd1,
-            crate::config::SourceType::Pha1 => FirmwareType::Pha1,
+            crate::config::SourceType::Psd2 => FirmwareType::PSD2,
+            crate::config::SourceType::Psd1 => FirmwareType::PSD1,
+            crate::config::SourceType::Pha1 => FirmwareType::PHA,
             // Emulator/Zle sources shouldn't create a Reader — caller should handle
             _ => return None,
         };
@@ -226,6 +216,8 @@ impl RateTracker {
 struct ReaderCommandExt {
     metrics: Arc<ReaderMetrics>,
     rate_tracker: Arc<RateTracker>,
+    /// Digitizer URL for Detect command (e.g., "dig2://172.18.4.56")
+    url: String,
 }
 
 impl CommandHandlerExt for ReaderCommandExt {
@@ -262,6 +254,65 @@ impl CommandHandlerExt for ReaderCommandExt {
         self.rate_tracker.reset();
         Ok(())
     }
+
+    fn on_detect(&mut self) -> Result<serde_json::Value, String> {
+        // Temporarily connect to digitizer, read DeviceInfo, and disconnect.
+        // This blocks briefly (< 1s) but is acceptable for an infrequent
+        // user-initiated action from Idle state.
+        let handle = caen::handle::CaenHandle::open(&self.url)
+            .map_err(|e| format!("Failed to connect to {}: {}", self.url, e))?;
+        let info = handle
+            .get_device_info()
+            .map_err(|e| format!("Failed to read device info: {}", e))?;
+        // handle dropped here → connection closed
+        serde_json::to_value(&info).map_err(|e| format!("Failed to serialize DeviceInfo: {}", e))
+    }
+}
+
+/// Send firmware-specific arm command to the digitizer.
+///
+/// For DIG1 (PSD1/PHA) with START_MODE_SW, the actual arm is deferred to start phase.
+/// For DIG2 (PSD2), always sends armacquisition immediately.
+fn send_arm_command(
+    handle: &CaenHandle,
+    firmware: FirmwareType,
+) -> Result<(), caen::CaenError> {
+    if firmware.is_dig1() {
+        let startmode = handle.get_value("/par/startmode").unwrap_or_default();
+        if startmode == "START_MODE_SW" {
+            info!("START_MODE_SW detected - deferring arm to Start");
+        } else {
+            info!("Arming digitizer (DIG1, mode={})", startmode);
+            handle.send_command("/cmd/armacquisition")?;
+        }
+    } else {
+        info!("Arming digitizer (PSD2)");
+        handle.send_command("/cmd/armacquisition")?;
+    }
+    Ok(())
+}
+
+/// Send firmware-specific start command to the digitizer.
+///
+/// For DIG2 (PSD2), sends swstartacquisition.
+/// For DIG1 (PSD1/PHA) with START_MODE_SW, sends armacquisition (arm=start).
+fn send_start_command(
+    handle: &CaenHandle,
+    firmware: FirmwareType,
+) -> Result<(), caen::CaenError> {
+    if firmware.is_dig1() {
+        let startmode = handle.get_value("/par/startmode").unwrap_or_default();
+        if startmode == "START_MODE_SW" {
+            info!("Starting acquisition (DIG1, START_MODE_SW)");
+            handle.send_command("/cmd/armacquisition")?;
+        } else {
+            info!("DIG1 acquisition already started on Arm");
+        }
+    } else {
+        info!("Starting digitizer acquisition (PSD2)");
+        handle.send_command("/cmd/swstartacquisition")?;
+    }
+    Ok(())
 }
 
 /// Reader for CAEN digitizer data acquisition
@@ -404,8 +455,7 @@ impl Reader {
         info!("Connected to digitizer");
 
         // Configure endpoint for RAW data
-        // DIG1 (PSD1/PHA1): DATA + SIZE only; DIG2 (PSD2): DATA + SIZE + N_EVENTS
-        let include_n_events = config.firmware == FirmwareType::Psd2;
+        let include_n_events = config.firmware.includes_n_events();
         let endpoint = handle.configure_endpoint(include_n_events)?;
         info!("Endpoint configured");
 
@@ -459,27 +509,7 @@ impl Reader {
                     // Arm digitizer when entering Armed state
                     (_, ComponentState::Armed) => {
                         if !hw_armed {
-                            match config.firmware {
-                                FirmwareType::Psd1 | FirmwareType::Pha1 => {
-                                    // DIG1: Check startmode parameter
-                                    // For START_MODE_SW, defer arm command to Start
-                                    let startmode = handle
-                                        .get_value("/par/startmode")
-                                        .unwrap_or_default();
-                                    if startmode == "START_MODE_SW" {
-                                        info!(
-                                            "START_MODE_SW detected - deferring arm to Start"
-                                        );
-                                    } else {
-                                        info!("Arming digitizer (DIG1, mode={})", startmode);
-                                        handle.send_command("/cmd/armacquisition")?;
-                                    }
-                                }
-                                FirmwareType::Psd2 => {
-                                    info!("Arming digitizer (PSD2)");
-                                    handle.send_command("/cmd/armacquisition")?;
-                                }
-                            }
+                            send_arm_command(&handle, config.firmware)?;
                             hw_armed = true;
                         }
                     }
@@ -491,41 +521,10 @@ impl Reader {
                         if !hw_running {
                             // Arm if not yet armed (handles skipped Armed state)
                             if !hw_armed {
-                                match config.firmware {
-                                    FirmwareType::Psd1 | FirmwareType::Pha1 => {
-                                        let startmode = handle
-                                            .get_value("/par/startmode")
-                                            .unwrap_or_default();
-                                        if startmode != "START_MODE_SW" {
-                                            info!("Arming digitizer (DIG1, mode={})", startmode);
-                                            handle.send_command("/cmd/armacquisition")?;
-                                        }
-                                    }
-                                    FirmwareType::Psd2 => {
-                                        info!("Arming digitizer (PSD2)");
-                                        handle.send_command("/cmd/armacquisition")?;
-                                    }
-                                }
+                                send_arm_command(&handle, config.firmware)?;
                                 hw_armed = true;
                             }
-                            // Start acquisition
-                            match config.firmware {
-                                FirmwareType::Psd2 => {
-                                    info!("Starting digitizer acquisition (PSD2)");
-                                    handle.send_command("/cmd/swstartacquisition")?;
-                                }
-                                FirmwareType::Psd1 | FirmwareType::Pha1 => {
-                                    let startmode = handle
-                                        .get_value("/par/startmode")
-                                        .unwrap_or_default();
-                                    if startmode == "START_MODE_SW" {
-                                        info!("Starting acquisition (DIG1, START_MODE_SW)");
-                                        handle.send_command("/cmd/armacquisition")?;
-                                    } else {
-                                        info!("DIG1 acquisition already started on Arm");
-                                    }
-                                }
-                            }
+                            send_start_command(&handle, config.firmware)?;
                             hw_running = true;
                         }
                     }
@@ -617,15 +616,16 @@ impl Reader {
 
         // Create decoder based on firmware type
         let mut decoder = match config.firmware {
-            FirmwareType::Psd2 => {
+            FirmwareType::PSD2 => {
                 let psd2_config = Psd2Config {
                     time_step_ns: config.time_step_ns,
                     module_id: config.module_id,
                     dump_enabled: false,
+                    num_channels: 32,
                 };
                 DecoderKind::Psd2(Psd2Decoder::new(psd2_config))
             }
-            FirmwareType::Psd1 => {
+            FirmwareType::PSD1 => {
                 let psd1_config = Psd1Config {
                     time_step_ns: config.time_step_ns,
                     module_id: config.module_id,
@@ -633,7 +633,7 @@ impl Reader {
                 };
                 DecoderKind::Psd1(Psd1Decoder::new(psd1_config))
             }
-            FirmwareType::Pha1 => {
+            FirmwareType::PHA => {
                 return Err(ReaderError::Config(
                     "PHA1 decoder not yet implemented".to_string(),
                 ));
@@ -778,6 +778,7 @@ impl Reader {
         let shutdown_for_cmd = shutdown.resubscribe();
         let metrics_for_cmd = self.metrics.clone();
         let rate_tracker_for_cmd = self.rate_tracker.clone();
+        let url_for_cmd = self.config.url.clone();
 
         let cmd_handle = tokio::spawn(async move {
             run_command_task(
@@ -789,6 +790,7 @@ impl Reader {
                     let mut ext = ReaderCommandExt {
                         metrics: metrics_for_cmd.clone(),
                         rate_tracker: rate_tracker_for_cmd.clone(),
+                        url: url_for_cmd.clone(),
                     };
                     handle_command(state, tx, cmd, Some(&mut ext))
                 },
@@ -873,7 +875,7 @@ mod tests {
     fn test_default_config() {
         let config = ReaderConfig::default();
         assert_eq!(config.source_id, 0);
-        assert_eq!(config.firmware, FirmwareType::Psd2);
+        assert_eq!(config.firmware, FirmwareType::PSD2);
         assert_eq!(config.buffer_size, 1024 * 1024);
     }
 
@@ -926,7 +928,7 @@ mod tests {
         "#;
         let config = crate::config::Config::from_toml(toml).unwrap();
         let reader_config = ReaderConfig::from_config(&config, 0).unwrap();
-        assert_eq!(reader_config.firmware, FirmwareType::Psd2);
+        assert_eq!(reader_config.firmware, FirmwareType::PSD2);
     }
 
     #[test]
@@ -947,7 +949,7 @@ mod tests {
         "#;
         let config = crate::config::Config::from_toml(toml).unwrap();
         let reader_config = ReaderConfig::from_config(&config, 0).unwrap();
-        assert_eq!(reader_config.firmware, FirmwareType::Psd1);
+        assert_eq!(reader_config.firmware, FirmwareType::PSD1);
     }
 
     #[test]

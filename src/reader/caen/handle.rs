@@ -49,7 +49,7 @@ pub struct RawData {
 }
 
 /// Device information retrieved from digitizer
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DeviceInfo {
     /// Model name (e.g., "VX2730")
     pub model: String,

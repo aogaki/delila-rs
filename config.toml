@@ -11,37 +11,21 @@ experiment_name = "TestExp"
 # Data sources
 # type: emulator, psd1, psd2, pha1, zle
 # pipeline_order: Start順=降順, Stop順=昇順 (1=upstream, 3=downstream)
-# Emulator source (for testing without hardware)
+
+# PSD2 digitizer (VX2730 at 172.18.4.56, ch16 pulser 10kHz)
 [[network.sources]]
 id = 0
-name = "emulator-0"
-type = "emulator"
+name = "psd2-vx2730"
+type = "psd2"
 bind = "tcp://*:5555"
 command = "tcp://*:5560"
-pipeline_order = 1
-
-# Real PSD2 digitizer (uncomment to use)
-# [[network.sources]]
-# id = 1
-# name = "psd2-real"
-# type = "psd2"
-# bind = "tcp://*:5556"
-# command = "tcp://*:5561"
-# digitizer_url = "dig2://172.18.4.56"
-# config_file = "config/digitizers/psd2_test.json"
-# pipeline_order = 1
-
-[[network.sources]]
-id = 1
-name = "emulator-1"
-type = "emulator"
-bind = "tcp://*:5556"
-command = "tcp://*:5561"
+digitizer_url = "dig2://172.18.4.56"
+config_file = "config/digitizers/psd2_test.json"
 pipeline_order = 1
 
 # Merger: receives from all sources, publishes merged stream
 [network.merger]
-subscribe = ["tcp://localhost:5555", "tcp://localhost:5556"]
+subscribe = ["tcp://localhost:5555"]
 publish = "tcp://*:5557"
 command = "tcp://*:5570"
 pipeline_order = 2

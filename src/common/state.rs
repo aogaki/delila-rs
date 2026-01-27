@@ -92,6 +92,13 @@ pub trait CommandHandlerExt {
     fn on_update_emulator_config(&mut self, _config: &EmulatorRuntimeConfig) -> Result<(), String> {
         Err("UpdateEmulatorConfig not supported by this component".to_string())
     }
+
+    /// Called when Detect command is received (Reader-only)
+    /// Temporarily connects to hardware, reads DeviceInfo, and disconnects.
+    /// Returns device info as JSON value.
+    fn on_detect(&mut self) -> Result<serde_json::Value, String> {
+        Err("Detect not supported by this component".to_string())
+    }
 }
 
 /// Handle a command using the 5-state machine logic
@@ -276,6 +283,29 @@ pub fn handle_command<E: CommandHandlerExt>(
                     current,
                     "UpdateEmulatorConfig not supported by this component",
                 )
+            }
+        }
+
+        Command::Detect => {
+            // Detect is only valid from Idle state and does not change state
+            if current != ComponentState::Idle {
+                return CommandResponse::error(
+                    current,
+                    format!("Detect only available from Idle state, currently {}", current),
+                );
+            }
+
+            if let Some(ref mut e) = ext {
+                match e.on_detect() {
+                    Ok(device_info) => {
+                        info!(component = component_name, "Hardware detected");
+                        CommandResponse::success(current, "Hardware detected")
+                            .with_data(device_info)
+                    }
+                    Err(msg) => CommandResponse::error(current, msg),
+                }
+            } else {
+                CommandResponse::error(current, "Detect not supported by this component")
             }
         }
     }

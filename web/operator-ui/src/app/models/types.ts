@@ -148,10 +148,30 @@ export interface DigitizerConfig {
   digitizer_id: number;
   name: string;
   firmware: FirmwareType;
+  serial_number?: string;
+  model?: string;
   num_channels: number;
+  is_master?: boolean;
+  sync?: unknown;
   board: BoardConfig;
   channel_defaults: ChannelConfig;
   channel_overrides?: Record<number, ChannelConfig>;
+}
+
+// Detected digitizer from hardware probe
+export interface DetectedDigitizer {
+  component_name: string;
+  source_id: number;
+  device_info: Record<string, unknown>;
+  config_found: boolean;
+  config?: DigitizerConfig;
+}
+
+// Detect response from API
+export interface DetectResponse {
+  success: boolean;
+  message: string;
+  digitizers: DetectedDigitizer[];
 }
 
 // Emulator configuration (runtime settings)

@@ -401,6 +401,7 @@ fn test_decode_test_pulse_events() {
         time_step_ns: 2.0,
         module_id: 0,
         dump_enabled: false,
+        num_channels: 32,
     });
 
     // Start acquisition
@@ -629,6 +630,7 @@ fn test_ch4_pulser_signal() {
         time_step_ns: 2.0,
         module_id: 0,
         dump_enabled: false,
+        num_channels: 32,
     });
 
     // Acquire data
