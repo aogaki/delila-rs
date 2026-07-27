@@ -83,6 +83,10 @@ if [ -f "$(dirname "$0")/mongodb.local.env" ]; then
     # shellcheck disable=SC1091
     . "$(dirname "$0")/mongodb.local.env"
 fi
+# Whether a URI was chosen deliberately (env var or the per-host override file).
+# If it was, it is never second-guessed below; if it is just the built-in
+# default, an unauthenticated localhost fallback is allowed.
+MONGODB_URI_EXPLICIT="${MONGODB_URI:+yes}"
 MONGODB_URI="${MONGODB_URI:-mongodb://delila:delila_pass@localhost:27017}"
 MONGODB_DATABASE="${MONGODB_DATABASE:-delila}"
 
@@ -120,10 +124,21 @@ if [ "$SKIP_MONGO" = false ]; then
     # otherwise a Docker-less host reports "Continuing without run history
     # persistence" while the Operator is in fact recording happily — a false
     # alarm that reads like a broken DAQ.
-    if command -v mongosh &>/dev/null &&
-       mongosh --quiet "$MONGODB_URI" --eval 'db.runCommand({ping:1}).ok' &>/dev/null; then
-        echo -e "  ${GREEN}MongoDB is running (native/remote)${NC}"
-        MONGO_AVAILABLE=true
+    mongo_ping() { mongosh --quiet "$1" --eval 'db.runCommand({ping:1}).ok' &>/dev/null; }
+    if command -v mongosh &>/dev/null; then
+        if mongo_ping "$MONGODB_URI"; then
+            echo -e "  ${GREEN}MongoDB is running (native/remote)${NC}"
+            MONGO_AVAILABLE=true
+        elif [ -z "$MONGODB_URI_EXPLICIT" ] && mongo_ping "mongodb://localhost:27017"; then
+            # The built-in default carries the credentials of the Docker mongo
+            # used on the dev boxes. A distro mongodb-org install has
+            # authentication disabled, so that default cannot connect and run
+            # history would be dropped on every freshly provisioned node.
+            # Prefer an unauthenticated localhost server over no history at all.
+            MONGODB_URI="mongodb://localhost:27017"
+            echo -e "  ${GREEN}MongoDB is running (native, authentication disabled)${NC}"
+            MONGO_AVAILABLE=true
+        fi
     fi
 fi
 
