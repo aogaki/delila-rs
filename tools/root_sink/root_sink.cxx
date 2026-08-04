@@ -37,6 +37,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <csignal>
@@ -49,8 +50,10 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
+#include "eb_core.hpp"
 #include "hist_config.hpp"
 #include "sink_core.hpp"
 
@@ -60,6 +63,7 @@
 #include "TH2.h"
 #include "THttpServer.h"
 #include "TROOT.h"
+#include "TRootSniffer.h"
 #include "TString.h"
 #include "TSystem.h"
 #include "TTree.h"
@@ -125,6 +129,10 @@ struct Options {
   double dt_min = -1000.0;
   double dt_max = 1000.0;
   int autosave_sec = 30;
+  // Pipeline (TODO 66 §5): worker pool size and the Sorter's data-time knobs.
+  int workers = 3;
+  double chunk_span_ms = 100.0;    // emit a chunk per this much DATA time
+  double safe_horizon_ms = 50.0;   // arrival-disorder absorption (>= max disorder)
 };
 
 static void print_usage(const char* argv0) {
@@ -154,6 +162,10 @@ static void print_usage(const char* argv0) {
       "  --dt-min X          Δt axis min ns (default -1000)\n"
       "  --dt-max X          Δt axis max ns (default 1000)\n"
       "  --autosave-sec N    TTree AutoSave interval (default 30)\n"
+      "  --workers N         event-build worker threads (default 3)\n"
+      "  --chunk-span-ms X   sorter chunk span in data time (default 100)\n"
+      "  --safe-horizon-ms X sorter disorder absorption (default 50; must\n"
+      "                      exceed the stream's max arrival disorder)\n"
       "  --help              this message\n",
       argv0);
 }
@@ -239,6 +251,16 @@ static bool parse_args(int argc, char** argv, Options& opt, bool& help) {
     } else if (a == "--autosave-sec") {
       if (!(v = need(i))) return false;
       opt.autosave_sec = std::atoi(v);
+    } else if (a == "--workers") {
+      if (!(v = need(i))) return false;
+      opt.workers = std::atoi(v);
+      if (opt.workers < 1) opt.workers = 1;
+    } else if (a == "--chunk-span-ms") {
+      if (!(v = need(i))) return false;
+      opt.chunk_span_ms = std::atof(v);
+    } else if (a == "--safe-horizon-ms") {
+      if (!(v = need(i))) return false;
+      opt.safe_horizon_ms = std::atof(v);
     } else {
       std::fprintf(stderr, "root_sink: unknown argument '%s' (try --help)\n", a.c_str());
       return false;
@@ -877,6 +899,13 @@ int main(int argc, char** argv) {
     server = new THttpServer(Form("http:%d", opt.http_port));
     // 2 s JSROOT auto-refresh for the whole tree.
     server->SetItemField("/", "_monitoring", "2000");
+    // The sniffer's global-directory scan defaults ON and would expose every
+    // open TFile (gROOT->GetListOfFiles()) over HTTP — including the run file
+    // the Writer thread is actively filling; a browser click would then read
+    // that file from the HTTP thread. Our histograms are Register()ed
+    // explicitly, so the scan buys nothing: turn it off. (Verify: no /Files
+    // node in the JSROOT hierarchy.)
+    server->GetSniffer()->SetScanGlobalDir(kFALSE);
 
     if (use_hists) {
       build_live_hists(hist_defs, server, live_hists);
@@ -946,6 +975,11 @@ int main(int argc, char** argv) {
   if (use_hists && xy2_enabled) xy2 = make_xy(opt.xy2_ch);
 
   // --- ZMQ SUB (HWM=0 per the data-preservation rule) ---
+  // Created + connected on the main thread so a bad endpoint still exits with
+  // code 3 before anything spawns, then handed to the Receiver thread. ZMQ
+  // permits socket migration between threads as long as use never overlaps —
+  // the std::thread constructor provides the required memory barrier, and
+  // only the Receiver touches the socket afterwards (it also closes it).
   void* ctx = zmq_ctx_new();
   void* sub = zmq_socket(ctx, ZMQ_SUB);
   int zero = 0;
@@ -957,18 +991,291 @@ int main(int argc, char** argv) {
     return 3;
   }
 
-  Recorder recorder;
-  RunState run_state;
-  std::set<std::string> warned;
-  long long events_written = 0;
-  long long matcher_fills = 0;
-  long long xy_fills = 0;  // ripened XY triggers, both detectors combined
+  // ROOT is about to run on two threads at once (TH1 fills on this Display
+  // thread, TFile/TTree exclusively on the Writer thread) — arm the global
+  // locks BEFORE any of them starts.
+  ROOT::EnableThreadSafety();
+
+  // --- Cross-thread plumbing (TODO 66 §5) ----------------------------------
+  // Ownership map: Receiver owns the socket + RunState; Sorter owns the
+  // disorder buffer + seq counter; Workers are stateless; Writer owns the
+  // Recorder (ALL TFile/TTree access); Display (this thread) owns every TH1 +
+  // the THttpServer. The atomic counters are the only shared mutable state.
+  struct Counters {
+    std::atomic<long long> received{0};       // decoded hits (Receiver)
+    std::atomic<long long> written{0};        // hits filled to the tree (Writer)
+    std::atomic<long long> chunks{0};         // Sorter emissions
+    std::atomic<long long> matcher_fills{0};  // Display
+    std::atomic<long long> xy_fills{0};       // Display
+    std::atomic<long long> display_drops{0};  // tee overflow (counted + logged)
+    std::atomic<bool> writing{false};         // stream run state (status line)
+  } counters;
+
+  const int n_workers = opt.workers;
+
+  eb::Channel<eb::SorterMsg> to_sorter;  // record path: unbounded, never drops
+  eb::Channel<eb::WorkMsg> work_q;       // record path: unbounded
+  eb::Channel<eb::WorkMsg> writer_q;     // record path: unbounded
+  // Display tee: bounded; DATA may drop (counted — the CLAUDE.md Monitor
+  // exception; the record path above is untouched). Control markers use the
+  // BLOCKING push instead: a dropped RunOpen would leave stale matcher clocks
+  // across a run boundary.
+  eb::Channel<eb::DisplayMsg> display_q(1000);
+
+  // --- Receiver: ZMQ recv + decode + run state -> in-band markers ----------
+  auto receiver_loop = [&] {
+    RunState run_state;
+    std::set<std::string> warned;
+    auto process = [&](const uint8_t* data, size_t size) {
+      Envelope env = parse_envelope(data, size);
+      switch (env.kind) {
+        case MsgKind::Data: {
+          // Decode into OWNED hits before the zmq_msg buffer dies (the
+          // envelope payload borrows it) and before crossing any thread.
+          uint32_t sid = 0;
+          std::vector<ScalarHit> hits;
+          long n = decode_batch_into(env.payload, env.payload_size, sid, hits);
+          if (n < 0) {
+            std::fprintf(stderr, "root_sink: WARNING malformed Data batch (skipped)\n");
+            break;
+          }
+          run_state.on_data(sid, [&] {
+            counters.writing = true;
+            eb::SorterMsg m;
+            m.ctrl = eb::Ctrl::RunOpen;
+            to_sorter.push(std::move(m));
+            eb::DisplayMsg d;
+            d.ctrl = eb::Ctrl::RunOpen;
+            display_q.push(std::move(d));  // blocking: control is never dropped
+            std::printf("root_sink: run started (source %u)\n", sid);
+            std::fflush(stdout);
+          });
+          counters.received += static_cast<long long>(hits.size());
+          if (http_enabled) {
+            eb::DisplayMsg d;
+            d.hits = hits;  // tee copy; the original moves to the Sorter below
+            if (!display_q.try_push(std::move(d))) ++counters.display_drops;
+          }
+          eb::SorterMsg m;
+          m.hits = std::move(hits);
+          to_sorter.push(std::move(m));
+          break;
+        }
+        case MsgKind::EndOfStream: {
+          run_state.on_eos(
+              env.source_id, env.run_number,
+              [&](uint32_t rn) {
+                counters.writing = false;
+                eb::SorterMsg m;
+                m.ctrl = eb::Ctrl::RunClose;
+                m.run_number = rn;
+                to_sorter.push(std::move(m));
+                eb::DisplayMsg d;
+                d.ctrl = eb::Ctrl::RunClose;
+                display_q.push(std::move(d));
+              },
+              [&](uint32_t sid, uint32_t rn) {
+                std::printf("root_sink: ignoring stale EOS (source %u, run %u) while idle\n",
+                            sid, rn);
+              });
+          break;
+        }
+        case MsgKind::Heartbeat:
+          break;  // liveness only — nothing to record
+        case MsgKind::Unknown:
+          if (warned.insert(env.variant).second)
+            std::fprintf(stderr,
+                         "root_sink: WARNING unknown message variant '%s' (skipping; further ones silenced)\n",
+                         env.variant.c_str());
+          break;
+      }
+    };
+    while (!g_stop) {
+      zmq_pollitem_t items[1];
+      items[0].socket = sub;
+      items[0].fd = 0;
+      items[0].events = ZMQ_POLLIN;
+      items[0].revents = 0;
+      int rc = zmq_poll(items, 1, 100);  // 100 ms
+      if (rc < 0) {
+        if (zmq_errno() == EINTR) continue;  // interrupted by our signal
+        std::fprintf(stderr, "root_sink: zmq_poll error: %s\n", zmq_strerror(zmq_errno()));
+        break;
+      }
+      if (items[0].revents & ZMQ_POLLIN) {
+        // Drain everything pending this wakeup (keep up with the merger).
+        while (true) {
+          zmq_msg_t msg;
+          zmq_msg_init(&msg);
+          int nb = zmq_msg_recv(&msg, sub, ZMQ_DONTWAIT);
+          if (nb < 0) {
+            zmq_msg_close(&msg);
+            break;  // EAGAIN (drained) or error
+          }
+          process(static_cast<const uint8_t*>(zmq_msg_data(&msg)), zmq_msg_size(&msg));
+          zmq_msg_close(&msg);
+        }
+      }
+    }
+    // Orderly teardown: one Shutdown down each path. The Sorter fans it out
+    // to the workers (after flushing); the Display loop exits on its copy.
+    eb::SorterMsg m;
+    m.ctrl = eb::Ctrl::Shutdown;
+    to_sorter.push(std::move(m));
+    eb::DisplayMsg d;
+    d.ctrl = eb::Ctrl::Shutdown;
+    display_q.push(std::move(d));
+    zmq_close(sub);  // closed on the thread that used it
+  };
+
+  // --- Sorter: disorder buffer -> sorted chunks with sequence numbers ------
+  auto sorter_loop = [&] {
+    eb::Sorter::Config scfg;
+    scfg.chunk_span_ns = opt.chunk_span_ms * 1e6;
+    scfg.safe_horizon_ns = opt.safe_horizon_ms * 1e6;
+    scfg.lookback_ns = opt.window_ns;  // context carry >= coincidence window
+    eb::Sorter sorter(scfg);
+    uint64_t seq = 0;
+    auto emit_chunk = [&](eb::SortedChunk&& c) {
+      eb::WorkMsg m;
+      m.seq = seq++;
+      m.chunk = std::move(c);
+      ++counters.chunks;
+      work_q.push(std::move(m));
+    };
+    eb::SorterMsg in;
+    while (to_sorter.pop(in)) {
+      switch (in.ctrl) {
+        case eb::Ctrl::None:
+          sorter.push_batch(std::move(in.hits), emit_chunk);
+          break;
+        case eb::Ctrl::RunOpen: {
+          sorter.reset();  // R11: forget the previous run's clock, or the new
+                           // run's hits all fall below core_start and vanish
+          eb::WorkMsg m;
+          m.ctrl = eb::Ctrl::RunOpen;
+          m.seq = seq++;
+          work_q.push(std::move(m));
+          break;
+        }
+        case eb::Ctrl::RunClose: {
+          sorter.flush(emit_chunk);  // the run's tail becomes the last chunk
+          eb::WorkMsg m;
+          m.ctrl = eb::Ctrl::RunClose;
+          m.seq = seq++;
+          m.run_number = in.run_number;
+          work_q.push(std::move(m));
+          break;
+        }
+        case eb::Ctrl::Shutdown: {
+          // Flush BEFORE the pills: a mid-run shutdown's buffered tail must
+          // still reach the file (close_unfinalized keeps it). The pills then
+          // carry the highest seqs, so the Writer drains all real work first.
+          sorter.flush(emit_chunk);
+          for (int i = 0; i < n_workers; ++i) {
+            eb::WorkMsg m;
+            m.ctrl = eb::Ctrl::Shutdown;
+            m.seq = seq++;
+            work_q.push(std::move(m));
+          }
+          return;
+        }
+      }
+    }
+  };
+
+  // --- Workers: event building lands here (step ③); control passes through -
+  auto worker_loop = [&] {
+    eb::WorkMsg m;
+    while (work_q.pop(m)) {
+      bool shutdown = (m.ctrl == eb::Ctrl::Shutdown);
+      writer_q.push(std::move(m));
+      if (shutdown) return;  // exactly one pill per worker
+    }
+  };
+
+  // --- Writer: seq-ordered ROOT I/O (the ONLY thread touching the run file) -
+  auto writer_loop = [&] {
+    Recorder recorder;
+    eb::SeqReorder<eb::WorkMsg> reorder;
+    int pills = 0;
+    auto t_last_autosave = Clock::now();
+    bool done = false;
+    while (!done) {
+      eb::WorkMsg m;
+      if (writer_q.pop_for(m, 200)) {
+        reorder.push(m.seq, std::move(m));
+        eb::WorkMsg r;
+        while (!done && reorder.pop_ready(r)) {
+          switch (r.ctrl) {
+            case eb::Ctrl::None: {
+              // Core range ONLY: chunks deliberately carry duplicated context
+              // (lookback head + post-core tail) for the builder; writing the
+              // full chunk would duplicate hits in the tree.
+              auto range = eb::core_range(r.chunk);
+              for (std::size_t i = range.first; i < range.second; ++i)
+                recorder.fill(r.chunk.hits[i]);
+              counters.written += static_cast<long long>(range.second - range.first);
+              break;
+            }
+            case eb::Ctrl::RunOpen: {
+              // exp_name resolves at the run boundary on THIS thread — the
+              // bounded (~2 s) HTTP fetch only delays file naming while the
+              // unbounded queues upstream absorb the stream.
+              std::string exp = resolve_exp_name(opt);
+              if (!recorder.open_run(opt.out_dir, opt.tree, exp))
+                std::fprintf(stderr,
+                             "root_sink: run start FAILED — dropping this run's events\n");
+              else
+                std::printf("root_sink: run file -> %s\n", recorder.provisional().c_str());
+              std::fflush(stdout);
+              break;
+            }
+            case eb::Ctrl::RunClose: {
+              // Seq order makes this a barrier for free: every chunk of the
+              // run has already been written when the marker pops.
+              long long ev = recorder.entries();
+              std::string fn = recorder.finalize(r.run_number);
+              std::printf("root_sink: run %u finalized -> %s (%lld events)\n",
+                          r.run_number, fn.c_str(), ev);
+              if (use_hists) copy_hists_sidecar(opt.hists_file, recorder.final_path());
+              if (http_enabled)
+                std::printf("root_sink: (monitor histograms kept across the run boundary)\n");
+              std::fflush(stdout);
+              break;
+            }
+            case eb::Ctrl::Shutdown:
+              if (++pills >= n_workers) done = true;  // all real work drained
+              break;
+          }
+        }
+      }
+      auto now = Clock::now();
+      if (recorder.is_open() &&
+          std::chrono::duration_cast<std::chrono::seconds>(now - t_last_autosave)
+                  .count() >= opt.autosave_sec) {
+        recorder.autosave();
+        t_last_autosave = now;
+      }
+    }
+    if (recorder.is_open()) recorder.close_unfinalized();
+  };
+
+  std::thread th_receiver(receiver_loop);
+  std::thread th_sorter(sorter_loop);
+  std::vector<std::thread> th_workers;
+  for (int i = 0; i < n_workers; ++i) th_workers.emplace_back(worker_loop);
+  std::thread th_writer(writer_loop);
+
+  // --- Display (this thread): histograms + matchers + HTTP + status --------
+  // Fed by the bounded tee in ARRIVAL order (same as the old single-threaded
+  // fill path), so the watermark matchers behave exactly as before.
 
   // Emit any coincidence results a matcher produced into the histograms. In
   // --hists mode the declarative coinc-scope set decides what gets filled; the
   // built-in mode keeps the hard-coded dt1/dt2/dt2_vs_dt1 fills.
   auto emit = [&](const CoincResult& r) {
-    ++matcher_fills;
+    ++counters.matcher_fills;
     if (use_hists) {
       fill_coinc_hists(live_hists, r);
     } else {
@@ -983,120 +1290,64 @@ int main(int argc, char** argv) {
   // /ReloadHists rebuild is safe (nothing bakes a TH1*). xy matchers only exist
   // in --hists mode, so no built-in branch here.
   auto emit_xy1 = [&](const PosResult& r) {
-    ++xy_fills;
+    ++counters.xy_fills;
     fill_pos_hists(live_hists, r, Scope::Pos1);
   };
   auto emit_xy2 = [&](const PosResult& r) {
-    ++xy_fills;
+    ++counters.xy_fills;
     fill_pos_hists(live_hists, r, Scope::Pos2);
   };
 
-  auto process = [&](const uint8_t* data, size_t size) {
-    Envelope env = parse_envelope(data, size);
-    switch (env.kind) {
-      case MsgKind::Data: {
-        long n = decode_batch(
-            env.payload, env.payload_size,
-            [&](uint32_t sid) {
-              run_state.on_data(sid, [&] {
-                // Resolve exp_name once, at the Idle->Writing transition. With
-                // --operator this does the (bounded) HTTP fetch; ZMQ HWM=0
-                // buffers batches during the ~2 s at most that it can take.
-                std::string exp = resolve_exp_name(opt);
-                if (!recorder.open_run(opt.out_dir, opt.tree, exp)) {
-                  std::fprintf(stderr, "root_sink: run start FAILED — dropping this run's events\n");
-                }
-                if (matcher) matcher->reset();  // clock may restart between runs
-                if (xy1) xy1->reset();
-                if (xy2) xy2->reset();
-                std::printf("root_sink: run started (source %u) -> %s\n", sid,
-                            recorder.provisional().c_str());
-              });
-            },
-            [&](const ScalarHit& h) {
-              recorder.fill(h);
-              ++events_written;
-              if (http_enabled) {
-                if (use_hists)
-                  fill_hit_hists(live_hists, h);
-                else if (h.channel < 64)
-                  g_h_channels->Fill(h.channel);
-                if (matcher) matcher->push(h, emit);
-                if (xy1) xy1->push(h, emit_xy1);
-                if (xy2) xy2->push(h, emit_xy2);
-              }
-            });
-        if (n < 0)
-          std::fprintf(stderr, "root_sink: WARNING malformed Data batch (skipped)\n");
+  bool display_done = false;
+  auto handle_display = [&](eb::DisplayMsg& d) {
+    switch (d.ctrl) {
+      case eb::Ctrl::None:
+        if (http_enabled) {
+          for (const ScalarHit& h : d.hits) {
+            if (use_hists)
+              fill_hit_hists(live_hists, h);
+            else if (h.channel < 64)
+              g_h_channels->Fill(h.channel);
+            if (matcher) matcher->push(h, emit);
+            if (xy1) xy1->push(h, emit_xy1);
+            if (xy2) xy2->push(h, emit_xy2);
+          }
+        }
         break;
-      }
-      case MsgKind::EndOfStream: {
-        run_state.on_eos(
-            env.source_id, env.run_number,
-            [&](uint32_t rn) {
-              if (matcher) matcher->flush(emit);  // ripen the final partial window
-              if (xy1) xy1->flush(emit_xy1);
-              if (xy2) xy2->flush(emit_xy2);
-              long long ev = recorder.entries();
-              std::string fn = recorder.finalize(rn);
-              std::printf("root_sink: run %u finalized -> %s (%lld events)\n", rn,
-                          fn.c_str(), ev);
-              if (use_hists)
-                copy_hists_sidecar(opt.hists_file, recorder.final_path());
-              if (http_enabled)
-                std::printf("root_sink: (monitor histograms kept across the run boundary)\n");
-            },
-            [&](uint32_t sid, uint32_t rn) {
-              std::printf("root_sink: ignoring stale EOS (source %u, run %u) while idle\n",
-                          sid, rn);
-            });
+      case eb::Ctrl::RunOpen:
+        if (matcher) matcher->reset();  // clock may restart between runs
+        if (xy1) xy1->reset();
+        if (xy2) xy2->reset();
         break;
-      }
-      case MsgKind::Heartbeat:
-        break;  // liveness only — nothing to record
-      case MsgKind::Unknown:
-        if (warned.insert(env.variant).second)
-          std::fprintf(stderr, "root_sink: WARNING unknown message variant '%s' (skipping; further ones silenced)\n",
-                       env.variant.c_str());
+      case eb::Ctrl::RunClose:
+        if (matcher) matcher->flush(emit);  // ripen the final partial window
+        if (xy1) xy1->flush(emit_xy1);
+        if (xy2) xy2->flush(emit_xy2);
+        break;
+      case eb::Ctrl::Shutdown:
+        display_done = true;
         break;
     }
   };
 
+  std::printf("root_sink: pipeline receiver -> sorter(span=%.0fms horizon=%.0fms) -> %d worker(s) -> writer\n",
+              opt.chunk_span_ms, opt.safe_horizon_ms, n_workers);
   std::printf("root_sink: running. Ctrl-C or SIGTERM to stop.\n");
   std::fflush(stdout);
 
   auto t_last_status = Clock::now();
-  auto t_last_autosave = Clock::now();
-  long long last_events = 0;
+  long long last_received = 0;
 
-  while (!g_stop) {
-    zmq_pollitem_t items[1];
-    items[0].socket = sub;
-    items[0].fd = 0;
-    items[0].events = ZMQ_POLLIN;
-    items[0].revents = 0;
-    int rc = zmq_poll(items, 1, 100);  // 100 ms
-    if (rc < 0) {
-      if (zmq_errno() == EINTR) continue;  // interrupted by our signal
-      std::fprintf(stderr, "root_sink: zmq_poll error: %s\n", zmq_strerror(zmq_errno()));
-      break;
-    }
-    if (items[0].revents & ZMQ_POLLIN) {
-      // Drain everything pending this wakeup (keep up with the merger).
-      while (true) {
-        zmq_msg_t msg;
-        zmq_msg_init(&msg);
-        int nb = zmq_msg_recv(&msg, sub, ZMQ_DONTWAIT);
-        if (nb < 0) {
-          zmq_msg_close(&msg);
-          break;  // EAGAIN (drained) or error
-        }
-        process(static_cast<const uint8_t*>(zmq_msg_data(&msg)), zmq_msg_size(&msg));
-        zmq_msg_close(&msg);
-      }
+  while (!display_done) {
+    eb::DisplayMsg d;
+    bool got = display_q.pop_for(d, 100);
+    while (got && !display_done) {
+      handle_display(d);
+      got = display_q.pop_for(d, 0);  // drain whatever queued meanwhile
     }
 
-    // Service HTTP requests on the main thread (no lock needed vs Fill above).
+    // Service HTTP requests on this thread (the histograms' owner, so the
+    // no-lock invariant of the single-threaded design carries over 1:1).
     if (server) gSystem->ProcessEvents();
 
     // Apply any HTTP command that fired during ProcessEvents. Doing the work here
@@ -1145,34 +1396,44 @@ int main(int argc, char** argv) {
       std::fflush(stdout);
     }
 
+    // (autosave moved to the Writer thread — the tree's owner.)
     auto now = Clock::now();
     using std::chrono::duration;
     using std::chrono::duration_cast;
     using std::chrono::seconds;
-    if (recorder.is_open() &&
-        duration_cast<seconds>(now - t_last_autosave).count() >= opt.autosave_sec) {
-      recorder.autosave();
-      t_last_autosave = now;
-    }
     if (duration_cast<seconds>(now - t_last_status).count() >= 10) {
       double dt = duration_cast<duration<double>>(now - t_last_status).count();
-      double rate = dt > 0 ? (double)(events_written - last_events) / dt : 0.0;
-      std::printf("root_sink: %s | events=%lld | %.0f ev/s | matcher_fills=%lld | xy_fills=%lld\n",
-                  run_state.is_writing() ? "WRITING" : "idle", events_written, rate,
-                  matcher_fills, xy_fills);
+      long long rec = counters.received;
+      double rate = dt > 0 ? (double)(rec - last_received) / dt : 0.0;
+      std::printf(
+          "root_sink: %s | events=%lld (written=%lld) | %.0f ev/s | chunks=%lld | "
+          "matcher_fills=%lld | xy_fills=%lld | q[sort=%zu work=%zu write=%zu disp=%zu] | "
+          "display_drops=%lld\n",
+          counters.writing ? "WRITING" : "idle", rec, (long long)counters.written,
+          rate, (long long)counters.chunks, (long long)counters.matcher_fills,
+          (long long)counters.xy_fills, to_sorter.size(), work_q.size(),
+          writer_q.size(), display_q.size(), (long long)counters.display_drops);
       std::fflush(stdout);
       t_last_status = now;
-      last_events = events_written;
+      last_received = rec;
     }
   }
 
+  // Shutdown cascade: the Receiver already sent Shutdown down both paths (that
+  // is what ended the display loop above); joining in pipeline order lets each
+  // stage drain into the next. The Writer's close_unfinalized runs inside its
+  // own thread before it exits.
   std::printf("root_sink: stopping...\n");
-  if (recorder.is_open()) recorder.close_unfinalized();
+  std::fflush(stdout);
+  th_receiver.join();
+  th_sorter.join();
+  for (auto& t : th_workers) t.join();
+  th_writer.join();
 
-  zmq_close(sub);
-  zmq_ctx_term(ctx);
+  zmq_ctx_term(ctx);  // the Receiver closed the socket on its way out
   // ROOT objects (histograms, server, app) are process-lifetime; let the OS
   // reclaim them on exit rather than risk teardown-order surprises.
-  std::printf("root_sink: bye (%lld events written total).\n", events_written);
+  std::printf("root_sink: bye (%lld hits received, %lld written).\n",
+              (long long)counters.received, (long long)counters.written);
   return 0;
 }
