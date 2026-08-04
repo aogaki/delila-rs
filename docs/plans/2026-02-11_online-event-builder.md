@@ -1,5 +1,7 @@
 # Event Builder オンライン化 実装計画
 
+> **❌ SUPERSEDED**: `online_event_builder_v2.md` → `event_builder_unified.md` と 2 段階で置換済み。2026-08-04 に EB 自体が C++(root_sink 系譜)へ移行決定([TODO 66](../../TODO/event-builder/66_cpp_event_builder.md))。歴史的記録。
+
 ## Context
 
 Event Builder は現在オフラインツール（ROOT ファイル → SliceBuilder → ROOT 出力）として実装済み。

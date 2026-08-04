@@ -1,11 +1,18 @@
 # DELILA-Rust Offline Event Builder マニュアル
 
+> **Status (2026-08-04): 凍結版。** 本マニュアルの Rust `event_builder` は
+> 記載どおり動作し続けます(参照実装として維持)が、EB の新規開発は
+> C++(root_sink 系譜)へ移行しました —
+> [TODO/event-builder/66_cpp_event_builder.md](../TODO/event-builder/66_cpp_event_builder.md) 参照。
+> 既知の制約: oxyroot は書き込み圧縮が未実装のため、本ツールの ROOT 出力は
+> **常に非圧縮**です(C++/ZSTD 比で 1.5〜3 倍のサイズ)。
+
 `.delila` 生データから ROOT 形式の **built event** ファイルを作る一連の
 オフライン処理を最初から最後まで通して説明します。**物理屋が自分で実行
 することを想定**したマニュアルです。
 
 > 関連 SPEC: [`TODO/event-builder/SPECIFICATION.md`](../TODO/event-builder/SPECIFICATION.md)
-> (v0.7)。EB の責務境界は SPEC § 1.4 を参照してください。
+> (v0.8)。EB の責務境界は SPEC § 1.4 を参照してください。
 
 ---
 

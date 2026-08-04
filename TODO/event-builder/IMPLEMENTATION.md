@@ -1,7 +1,7 @@
 # Event Bridge 実装詳細計画
 
 **Date:** 2026-01-27
-**Status:** 計画中
+**Status:** ❌ OBSOLETE — Event Bridge は SPEC v0.5 (2026-05-19) で retire 済み(Online EB は Merger PUB 直接購読)。さらに v0.8 (2026-08-04) で EB 自体が C++ (root_sink 系譜) へ移行決定([TODO 66](66_cpp_event_builder.md))。root_sink が MessagePack ワイヤを直接読むため、固定バイナリへの変換ブリッジは恒久的に不要。本文書は歴史的記録として保存
 **仕様書:** `docs/event_bridge_wire_format.md`
 
 ---

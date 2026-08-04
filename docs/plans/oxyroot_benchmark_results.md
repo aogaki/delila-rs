@@ -4,6 +4,17 @@
 **Benchmark tool:** `src/bin/oxyroot_bench.rs`
 **Run with:** `cargo run --release --features root --bin oxyroot_bench`
 
+> **⚠️ 追記 (2026-08-04): oxyroot は ROOT 書き込み圧縮が未実装。**
+> `rcompress.rs::compress()` は `assert_eq!(compression, 1)` + 無圧縮パススルー
+> (それ以外は `unimplemented!()`、zlib エンコーダはコメントアウトのまま)。
+> 0.1.25(最新、2024-10)/GitHub master とも同一で、以後休眠。
+> 実測: 同一 LCG データ 2M イベント(スカラー 5 ブランチ、生 28.0 MB)で
+> oxyroot **28.1 MB(圧縮率 1.00)** vs C++ ROOT ZSTD-5 **18.1 MB** / zlib-1 18.7 MB。
+> oxyroot 出力自体は ROOT で正常に読める(非圧縮なだけ)。
+> 本文書のスループット値はこの前提(圧縮コストゼロ)で読むこと。
+> この確定が EB の C++ 移行決定([TODO 66](../../TODO/event-builder/66_cpp_event_builder.md))
+> の直接の根拠の一つになった。
+
 ## 背景
 
 Online Event Builder が ROOT フォーマットでイベントを書き出す際の性能と設計方針を確定するために、

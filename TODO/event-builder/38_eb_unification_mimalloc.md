@@ -1,9 +1,9 @@
 # Event Builder 統一パイプライン
 
 **Created:** 2026-02-23
-**Updated:** 2026-02-26
-**Status: 🔧 Phase 0-3 完了、Phase 4-5 pending**
-**Priority:** 1 (MVP Phase 2)
+**Updated:** 2026-08-04
+**Status: 🧊 FROZEN — Phase 0-4 完了(Phase 4 = Online EB 移行、2026-05-25)。Phase 5(レガシー削除)/ Phase 6(Operator 統合拡張)は中止**: EB は C++ (root_sink 系譜) へ移行決定([TODO 66](66_cpp_event_builder.md)、2026-08-04)。Rust 統一パイプラインは参照実装として凍結(テストは維持)。凍結時点の既知の制約 = oxyroot 書き込み圧縮未実装(ROOT 出力は常に非圧縮)
+**Priority:** — (凍結)
 **Plan file:** [`docs/plans/event_builder_unified.md`](../../docs/plans/event_builder_unified.md) (Gemini 2回レビュー済)
 
 ## Context

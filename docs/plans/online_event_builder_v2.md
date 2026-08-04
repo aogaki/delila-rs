@@ -1,6 +1,6 @@
 # Online Event Builder v2 — 再設計
 
-**Status: IN PROGRESS**
+**Status: ❌ SUPERSEDED** by `event_builder_unified.md` (2026-02-26)。さらに 2026-08-04 に EB 自体が C++ 移行決定([TODO 66](../../TODO/event-builder/66_cpp_event_builder.md))
 **Date: 2026-02-11**
 **Branch: feature/online-eb-v2**
 

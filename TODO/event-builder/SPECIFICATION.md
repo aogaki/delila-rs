@@ -1,8 +1,17 @@
 # Event Builder 仕様書
 
-**Version:** 0.7.0
-**Date:** 2026-05-20
-**Status:** Design (Unified Pipeline + named-ops L1/L2 + tree-based time offsets + scope-boundary principle + 2-layer threshold)
+**Version:** 0.8.0
+**Date:** 2026-08-04
+**Status:** Design — **実装言語を C++ (root_sink 系譜) へ再転換** ([TODO 66](66_cpp_event_builder.md))。本仕様の概念部(§1.4 責務境界 / L1/L2 named-ops / 2 層 threshold / timeSettings tree)は C++ 実装の要求仕様として引き続き有効。Rust 統一パイプライン(§11)は凍結・参照実装化
+
+> v0.7 → v0.8 主要変更 (2026-08-04):
+> - **実装言語を C++ へ再転換**(v0.5 の「Rust 側で完結」を撤回)。ただし v0.3 の
+>   別リポジトリ + Event Bridge 案ではなく、**delila-rs 内 root_sink 系譜**
+>   (merger PUB 直接購読、TDelila ベース、online=offline 同一コード)
+> - 根拠: ①oxyroot の ROOT 書き込み圧縮が未実装と確定(常に非圧縮、実測
+>   28.1 MB vs C++ ZSTD 18.1 MB)②root_sink/PositionMatcher の実証実績
+>   ③EB 性能は上流(Rust)で律速済みでスカラー処理は C++ 単線で十分
+> - `.delila` 正典・Rust 取得系(HWM=0/no-drop)は不変。経緯と条件は TODO 66 参照
 
 > v0.4 → v0.5 主要変更:
 > - C++ Event Builder (別リポジトリ) 経路を **撤回** — Rust 側で完結
@@ -673,3 +682,4 @@ pub enum HitBatch<H> {
 | 2026-05-19 | 0.5.1 | `timeSettings.json` を tree モデルに刷新（C 案）— 多 root 許容 / HitSource 入口でオフセット 1 回適用 / `time_reference` field 廃止 / 補助 CLI `eb-offsets` 追加 |
 | 2026-05-20 | 0.6.0 | **§ 1.4 設計原則 — EB の責務境界**を追加。EB は汎用エンジン、実験固有の geometry / kinematic / particle-ID cut は物理屋が下流解析で行う、と明文化。ELIFANT2025 p91Zr の実データテストで anti-diagonal sector pairing を EB に押し込む誘惑が発生したのを契機に整理 |
 | 2026-05-20 | 0.7.0 | **L1 `energy_gate` 廃止**。p91Zr v3 ラン (`min_adc=100`) で 0.06 % しか events 変動せず、§ 1.4 が禁ずる「永続的データ消失を伴う閾値 cut」に該当することが実証された。閾値モデルを 3 層 → 2 層 (L2 generic filter + 解析 cut) に簡素化。SPEC § 5 / § 6.2 / runtime_config.rs から `energy_gate` / `trigger_energy_gates` 関連を完全削除 |
+| 2026-08-04 | 0.8.0 | **実装言語を C++ (root_sink 系譜) へ再転換**([TODO 66](66_cpp_event_builder.md))。根拠 = oxyroot 書き込み圧縮未実装の確定 + root_sink/watermark matcher の実証(side3 ThGEM)+ TDelila による online=offline 同一コード。Rust 統一パイプラインは凍結・参照実装化。概念仕様(§1.4/L1/L2/threshold/timeSettings)は C++ 実装に引き継ぎ |

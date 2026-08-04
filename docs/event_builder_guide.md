@@ -1,5 +1,13 @@
 # Offline Event Builder Guide
 
+> **Status (2026-08-04): FROZEN.** The Rust event builder documented here still
+> works as described and remains the reference implementation, but new event-builder
+> development moves to C++ (root_sink lineage) — see
+> [TODO/event-builder/66_cpp_event_builder.md](../TODO/event-builder/66_cpp_event_builder.md).
+> Known limitation: oxyroot writes ROOT files **uncompressed** (write-side
+> compression is unimplemented in the crate), so output files are ~1.5-3x larger
+> than C++/ZSTD equivalents.
+
 A tool to produce ROOT TTree event files from raw `.delila` data acquired by the DELILA DAQ system.
 ELIFANT-Event compatible coincidence event builder.
 

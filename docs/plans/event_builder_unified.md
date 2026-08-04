@@ -1,7 +1,7 @@
 # Event Builder 統一設計書
 
 **Date:** 2026-02-26
-**Status:** APPROVED — Gemini レビュー 2回完了
+**Status:** 🧊 FROZEN (2026-08-04) — Phase 0-4 実装完了(APPROVED、Gemini レビュー 2回)。Phase 5(レガシー削除)/Phase 6 は中止: EB は C++(root_sink 系譜)へ移行決定 → [TODO/event-builder/66_cpp_event_builder.md](../../TODO/event-builder/66_cpp_event_builder.md)。「Online/Offline 同一パイプライン」という本設計の中心思想は C++ 側に引き継がれる(TDelila が ZMQ と .delila の両方を読む)
 **Supersedes:** `online_event_builder_v2.md`, `TODO/event-builder/38_eb_unification_mimalloc.md`
 
 ---

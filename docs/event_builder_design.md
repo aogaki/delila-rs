@@ -2,7 +2,7 @@
 
 **Version:** 2.0.0
 **Date:** 2026-02-02
-**Status:** Time Slice 方式に更新
+**Status:** ❌ OBSOLETE(歴史的記録)— Time Slice 方式は chunk_builder 統一パイプライン(SPEC v0.5+)で置換済み。さらに **2026-08-04: EB 実装言語を C++(root_sink 系譜)へ移行決定** — 現行仕様は [TODO/event-builder/SPECIFICATION.md](../TODO/event-builder/SPECIFICATION.md) (v0.8)、移行計画は [TODO/event-builder/66_cpp_event_builder.md](../TODO/event-builder/66_cpp_event_builder.md)。下記「実装言語 = Rust(oxyroot で ROOT 出力可能)」の前提は覆っている(oxyroot は書き込み圧縮未実装と 2026-08-04 に確定)
 
 ---
 

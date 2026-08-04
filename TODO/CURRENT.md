@@ -1,6 +1,7 @@
 # Current Sprint - TODO Index
 
-**Updated:** 2026-07-21 — **TODO 65 全面完了+アーカイブ**(root_sink: ヒスト柔軟化 Phase A/B + Recorder 準拠ファイル名 + `[network.root_sink]` TOML 起動 + merger EOS 転送バグ修正 `dc0669c` + ROOT 自動分割対策 `efe43a4`、side3/gant 配備済)。**TODO 掃除実施**: 24/26/47/51/65 を archive へ、CURRENT.md の 2026-05 以前の詳細完了記録を [archive/completed_2026H1_details.md](archive/completed_2026H1_details.md) へ退避(65KB→18KB)。次候補 = TODO 63 (CFD 探索窓) / TODO 59 (trap auto-tune) / TODO 64 残(FW 修正版待ち)/ TODO 52 Phase 3。
+**Updated:** 2026-08-04 — **EB の C++ 移行を決定**([TODO 66](event-builder/66_cpp_event_builder.md)、SPEC v0.8): oxyroot の ROOT 書き込み圧縮が未実装と確定(常に非圧縮)+ root_sink/PositionMatcher の side3 ThGEM 実証(XY ライブモニタ配備、位置分解能 σ≈0.25-0.36 mm、機器/物理寄与分解済)を受け、EB 実装言語を C++(root_sink 系譜)へ。Rust 統一パイプラインは凍結。root_sink 側の未コミット変更(XY モニタ一式)あり。
+**前回 (2026-07-21)**: TODO 65 全面完了+アーカイブ、TODO 掃除(24/26/47/51/65 → archive、詳細記録退避 65KB→18KB)。
 
 このファイルは現在のスプリントの概要を示すインデックスです。
 Claudeセッション開始時に必ず読み込まれます。
@@ -18,8 +19,9 @@ Claudeセッション開始時に必ず読み込まれます。
 | **1** | [64_amax_opendpp_params.md](64_amax_opendpp_params.md) | **🚧 Phase 0+A ✅済 (2026-07-16) / 残 = FWHM 実測(FW 修正版待ち)** | AMax UI に OpenDPP 標準 DevTree パラメータ追加（FW 開発者要望）。**Phase 0 実装+実機検証済**: `dc_offset` + `vga_gain` を AMax Input タブへ splice、FW OFFSET → "Offset (Trapezoid)" リネーム。gant SN52622（13july FW）で Tune Up Apply → DevTree 直読みで反映確認。**Phase A 済**: `docs/devtree_examples/vx2730_dppopen_sn52622.json`、**DPP_OPEN の ch パラメータは 10 個のみ**（channelstriggermask 無し）と確定。**残** = ChGain × trapezoid FWHM 実測（0/6/12 dB、13july FW の波形空バグ修正版待ち）、FW 開発者への確認事項（ChGain データパス位置/内部ビット幅）。Phase B/D は FW 開発者の要望次第 |
 | **1** | [63_v1743_cfd_search_window.md](63_v1743_cfd_search_window.md) | **📋 OPEN (2026-07-09)** | 既存 x743 CFD テスト2件 fail (`cfd_valid=false`)。原因: `analyze()` の後方探索窓 `search_span=4·cfd_delay=16` が遅い立ち上がりパルスのゼロ交差を取り逃す (commit `e4ad305` から潜在)。修正前に実機パルスの rise/delay 比測定要。silent peak-fallback の可視化 (warn) も追加 |
 | **2** | [52_refactor_sprint_2026-q2.md](52_refactor_sprint_2026-q2.md) | **📋 Phase 3 待機** | Phase 1+2 完了済 (23 項目、累計 -3716 行)。残 = Phase 3 Component Hardening: R-D3 (X743 read_loop split) / R-D5 (connection extract) / R-D11/D12 / R-P6 / R-P8 (ComponentRunner) / R-X3-post (ZMQ 境界 cost 再計測) |
+| **2** | [event-builder/66_cpp_event_builder.md](event-builder/66_cpp_event_builder.md) | **📋 OPEN (2026-08-04 方針承認)** | **EB の C++ 移行**(root_sink 系譜)。根拠 = oxyroot 圧縮未実装 + root_sink 実証 + online=offline 同一コード(TDelila)。Phase 1 = ThGEM built tree(LiveEventBuilder 相当のオンライン化)+ watermark matcher の N デック汎用化。`.delila` 正典・Rust 取得系は不変。Rust EB は凍結 |
 | **2** | [59_eliade_trap_autotune.md](59_eliade_trap_autotune.md) ([JA](59_eliade_trap_autotune_ja.md)) | **📋 PLANNING (2026-06-16)** | ELIADE Ge trap 補正 auto-tune。2026 = Ge 分解能チューン、beam 2027-01。8× clover HPGe / 4×V1725 PHA + V1730 PSD |
-| - | [event-builder/SPECIFICATION.md](event-builder/SPECIFICATION.md) | **参照** | Event Builder 仕様 |
+| - | [event-builder/SPECIFICATION.md](event-builder/SPECIFICATION.md) | **参照 (v0.8)** | Event Builder 仕様 — 概念部は C++ 実装の要求仕様として有効。実装言語判断の経緯は変更履歴参照 |
 
 **休眠(ハード/外部待ち、archive 済)**:
 [47 V1743 Step 4-7](archive/47_v1743_standard_mode_redesign.md)(2台目+S1 分配待ち)/
