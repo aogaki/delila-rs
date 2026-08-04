@@ -473,6 +473,370 @@ static void test_sorter_late_hit_lands_sorted() {
 }
 
 // ---------------------------------------------------------------------------
+// build_events_from_chunk (integrated-event builder)
+// ---------------------------------------------------------------------------
+
+// Reorder `hits` into a realistic arrival order: true time plus a bounded
+// per-hit displacement. The Sorter's contract only covers disorder up to
+// safe_horizon_ns — a full shuffle would exceed it by construction (hits
+// arriving later than their chunk's core are context-only, by design), so
+// integration tests must model the real, BOUNDED network disorder.
+static void jitter_arrival(std::vector<ScalarHit>& hits, double max_disp,
+                           std::mt19937& rng) {
+  std::uniform_real_distribution<double> disp(-max_disp, max_disp);
+  std::vector<std::pair<double, std::size_t>> order;
+  order.reserve(hits.size());
+  for (std::size_t i = 0; i < hits.size(); ++i)
+    order.push_back({hits[i].timestamp_ns + disp(rng), i});
+  std::sort(order.begin(), order.end());
+  std::vector<ScalarHit> arrival;
+  arrival.reserve(hits.size());
+  for (const auto& p : order) arrival.push_back(hits[p.second]);
+  hits = std::move(arrival);
+}
+
+// The side3 channel map: det1 = trig ch1 + arms ch2-5, det2 = trig ch6 +
+// arms ch7-10, LaBr3 = ch0.
+static BuilderConfig side3_cfg(double window = 500.0) {
+  BuilderConfig c;
+  c.trig1 = 1; c.xl1 = 2; c.xr1 = 3; c.yu1 = 4; c.yd1 = 5;
+  c.trig2 = 6; c.xl2 = 7; c.xr2 = 8; c.yu2 = 9; c.yd2 = 10;
+  c.labr_ch = 0;
+  c.window_ns = window;
+  return c;
+}
+
+static SortedChunk mkchunk(std::vector<ScalarHit> hits, double cs = -kInf,
+                           double ce = kInf) {
+  std::sort(hits.begin(), hits.end(), [](const ScalarHit& a, const ScalarHit& b) {
+    return a.timestamp_ns < b.timestamp_ns;
+  });
+  SortedChunk c;
+  c.hits = std::move(hits);
+  c.core_start = cs;
+  c.core_end = ce;
+  return c;
+}
+
+static void test_builder_full_event() {
+  auto ev = build_events_from_chunk(
+      mkchunk({hit(0, 990.0, 50), hit(1, 1000.0, 100), hit(2, 1010.0, 10),
+               hit(3, 1020.0, 11), hit(4, 1030.0, 12), hit(5, 1040.0, 13)}),
+      side3_cfg());
+  CHECK(ev.size() == 1);
+  const BuiltEvent& e = ev[0];
+  CHECK(near(e.trig1_t, 1000.0) && e.e_trig1 == 100);
+  CHECK(near(e.dt_xl1, 10.0) && near(e.dt_xr1, 20.0));
+  CHECK(near(e.dt_yu1, 30.0) && near(e.dt_yd1, 40.0));
+  CHECK(near(e.x1, 10.0));   // dt_xr - dt_xl = 20 - 10
+  CHECK(near(e.y1, -10.0));  // dt_yu - dt_yd = 30 - 40
+  CHECK(e.e_xl1 == 10 && e.e_xr1 == 11 && e.e_yu1 == 12 && e.e_yd1 == 13);
+  CHECK(e.e_sum1 == 46 && e.n_arms1 == 4);
+  CHECK(near(e.labr_t, 990.0) && e.e_labr == 50);
+  CHECK(near(e.tof1, 10.0));  // trig - labr
+  // Detector 2 never fired: everything NaN/0.
+  CHECK(std::isnan(e.trig2_t) && std::isnan(e.x2) && std::isnan(e.dt_trig));
+  CHECK(std::isnan(e.tof2) && e.n_arms2 == 0 && e.e_sum2 == 0);
+}
+
+static void test_builder_partial_arm() {
+  // XR missing: x1 NaN but y1 still valid — completeness is per-axis.
+  auto ev = build_events_from_chunk(
+      mkchunk({hit(1, 1000.0, 100), hit(2, 1010.0, 10), hit(4, 1030.0, 12),
+               hit(5, 1040.0, 13)}),
+      side3_cfg());
+  CHECK(ev.size() == 1);
+  const BuiltEvent& e = ev[0];
+  CHECK(std::isnan(e.dt_xr1) && std::isnan(e.x1));
+  CHECK(near(e.y1, -10.0));
+  CHECK(e.n_arms1 == 3);
+  CHECK(e.e_sum1 == 35);  // 10 + 12 + 13, XR's energy excluded
+}
+
+static void test_builder_trigger_only() {
+  // A lone trigger is EMITTED (arm-efficiency measurement), not dropped.
+  auto ev = build_events_from_chunk(mkchunk({hit(1, 1000.0, 100)}), side3_cfg());
+  CHECK(ev.size() == 1);
+  CHECK(near(ev[0].trig1_t, 1000.0) && ev[0].n_arms1 == 0 && ev[0].e_sum1 == 0);
+  CHECK(std::isnan(ev[0].x1) && std::isnan(ev[0].y1) && std::isnan(ev[0].labr_t));
+}
+
+static void test_builder_nearest_not_first() {
+  // Two XL candidates: 700 (backward, |300|) and 1100 (forward, |100|).
+  // Nearest matching picks 1100; LiveEventBuilder's backward-first rule would
+  // have picked 700 — this test pins the divergence.
+  auto ev = build_events_from_chunk(
+      mkchunk({hit(2, 700.0, 7), hit(1, 1000.0, 100), hit(2, 1100.0, 8)}),
+      side3_cfg());
+  CHECK(ev.size() == 1);
+  CHECK(near(ev[0].dt_xl1, 100.0));
+  CHECK(ev[0].e_xl1 == 8);
+}
+
+static void test_builder_window_inclusive() {
+  // |dt| == window is accepted (closed interval, matching tmp/test.cpp's <=).
+  auto ev = build_events_from_chunk(
+      mkchunk({hit(1, 1000.0, 100), hit(2, 1500.0, 9)}), side3_cfg(500.0));
+  CHECK(ev.size() == 1 && near(ev[0].dt_xl1, 500.0));
+  auto ev2 = build_events_from_chunk(
+      mkchunk({hit(1, 1000.0, 100), hit(2, 1501.0, 9)}), side3_cfg(500.0));
+  CHECK(ev2.size() == 1 && std::isnan(ev2[0].dt_xl1));
+}
+
+static void test_builder_core_gates() {
+  // Triggers outside [core_start, core_end) are context only; arm hits from
+  // the context region still match an in-core trigger.
+  auto ev = build_events_from_chunk(
+      mkchunk({hit(1, 800.0, 1), hit(1, 1000.0, 2), hit(2, 1150.0, 9),
+               hit(1, 1100.0, 3)},
+              900.0, 1100.0),
+      side3_cfg());
+  CHECK(ev.size() == 1);            // 800 (< core_start) and 1100 (>= core_end) gated
+  CHECK(near(ev[0].trig1_t, 1000.0));
+  CHECK(near(ev[0].dt_xl1, 150.0));  // arm at 1150 is past core_end but usable
+}
+
+static void test_builder_boundary_backward_partner() {
+  // Port of the Rust H10 content test: an arm hit BEFORE core_end must remain
+  // available (via lookback) to a trigger emitted by the NEXT chunk, with the
+  // correct negative dt.
+  std::vector<ScalarHit> buf = {hit(2, 1000.0, 5), hit(1, 1300.0, 100),
+                                hit(0, 51100.0, 0)};
+  SortedChunk c1;
+  CHECK(sort_and_split(buf, 50000.0, 500.0, -kInf, c1));
+  CHECK(near(c1.core_end, 1100.0));
+  auto ev1 = build_events_from_chunk(c1, side3_cfg());
+  CHECK(ev1.empty());  // trigger 1300 >= core_end: deferred
+  SortedChunk c2;
+  CHECK(sort_and_flush(buf, c1.core_end, c2));
+  auto ev2 = build_events_from_chunk(c2, side3_cfg());
+  CHECK(ev2.size() == 1);
+  CHECK(near(ev2[0].trig1_t, 1300.0));
+  CHECK(near(ev2[0].dt_xl1, -300.0));  // the carried-back partner
+}
+
+static void test_builder_no_double_emission() {
+  // Port of the Rust no-double-emit test: a trigger emitted by chunk N rides
+  // into chunk N+1 as lookback context and must NOT fire again.
+  std::vector<ScalarHit> buf = {hit(1, 1000.0, 100), hit(2, 1200.0, 5),
+                                hit(0, 51050.0, 0)};
+  SortedChunk c1;
+  CHECK(sort_and_split(buf, 50000.0, 500.0, -kInf, c1));
+  CHECK(near(c1.core_end, 1050.0));
+  auto ev1 = build_events_from_chunk(c1, side3_cfg());
+  CHECK(ev1.size() == 1);              // emitted here (1000 < 1050)...
+  CHECK(near(ev1[0].dt_xl1, 200.0));   // ...with its forward partner from context
+  SortedChunk c2;
+  CHECK(sort_and_flush(buf, c1.core_end, c2));
+  bool trig_in_c2 = false;
+  for (const auto& h : c2.hits)
+    if (h.channel == 1) trig_in_c2 = true;
+  CHECK(trig_in_c2);  // the trigger IS present in chunk 2 (lookback)...
+  auto ev2 = build_events_from_chunk(c2, side3_cfg());
+  CHECK(ev2.empty());  // ...but the core_start floor silences it
+}
+
+static void test_builder_labr_disabled() {
+  BuilderConfig cfg = side3_cfg();
+  cfg.labr_ch = -1;
+  auto ev = build_events_from_chunk(
+      mkchunk({hit(0, 990.0, 50), hit(1, 1000.0, 100)}), cfg);
+  CHECK(ev.size() == 1);
+  CHECK(std::isnan(ev[0].labr_t) && std::isnan(ev[0].tof1));
+}
+
+static void test_builder_same_det_no_merge() {
+  auto ev = build_events_from_chunk(
+      mkchunk({hit(1, 1000.0, 1), hit(1, 1100.0, 2)}), side3_cfg());
+  CHECK(ev.size() == 2);  // same-detector triggers never merge
+  CHECK(near(ev[0].trig1_t, 1000.0) && near(ev[1].trig1_t, 1100.0));
+}
+
+static void test_builder_pairing() {
+  // det1 then det2 within the window -> ONE integrated event.
+  auto ev = build_events_from_chunk(
+      mkchunk({hit(1, 1000.0, 100), hit(6, 1200.0, 200), hit(7, 1210.0, 20)}),
+      side3_cfg());
+  CHECK(ev.size() == 1);
+  const BuiltEvent& e = ev[0];
+  CHECK(near(e.trig1_t, 1000.0) && near(e.trig2_t, 1200.0));
+  CHECK(near(e.dt_trig, 200.0));
+  CHECK(near(e.dt_xl2, 10.0));  // det2 arms match det2's OWN trigger time
+  CHECK(e.e_trig2 == 200);
+
+  // det2 first: dt_trig is STILL t(det2) - t(det1), i.e. negative here.
+  auto ev2 = build_events_from_chunk(
+      mkchunk({hit(6, 1000.0, 200), hit(1, 1200.0, 100)}), side3_cfg());
+  CHECK(ev2.size() == 1);
+  CHECK(near(ev2[0].dt_trig, -200.0));
+  CHECK(near(ev2[0].trig1_t, 1200.0) && near(ev2[0].trig2_t, 1000.0));
+}
+
+static void test_builder_chain() {
+  // trig1@1000 pairs trig2@1400; trig1@1800 is on its own: 3 triggers -> 2
+  // events (a pair is closed once formed — no chained mega-merge).
+  auto ev = build_events_from_chunk(
+      mkchunk({hit(1, 1000.0, 1), hit(6, 1400.0, 2), hit(1, 1800.0, 3)}),
+      side3_cfg());
+  CHECK(ev.size() == 2);
+  CHECK(!std::isnan(ev[0].dt_trig));
+  CHECK(std::isnan(ev[1].dt_trig) && near(ev[1].trig1_t, 1800.0));
+}
+
+static void test_builder_boundary_pair() {
+  // A pair spanning core_end is emitted exactly once — by the chunk that owns
+  // the ANCHOR. In the next chunk the anchor is context (< core_start), pairs
+  // again, and gates out, consuming the partner with it.
+  auto c1 = mkchunk({hit(1, 1090.0, 1), hit(6, 1150.0, 2)}, -kInf, 1100.0);
+  auto ev1 = build_events_from_chunk(c1, side3_cfg());
+  CHECK(ev1.size() == 1);
+  CHECK(!std::isnan(ev1[0].dt_trig));
+  auto c2 = mkchunk({hit(1, 1090.0, 1), hit(6, 1150.0, 2)}, 1100.0, kInf);
+  auto ev2 = build_events_from_chunk(c2, side3_cfg());
+  CHECK(ev2.empty());  // no double emission, no orphaned partner event
+}
+
+static void test_builder_through_sorter() {
+  // 20 trigger+arm pairs, fed shuffled through the Sorter in small batches:
+  // chunk-by-chunk building must recover exactly 20 events, each with its arm.
+  BuilderConfig bcfg = side3_cfg(500.0);
+  Sorter::Config scfg;
+  scfg.chunk_span_ns = 10000.0;
+  scfg.safe_horizon_ns = 5000.0;
+  scfg.lookback_ns = bcfg.window_ns;
+  Sorter s(scfg);
+
+  std::vector<ScalarHit> all;
+  for (int i = 0; i < 20; ++i) {
+    double t = 1000.0 + i * 3000.0;  // spacing >> window: no pairing effects
+    all.push_back(hit(1, t, static_cast<uint16_t>(i)));
+    all.push_back(hit(2, t + 50.0, 1));
+  }
+  std::mt19937 rng(777);
+  jitter_arrival(all, 2000.0, rng);  // bounded disorder < safe_horizon (5000)
+
+  std::vector<BuiltEvent> events;
+  auto build = [&](SortedChunk&& c) {
+    auto ev = build_events_from_chunk(c, bcfg);
+    events.insert(events.end(), ev.begin(), ev.end());
+  };
+  std::size_t fed = 0;
+  while (fed < all.size()) {
+    std::vector<ScalarHit> batch;
+    for (int i = 0; i < 7 && fed < all.size(); ++i, ++fed)
+      batch.push_back(all[fed]);
+    s.push_batch(std::move(batch), build);
+  }
+  s.flush(build);
+  CHECK(events.size() == 20);
+  bool all_armed = true, ordered = true;
+  for (std::size_t i = 0; i < events.size(); ++i) {
+    if (std::isnan(events[i].dt_xl1) || !near(events[i].dt_xl1, 50.0))
+      all_armed = false;
+    if (i > 0 && events[i].trig1_t <= events[i - 1].trig1_t) ordered = false;
+  }
+  CHECK(all_armed);
+  CHECK(ordered);  // chunked building preserves global event time order
+}
+
+// ---------------------------------------------------------------------------
+// Worker-pool determinism (Channel + SeqReorder + builder end-to-end)
+// ---------------------------------------------------------------------------
+
+static std::vector<double> run_pool(int nworkers,
+                                    const std::vector<SortedChunk>& chunks,
+                                    const BuilderConfig& cfg) {
+  Channel<WorkMsg> work, done;
+  std::vector<std::thread> ws;
+  for (int i = 0; i < nworkers; ++i) {
+    ws.emplace_back([&] {
+      WorkMsg m;
+      while (work.pop(m)) {
+        if (m.ctrl == Ctrl::Shutdown) {
+          done.push(std::move(m));  // forward the pill, then exit
+          break;
+        }
+        m.built = build_events_from_chunk(m.chunk, cfg);
+        done.push(std::move(m));
+      }
+    });
+  }
+  uint64_t seq = 0;
+  for (const auto& c : chunks) {
+    WorkMsg m;
+    m.chunk = c;
+    m.seq = seq++;
+    work.push(std::move(m));
+  }
+  for (int i = 0; i < nworkers; ++i) {
+    WorkMsg m;
+    m.ctrl = Ctrl::Shutdown;
+    m.seq = seq++;
+    work.push(std::move(m));
+  }
+  // "Writer": reassemble in seq order; done after all pills drained.
+  SeqReorder<WorkMsg> reorder;
+  std::vector<double> trig_times;
+  int pills = 0;
+  WorkMsg m;
+  while (pills < nworkers && done.pop(m)) {
+    reorder.push(m.seq, std::move(m));
+    WorkMsg r;
+    while (reorder.pop_ready(r)) {
+      if (r.ctrl == Ctrl::Shutdown) {
+        ++pills;
+      } else {
+        for (const auto& ev : r.built) trig_times.push_back(ev.trig1_t);
+      }
+    }
+  }
+  for (auto& t : ws) t.join();
+  return trig_times;
+}
+
+static void test_pool_determinism() {
+  // Same chunks through 1 worker and 4 workers -> IDENTICAL event sequence.
+  BuilderConfig bcfg = side3_cfg(500.0);
+  Sorter::Config scfg;
+  scfg.chunk_span_ns = 10000.0;
+  scfg.safe_horizon_ns = 5000.0;
+  scfg.lookback_ns = bcfg.window_ns;
+  Sorter s(scfg);
+
+  std::mt19937 rng(4242);
+  std::uniform_real_distribution<double> jit(0.0, 200.0);
+  std::vector<ScalarHit> all;
+  for (int i = 0; i < 300; ++i) {
+    double t = 1000.0 + i * 1500.0 + jit(rng);
+    all.push_back(hit(1, t, static_cast<uint16_t>(i & 0xffff)));
+    all.push_back(hit(2, t + 30.0, 1));
+    all.push_back(hit(3, t + 60.0, 2));
+  }
+  jitter_arrival(all, 2000.0, rng);  // bounded disorder < safe_horizon (5000)
+
+  std::vector<SortedChunk> chunks;
+  auto grab = [&](SortedChunk&& c) { chunks.push_back(std::move(c)); };
+  std::size_t fed = 0;
+  while (fed < all.size()) {
+    std::vector<ScalarHit> batch;
+    for (int i = 0; i < 17 && fed < all.size(); ++i, ++fed)
+      batch.push_back(all[fed]);
+    s.push_batch(std::move(batch), grab);
+  }
+  s.flush(grab);
+  CHECK(chunks.size() >= 3);  // the scenario actually exercises chunking
+
+  auto seq1 = run_pool(1, chunks, bcfg);
+  auto seq4 = run_pool(4, chunks, bcfg);
+  CHECK(seq1.size() == 300);
+  CHECK(seq1.size() == seq4.size());
+  bool identical = seq1.size() == seq4.size();
+  for (std::size_t i = 0; identical && i < seq1.size(); ++i)
+    if (!near(seq1[i], seq4[i])) identical = false;
+  CHECK(identical);
+}
+
+// ---------------------------------------------------------------------------
 
 int main() {
   test_channel_fifo();
@@ -499,6 +863,21 @@ int main() {
   test_sorter_reset_between_runs();
   test_sorter_flush_remainder();
   test_sorter_late_hit_lands_sorted();
+  test_builder_full_event();
+  test_builder_partial_arm();
+  test_builder_trigger_only();
+  test_builder_nearest_not_first();
+  test_builder_window_inclusive();
+  test_builder_core_gates();
+  test_builder_boundary_backward_partner();
+  test_builder_no_double_emission();
+  test_builder_labr_disabled();
+  test_builder_same_det_no_merge();
+  test_builder_pairing();
+  test_builder_chain();
+  test_builder_boundary_pair();
+  test_builder_through_sorter();
+  test_pool_determinism();
   std::printf("test_eb_core: %d passed, %d failed\n", g_pass, g_fail);
   return g_fail == 0 ? 0 : 1;
 }

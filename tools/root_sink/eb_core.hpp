@@ -345,6 +345,276 @@ class Sorter {
   double prev_core_end_ = -std::numeric_limits<double>::infinity();
 };
 
+// ---------------------------------------------------------------------------
+// 5. Integrated-event builder (pure function over a SortedChunk)
+// ---------------------------------------------------------------------------
+//
+// One BuiltEvent row carries BOTH ThGEM detectors plus the LaBr3 gamma:
+// completeness is an offline cut, never a build condition (TODO 66 §5.2).
+// A missing piece is NaN (times/derived) or 0 (energies) — 4-fold analysis is
+// `!isnan(x1) && !isnan(y1)`, plane correlation is `!isnan(dt_trig)`, and the
+// arm-efficiency map falls out of n_arms for free. Trigger-only events are
+// therefore emitted too; dropping them would destroy the efficiency
+// measurement, so don't.
+//
+// Matching semantics are the offline ground truth (tmp/test.cpp — the code
+// that produced the 15,644 four-fold reference count on run0023, and
+// macros/grid_resolution.C): per arm, the NEAREST hit to that detector's own
+// trigger within ±window_ns (inclusive), via lower_bound predecessor/successor
+// comparison. NOT LiveEventBuilder.C's first-found-backward rule. The X/Y
+// convention is x = t_XR - t_XL, y = t_YU - t_YD in raw ns — LiveEventBuilder's
+// X=(t4-t5) is that macro's deliberate 90-degree rotation; do not copy it, and
+// do not bake the mm calibration or the -70 ns TOF offset in here (analysis
+// constants live in macros).
+//
+// Cross-plane pairing (the "integrated event"): both trigger channels are
+// scanned as one time-ordered sequence; a trigger pairs with the IMMEDIATELY
+// NEXT trigger when that one belongs to the other detector and lies within
+// window_ns (greedy, first-come — genuine coincidences sit ~ns apart while
+// the window is ~us, so nearest-pair refinement would change nothing real).
+// Same-detector triggers never merge (two ch1 triggers = two events). The
+// event's anchor is the EARLIER trigger of the pair; dt_trig is ALWAYS
+// t(det2) - t(det1) regardless of which side anchored.
+//
+// Chunk-boundary determinism (H10): pairing and arm matching run over the
+// FULL chunk (context included), but an event is emitted only when its anchor
+// falls in [core_start, core_end). A pair spanning core_end is emitted by the
+// chunk that owns the anchor; in the next chunk the anchor reappears as
+// lookback context (lookback >= window guarantees it), pairs again, and is
+// gated out by core_start — so the partner never anchors a duplicate.
+// Requirement on the caller: lookback_ns >= window_ns and
+// safe_horizon_ns >= 2*window_ns (trivially true at 50 ms vs ~us windows).
+
+struct BuiltEvent {
+  // Times are digitizer-clock ns. NaN = that piece is absent from the event.
+  double trig1_t = std::numeric_limits<double>::quiet_NaN();
+  double trig2_t = std::numeric_limits<double>::quiet_NaN();
+  double labr_t = std::numeric_limits<double>::quiet_NaN();
+  // Positions in raw ns: xN = dt_xrN - dt_xlN, yN = dt_yuN - dt_ydN — valid
+  // only when BOTH arms of that axis matched.
+  float x1 = std::numeric_limits<float>::quiet_NaN();
+  float y1 = std::numeric_limits<float>::quiet_NaN();
+  float x2 = std::numeric_limits<float>::quiet_NaN();
+  float y2 = std::numeric_limits<float>::quiet_NaN();
+  // Per-arm deltas dt = t(arm) - t(own trigger); NaN = arm not matched.
+  float dt_xl1 = std::numeric_limits<float>::quiet_NaN();
+  float dt_xr1 = std::numeric_limits<float>::quiet_NaN();
+  float dt_yu1 = std::numeric_limits<float>::quiet_NaN();
+  float dt_yd1 = std::numeric_limits<float>::quiet_NaN();
+  float dt_xl2 = std::numeric_limits<float>::quiet_NaN();
+  float dt_xr2 = std::numeric_limits<float>::quiet_NaN();
+  float dt_yu2 = std::numeric_limits<float>::quiet_NaN();
+  float dt_yd2 = std::numeric_limits<float>::quiet_NaN();
+  // Plane-to-plane: t(det2 trigger) - t(det1 trigger); NaN unless both fired.
+  float dt_trig = std::numeric_limits<float>::quiet_NaN();
+  // Raw TOFs: t(trigger) - t(labr), no analysis offset applied.
+  float tof1 = std::numeric_limits<float>::quiet_NaN();
+  float tof2 = std::numeric_limits<float>::quiet_NaN();
+  uint16_t e_trig1 = 0, e_trig2 = 0, e_labr = 0;
+  uint16_t e_xl1 = 0, e_xr1 = 0, e_yu1 = 0, e_yd1 = 0;
+  uint16_t e_xl2 = 0, e_xr2 = 0, e_yu2 = 0, e_yd2 = 0;
+  uint32_t e_sum1 = 0, e_sum2 = 0;  // sum of PRESENT arms (4x65535 > u16)
+  uint8_t n_arms1 = 0, n_arms2 = 0;  // 0..4 matched arms (LaBr not counted)
+};
+
+struct BuilderConfig {
+  // Detector 1 (--xy1-ch T,XL,XR,YU,YD). -1 = channel unused.
+  int trig1 = -1, xl1 = -1, xr1 = -1, yu1 = -1, yd1 = -1;
+  // Detector 2 (--xy2-ch); trig2 = -1 => single-detector mode.
+  int trig2 = -1, xl2 = -1, xr2 = -1, yu2 = -1, yd2 = -1;
+  int labr_ch = -1;  // --gamma-ch; -1 => tof1/tof2/labr_t stay NaN
+  double window_ns = 500.0;
+};
+
+namespace detail {
+
+// Per-channel column view: times ascending (inherited from the sorted chunk)
+// with the matching energies alongside.
+struct ChView {
+  std::vector<double> t;
+  std::vector<uint16_t> e;
+};
+
+// Nearest hit to t0 within ±window (inclusive): lower_bound successor, then
+// take the predecessor when it is STRICTLY closer (grid_resolution.C's rule —
+// ties go to the successor). dt = t(hit) - t0, signed.
+inline bool nearest_in(const ChView& v, double t0, double window, double& dt,
+                       uint16_t& energy) {
+  if (v.t.empty()) return false;
+  std::size_t idx;
+  auto it = std::lower_bound(v.t.begin(), v.t.end(), t0);
+  if (it == v.t.end()) {
+    idx = v.t.size() - 1;
+  } else {
+    idx = static_cast<std::size_t>(it - v.t.begin());
+    if (idx > 0 && (t0 - v.t[idx - 1]) < (v.t[idx] - t0)) idx = idx - 1;
+  }
+  double d = v.t[idx] - t0;
+  double ad = d < 0 ? -d : d;
+  if (ad > window) return false;
+  dt = d;
+  energy = v.e[idx];
+  return true;
+}
+
+}  // namespace detail
+
+inline std::vector<BuiltEvent> build_events_from_chunk(const SortedChunk& chunk,
+                                                       const BuilderConfig& cfg) {
+  std::vector<BuiltEvent> out;
+  if (chunk.hits.empty()) return out;
+
+  // Distribute the sorted chunk into per-channel columns (sorted for free).
+  detail::ChView vt1, vxl1, vxr1, vyu1, vyd1;
+  detail::ChView vt2, vxl2, vxr2, vyu2, vyd2;
+  detail::ChView vlabr;
+  auto grab = [](detail::ChView& v, const ScalarHit& h) {
+    v.t.push_back(h.timestamp_ns);
+    v.e.push_back(h.energy);
+  };
+  for (const ScalarHit& h : chunk.hits) {
+    int ch = static_cast<int>(h.channel);
+    if (ch == cfg.trig1) grab(vt1, h);
+    else if (ch == cfg.xl1) grab(vxl1, h);
+    else if (ch == cfg.xr1) grab(vxr1, h);
+    else if (ch == cfg.yu1) grab(vyu1, h);
+    else if (ch == cfg.yd1) grab(vyd1, h);
+    else if (ch == cfg.trig2) grab(vt2, h);
+    else if (ch == cfg.xl2) grab(vxl2, h);
+    else if (ch == cfg.xr2) grab(vxr2, h);
+    else if (ch == cfg.yu2) grab(vyu2, h);
+    else if (ch == cfg.yd2) grab(vyd2, h);
+    else if (ch == cfg.labr_ch) grab(vlabr, h);
+  }
+
+  // Merge both trigger columns into one time-ordered sequence (ties: det1
+  // first — deterministic).
+  struct Trig {
+    double t;
+    uint16_t e;
+    int det;  // 1 or 2
+  };
+  std::vector<Trig> trigs;
+  trigs.reserve(vt1.t.size() + vt2.t.size());
+  {
+    std::size_t i = 0, j = 0;
+    while (i < vt1.t.size() || j < vt2.t.size()) {
+      bool take1 = j >= vt2.t.size() ||
+                   (i < vt1.t.size() && vt1.t[i] <= vt2.t[j]);
+      if (take1) {
+        trigs.push_back({vt1.t[i], vt1.e[i], 1});
+        ++i;
+      } else {
+        trigs.push_back({vt2.t[j], vt2.e[j], 2});
+        ++j;
+      }
+    }
+  }
+
+  // Match one detector side of an event: arms nearest to that detector's own
+  // trigger, x/y from complete axes, energy sum over present arms.
+  auto fill_det = [&](const Trig& tr, const detail::ChView& xl,
+                      const detail::ChView& xr, const detail::ChView& yu,
+                      const detail::ChView& yd, double& trig_t, uint16_t& e_trig,
+                      float& dxl, float& dxr, float& dyu, float& dyd, float& x,
+                      float& y, uint16_t& exl, uint16_t& exr, uint16_t& eyu,
+                      uint16_t& eyd, uint32_t& e_sum, uint8_t& n_arms) {
+    trig_t = tr.t;
+    e_trig = tr.e;
+    double d = 0.0;
+    uint16_t en = 0;
+    if (detail::nearest_in(xl, tr.t, cfg.window_ns, d, en)) {
+      dxl = static_cast<float>(d); exl = en; e_sum += en; ++n_arms;
+    }
+    if (detail::nearest_in(xr, tr.t, cfg.window_ns, d, en)) {
+      dxr = static_cast<float>(d); exr = en; e_sum += en; ++n_arms;
+    }
+    if (detail::nearest_in(yu, tr.t, cfg.window_ns, d, en)) {
+      dyu = static_cast<float>(d); eyu = en; e_sum += en; ++n_arms;
+    }
+    if (detail::nearest_in(yd, tr.t, cfg.window_ns, d, en)) {
+      dyd = static_cast<float>(d); eyd = en; e_sum += en; ++n_arms;
+    }
+    if (!std::isnan(dxl) && !std::isnan(dxr)) x = dxr - dxl;
+    if (!std::isnan(dyu) && !std::isnan(dyd)) y = dyu - dyd;
+  };
+
+  // Greedy pairing scan + emission gate on the ANCHOR time (H10 gates).
+  std::size_t k = 0;
+  while (k < trigs.size()) {
+    const Trig& a = trigs[k];
+    const Trig* b = nullptr;
+    if (k + 1 < trigs.size() && trigs[k + 1].det != a.det &&
+        trigs[k + 1].t - a.t <= cfg.window_ns) {
+      b = &trigs[k + 1];
+    }
+    std::size_t consumed = b ? 2 : 1;
+    if (a.t >= chunk.core_start && a.t < chunk.core_end) {
+      BuiltEvent ev;
+      const Trig* t1 = (a.det == 1) ? &a : b;
+      const Trig* t2 = (a.det == 2) ? &a : b;
+      if (t1) {
+        fill_det(*t1, vxl1, vxr1, vyu1, vyd1, ev.trig1_t, ev.e_trig1, ev.dt_xl1,
+                 ev.dt_xr1, ev.dt_yu1, ev.dt_yd1, ev.x1, ev.y1, ev.e_xl1,
+                 ev.e_xr1, ev.e_yu1, ev.e_yd1, ev.e_sum1, ev.n_arms1);
+      }
+      if (t2) {
+        fill_det(*t2, vxl2, vxr2, vyu2, vyd2, ev.trig2_t, ev.e_trig2, ev.dt_xl2,
+                 ev.dt_xr2, ev.dt_yu2, ev.dt_yd2, ev.x2, ev.y2, ev.e_xl2,
+                 ev.e_xr2, ev.e_yu2, ev.e_yd2, ev.e_sum2, ev.n_arms2);
+      }
+      if (t1 && t2) ev.dt_trig = static_cast<float>(t2->t - t1->t);
+      // One gamma per event: nearest LaBr3 hit to the anchor; both TOFs come
+      // from that same hit (so tof2 - tof1 == dt_trig by construction).
+      double dl = 0.0;
+      uint16_t el = 0;
+      if (detail::nearest_in(vlabr, a.t, cfg.window_ns, dl, el)) {
+        ev.labr_t = a.t + dl;
+        ev.e_labr = el;
+        if (t1) ev.tof1 = static_cast<float>(t1->t - ev.labr_t);
+        if (t2) ev.tof2 = static_cast<float>(t2->t - ev.labr_t);
+      }
+      out.push_back(ev);
+    }
+    k += consumed;
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// 6. Pipeline message types (in-band control markers)
+// ---------------------------------------------------------------------------
+//
+// Control flows THROUGH the data path with sequence numbers, never around it:
+// the Writer's SeqReorder then guarantees that a RunClose is processed only
+// after every chunk of that run is written (a barrier for free) and that
+// Shutdown pills drain all real work first.
+
+enum class Ctrl : uint8_t { None, RunOpen, RunClose, Shutdown };
+
+// Receiver -> Sorter. None carries a decoded batch; markers carry no hits.
+struct SorterMsg {
+  Ctrl ctrl = Ctrl::None;
+  std::vector<ScalarHit> hits;
+  uint32_t run_number = 0;  // RunClose: from the EOS envelope
+};
+
+// Sorter -> Workers -> Writer. Every message (data AND control) gets a seq.
+struct WorkMsg {
+  Ctrl ctrl = Ctrl::None;
+  uint64_t seq = 0;
+  SortedChunk chunk;             // None: the sorted chunk
+  std::vector<BuiltEvent> built; // filled by a worker when building is on
+  uint32_t run_number = 0;       // RunClose
+};
+
+// Receiver -> Display (bounded tee). Data may be dropped-and-counted; control
+// markers must use the blocking push (see Channel notes).
+struct DisplayMsg {
+  Ctrl ctrl = Ctrl::None;
+  std::vector<ScalarHit> hits;
+};
+
 }  // namespace eb
 }  // namespace rootsink
 
