@@ -133,6 +133,10 @@ struct Options {
   int workers = 3;
   double chunk_span_ms = 100.0;    // emit a chunk per this much DATA time
   double safe_horizon_ms = 50.0;   // arrival-disorder absorption (>= max disorder)
+  // --built-tree NAME: write the integrated built-event TTree (empty = off).
+  // Channels come from --xy1-ch (required), --xy2-ch (optional 2nd plane) and
+  // --gamma-ch (optional LaBr3); the window is the shared --window-ns.
+  std::string built_tree;
 };
 
 static void print_usage(const char* argv0) {
@@ -166,6 +170,9 @@ static void print_usage(const char* argv0) {
       "  --chunk-span-ms X   sorter chunk span in data time (default 100)\n"
       "  --safe-horizon-ms X sorter disorder absorption (default 50; must\n"
       "                      exceed the stream's max arrival disorder)\n"
+      "  --built-tree NAME   also write an integrated built-event TTree NAME\n"
+      "                      (requires --xy1-ch; --xy2-ch adds the 2nd plane,\n"
+      "                       --gamma-ch adds LaBr3/TOF; window = --window-ns)\n"
       "  --help              this message\n",
       argv0);
 }
@@ -261,6 +268,9 @@ static bool parse_args(int argc, char** argv, Options& opt, bool& help) {
     } else if (a == "--safe-horizon-ms") {
       if (!(v = need(i))) return false;
       opt.safe_horizon_ms = std::atof(v);
+    } else if (a == "--built-tree") {
+      if (!(v = need(i))) return false;
+      opt.built_tree = v;
     } else {
       std::fprintf(stderr, "root_sink: unknown argument '%s' (try --help)\n", a.c_str());
       return false;
@@ -502,12 +512,14 @@ class Recorder {
 
   // Open a provisional file `<dir>/run_inprogress_<unixtime>.root` + empty tree.
   // `exp_name` is remembered for the final filename (resolved at run start so it
-  // matches the Rust Recorder even though EOS/finalize come later).
+  // matches the Rust Recorder even though EOS/finalize come later). A non-empty
+  // `built_tree_name` adds the integrated built-event tree in the SAME file.
   bool open_run(const std::string& dir, const std::string& tree_name,
-                const std::string& exp_name) {
+                const std::string& exp_name, const std::string& built_tree_name = "") {
     out_dir_ = dir;
     exp_name_ = exp_name.empty() ? "data" : exp_name;  // mirror the Rust fallback
     entries_ = 0;
+    built_entries_ = 0;
     final_path_.clear();
     provisional_ = dir + "/run_inprogress_" + std::to_string((long long)::time(nullptr)) + ".root";
     file_ = TFile::Open(provisional_.c_str(), "RECREATE", "", kDelilaCompression);
@@ -523,6 +535,49 @@ class Recorder {
     tree_->Branch("energy", &energy_, "energy/s");
     tree_->Branch("energy_short", &energy_short_, "energy_short/s");
     tree_->Branch("timestamp_ns", &timestamp_ns_, "timestamp_ns/D");
+    built_ = nullptr;
+    if (!built_tree_name.empty()) {
+      // One row per trigger-anchored event; missing pieces are NaN (floats) or
+      // 0 (energies) — completeness is an OFFLINE cut (TODO 66 §5.2), e.g.
+      // 4-fold on plane 1 = "!TMath::IsNaN(x1) && !TMath::IsNaN(y1)". Branch
+      // buffers point straight into bev_ (an eb::BuiltEvent), so fill_built is
+      // one struct copy.
+      built_ = new TTree(built_tree_name.c_str(),
+                         "DELILA built events (ThGEM planes + LaBr3, NaN = absent)");
+      built_->Branch("trig1_t", &bev_.trig1_t, "trig1_t/D");
+      built_->Branch("trig2_t", &bev_.trig2_t, "trig2_t/D");
+      built_->Branch("labr_t", &bev_.labr_t, "labr_t/D");
+      built_->Branch("x1", &bev_.x1, "x1/F");
+      built_->Branch("y1", &bev_.y1, "y1/F");
+      built_->Branch("x2", &bev_.x2, "x2/F");
+      built_->Branch("y2", &bev_.y2, "y2/F");
+      built_->Branch("dt_xl1", &bev_.dt_xl1, "dt_xl1/F");
+      built_->Branch("dt_xr1", &bev_.dt_xr1, "dt_xr1/F");
+      built_->Branch("dt_yu1", &bev_.dt_yu1, "dt_yu1/F");
+      built_->Branch("dt_yd1", &bev_.dt_yd1, "dt_yd1/F");
+      built_->Branch("dt_xl2", &bev_.dt_xl2, "dt_xl2/F");
+      built_->Branch("dt_xr2", &bev_.dt_xr2, "dt_xr2/F");
+      built_->Branch("dt_yu2", &bev_.dt_yu2, "dt_yu2/F");
+      built_->Branch("dt_yd2", &bev_.dt_yd2, "dt_yd2/F");
+      built_->Branch("dt_trig", &bev_.dt_trig, "dt_trig/F");
+      built_->Branch("tof1", &bev_.tof1, "tof1/F");
+      built_->Branch("tof2", &bev_.tof2, "tof2/F");
+      built_->Branch("e_trig1", &bev_.e_trig1, "e_trig1/s");
+      built_->Branch("e_trig2", &bev_.e_trig2, "e_trig2/s");
+      built_->Branch("e_labr", &bev_.e_labr, "e_labr/s");
+      built_->Branch("e_xl1", &bev_.e_xl1, "e_xl1/s");
+      built_->Branch("e_xr1", &bev_.e_xr1, "e_xr1/s");
+      built_->Branch("e_yu1", &bev_.e_yu1, "e_yu1/s");
+      built_->Branch("e_yd1", &bev_.e_yd1, "e_yd1/s");
+      built_->Branch("e_xl2", &bev_.e_xl2, "e_xl2/s");
+      built_->Branch("e_xr2", &bev_.e_xr2, "e_xr2/s");
+      built_->Branch("e_yu2", &bev_.e_yu2, "e_yu2/s");
+      built_->Branch("e_yd2", &bev_.e_yd2, "e_yd2/s");
+      built_->Branch("e_sum1", &bev_.e_sum1, "e_sum1/i");
+      built_->Branch("e_sum2", &bev_.e_sum2, "e_sum2/i");
+      built_->Branch("n_arms1", &bev_.n_arms1, "n_arms1/b");
+      built_->Branch("n_arms2", &bev_.n_arms2, "n_arms2/b");
+    }
     return true;
   }
 
@@ -537,10 +592,21 @@ class Recorder {
     ++entries_;
   }
 
-  // Flush the current tree so the in-progress file is openable in ROOT while the
-  // run is still going (SaveSelf writes tree + keys without closing).
+  void fill_built(const eb::BuiltEvent& e) {
+    if (!built_) return;
+    bev_ = e;
+    built_->Fill();
+    ++built_entries_;
+  }
+
+  long long built_entries() const { return built_entries_; }
+  bool has_built() const { return built_ != nullptr; }
+
+  // Flush the current tree(s) so the in-progress file is openable in ROOT while
+  // the run is still going (SaveSelf writes tree + keys without closing).
   void autosave() {
     if (tree_) tree_->AutoSave("SaveSelf");
+    if (built_) built_->AutoSave("SaveSelf");
   }
 
   // Close and rename to run%04u_<seq>_<exp>.root — identical to the Rust
@@ -608,10 +674,12 @@ class Recorder {
     }
     cur->cd();
     tree_->Write();
+    if (built_) built_->Write();  // both trees live in the same (current) file
     cur->Close();
     delete cur;  // == file_ only in the un-rolled case; file_ may be dangling
     file_ = nullptr;
     tree_ = nullptr;
+    built_ = nullptr;
     return parts;
   }
 
@@ -627,15 +695,18 @@ class Recorder {
 
   TFile* file_ = nullptr;
   TTree* tree_ = nullptr;
+  TTree* built_ = nullptr;  // optional built-event tree, same file
   std::string out_dir_;
   std::string exp_name_ = "data";
   std::string provisional_;
   std::string final_path_;
   long long entries_ = 0;
+  long long built_entries_ = 0;
   // Branch buffers (types match the leaflist: /b UChar_t, /s UShort_t, /D Double_t).
   UChar_t module_ = 0, channel_ = 0;
   UShort_t energy_ = 0, energy_short_ = 0;
   Double_t timestamp_ns_ = 0.0;
+  eb::BuiltEvent bev_;  // built-tree branch buffer (fill_built copies into it)
 };
 
 // ---------------------------------------------------------------------------
@@ -782,6 +853,33 @@ int main(int argc, char** argv) {
   const bool xy1_enabled = opt.xy1_ch.size() == 5;
   const bool xy2_enabled = opt.xy2_ch.size() == 5;
 
+  // The built tree is a DATA PRODUCT, not a monitor nicety: a misconfiguration
+  // must be loud and fatal, never a silent recorder-only fallback.
+  const bool build_enabled = !opt.built_tree.empty();
+  if (build_enabled && !xy1_enabled) {
+    std::fprintf(stderr,
+                 "root_sink: ERROR --built-tree requires --xy1-ch (the plane-1 "
+                 "trigger + arm channels)\n");
+    return 2;
+  }
+  eb::BuilderConfig bcfg;
+  if (build_enabled) {
+    bcfg.trig1 = opt.xy1_ch[0];
+    bcfg.xl1 = opt.xy1_ch[1];
+    bcfg.xr1 = opt.xy1_ch[2];
+    bcfg.yu1 = opt.xy1_ch[3];
+    bcfg.yd1 = opt.xy1_ch[4];
+    if (xy2_enabled) {
+      bcfg.trig2 = opt.xy2_ch[0];
+      bcfg.xl2 = opt.xy2_ch[1];
+      bcfg.xr2 = opt.xy2_ch[2];
+      bcfg.yu2 = opt.xy2_ch[3];
+      bcfg.yd2 = opt.xy2_ch[4];
+    }
+    bcfg.labr_ch = opt.gamma_ch;  // -1 (unset) simply leaves tof/labr_t NaN
+    bcfg.window_ns = opt.window_ns;
+  }
+
   // --hists only defines monitor histograms, so it needs the HTTP server. Warn
   // and ignore it rather than silently drop it when the server is off.
   bool use_hists = http_enabled && !opt.hists_file.empty();
@@ -856,6 +954,11 @@ int main(int argc, char** argv) {
     std::printf("root_sink: xy2 monitor trig=ch%d XL=ch%d XR=ch%d YU=ch%d YD=ch%d window=%.0fns margin=%.0fns\n",
                 opt.xy2_ch[0], opt.xy2_ch[1], opt.xy2_ch[2], opt.xy2_ch[3],
                 opt.xy2_ch[4], opt.window_ns, opt.margin_ns);
+  if (build_enabled)
+    std::printf("root_sink: built tree \"%s\": plane1 trig=ch%d%s%s window=%.0fns\n",
+                opt.built_tree.c_str(), bcfg.trig1,
+                xy2_enabled ? " + plane2" : " (single plane)",
+                bcfg.labr_ch >= 0 ? " + LaBr3" : "", bcfg.window_ns);
 
   std::signal(SIGINT, on_signal);
   std::signal(SIGTERM, on_signal);
@@ -1004,6 +1107,7 @@ int main(int argc, char** argv) {
   struct Counters {
     std::atomic<long long> received{0};       // decoded hits (Receiver)
     std::atomic<long long> written{0};        // hits filled to the tree (Writer)
+    std::atomic<long long> built{0};          // built events (Workers -> Writer)
     std::atomic<long long> chunks{0};         // Sorter emissions
     std::atomic<long long> matcher_fills{0};  // Display
     std::atomic<long long> xy_fills{0};       // Display
@@ -1184,10 +1288,12 @@ int main(int argc, char** argv) {
     }
   };
 
-  // --- Workers: event building lands here (step ③); control passes through -
+  // --- Workers: the pure-function event build; control passes through -------
   auto worker_loop = [&] {
     eb::WorkMsg m;
     while (work_q.pop(m)) {
+      if (build_enabled && m.ctrl == eb::Ctrl::None)
+        m.built = eb::build_events_from_chunk(m.chunk, bcfg);
       bool shutdown = (m.ctrl == eb::Ctrl::Shutdown);
       writer_q.push(std::move(m));
       if (shutdown) return;  // exactly one pill per worker
@@ -1211,11 +1317,14 @@ int main(int argc, char** argv) {
             case eb::Ctrl::None: {
               // Core range ONLY: chunks deliberately carry duplicated context
               // (lookback head + post-core tail) for the builder; writing the
-              // full chunk would duplicate hits in the tree.
+              // full chunk would duplicate hits in the tree. Built events were
+              // already core-gated by the builder itself.
               auto range = eb::core_range(r.chunk);
               for (std::size_t i = range.first; i < range.second; ++i)
                 recorder.fill(r.chunk.hits[i]);
               counters.written += static_cast<long long>(range.second - range.first);
+              for (const eb::BuiltEvent& ev : r.built) recorder.fill_built(ev);
+              counters.built += static_cast<long long>(r.built.size());
               break;
             }
             case eb::Ctrl::RunOpen: {
@@ -1223,7 +1332,7 @@ int main(int argc, char** argv) {
               // bounded (~2 s) HTTP fetch only delays file naming while the
               // unbounded queues upstream absorb the stream.
               std::string exp = resolve_exp_name(opt);
-              if (!recorder.open_run(opt.out_dir, opt.tree, exp))
+              if (!recorder.open_run(opt.out_dir, opt.tree, exp, opt.built_tree))
                 std::fprintf(stderr,
                              "root_sink: run start FAILED — dropping this run's events\n");
               else
@@ -1235,9 +1344,15 @@ int main(int argc, char** argv) {
               // Seq order makes this a barrier for free: every chunk of the
               // run has already been written when the marker pops.
               long long ev = recorder.entries();
+              long long bev = recorder.built_entries();
+              bool had_built = recorder.has_built();
               std::string fn = recorder.finalize(r.run_number);
-              std::printf("root_sink: run %u finalized -> %s (%lld events)\n",
-                          r.run_number, fn.c_str(), ev);
+              if (had_built)
+                std::printf("root_sink: run %u finalized -> %s (%lld events, %lld built)\n",
+                            r.run_number, fn.c_str(), ev, bev);
+              else
+                std::printf("root_sink: run %u finalized -> %s (%lld events)\n",
+                            r.run_number, fn.c_str(), ev);
               if (use_hists) copy_hists_sidecar(opt.hists_file, recorder.final_path());
               if (http_enabled)
                 std::printf("root_sink: (monitor histograms kept across the run boundary)\n");
@@ -1407,12 +1522,13 @@ int main(int argc, char** argv) {
       double rate = dt > 0 ? (double)(rec - last_received) / dt : 0.0;
       std::printf(
           "root_sink: %s | events=%lld (written=%lld) | %.0f ev/s | chunks=%lld | "
-          "matcher_fills=%lld | xy_fills=%lld | q[sort=%zu work=%zu write=%zu disp=%zu] | "
-          "display_drops=%lld\n",
+          "built=%lld | matcher_fills=%lld | xy_fills=%lld | q[sort=%zu work=%zu "
+          "write=%zu disp=%zu] | display_drops=%lld\n",
           counters.writing ? "WRITING" : "idle", rec, (long long)counters.written,
-          rate, (long long)counters.chunks, (long long)counters.matcher_fills,
-          (long long)counters.xy_fills, to_sorter.size(), work_q.size(),
-          writer_q.size(), display_q.size(), (long long)counters.display_drops);
+          rate, (long long)counters.chunks, (long long)counters.built,
+          (long long)counters.matcher_fills, (long long)counters.xy_fills,
+          to_sorter.size(), work_q.size(), writer_q.size(), display_q.size(),
+          (long long)counters.display_drops);
       std::fflush(stdout);
       t_last_status = now;
       last_received = rec;
