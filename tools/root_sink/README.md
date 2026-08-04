@@ -1,4 +1,4 @@
-# root_sink — parallel ROOT recorder + live Δt monitor
+# root_sink — parallel ROOT recorder + live monitor + event builder
 
 A single C++ process that subscribes to the DELILA **merger's ZMQ PUB** as an
 *additional* consumer and does two jobs at once:
@@ -77,6 +77,13 @@ root_sink [options]
   --dt-min X          Δt axis minimum, ns          (default -1000)
   --dt-max X          Δt axis maximum, ns          (default 1000)
   --autosave-sec N    TTree AutoSave interval      (default 30)
+  --workers N         event-build worker threads   (default 3)
+  --chunk-span-ms X   sorter chunk span, DATA time (default 100)
+  --safe-horizon-ms X sorter disorder absorption   (default 50; must exceed the
+                      stream's max arrival disorder — side3 measured ~8 ms)
+  --built-tree NAME   also write the integrated built-event TTree (requires
+                      --xy1-ch; --xy2-ch adds the 2nd plane, --gamma-ch adds
+                      LaBr3/TOF; window = --window-ns)
   --help
 ```
 
@@ -368,9 +375,47 @@ reload can safely delete and rebuild the live objects.
 - **Monitor disabled without channel flags.** Omit any of `--gamma-ch /
   --thgem1-ch / --thgem2-ch` and the Δt matcher is off (recorder-only). The
   `THttpServer` (if `--http-port` ≠ 0) still shows channel occupancy.
-- **Threading.** HTTP requests are serviced on the main thread via
-  `gSystem->ProcessEvents()`, the same thread that `Fill`s the histograms — so
-  there is no lock needed between serving and filling.
+- **Thread pipeline (TODO 66 §5).** Since the 2026-08 restructure root_sink runs
+  five thread roles:
+
+  ```
+  Receiver ──unbounded──▶ Sorter ──unbounded──▶ work_q ×N workers ──▶ Writer
+      │                                                    (seq reorder inside)
+      └── bounded(1000) tee ──▶ Display(main): TH1s + matchers + THttpServer
+  ```
+
+  - **Receiver** owns the ZMQ socket + run state; it decodes batches into owned
+    hits and sends control (RunOpen/RunClose/Shutdown) IN-BAND with the data.
+  - **Sorter** absorbs arrival disorder (`--safe-horizon-ms`) and emits
+    time-sorted chunks per `--chunk-span-ms` of DATA time, each with a sequence
+    number. **The hits tree is therefore globally time-sorted now** — offline
+    analysis can scan linearly instead of per-channel bucketing.
+  - **Workers** run the pure-function event builder (`eb_core.hpp`) per chunk.
+  - **Writer** is the only thread touching the run `TFile`; a sequence reorder
+    makes the output deterministic in `--workers` (1 or 8 → identical trees) and
+    turns RunClose into a barrier for free. Autosave runs here.
+  - **Display** (the main thread) owns every TH1 + the `THttpServer`
+    (`ProcessEvents`), fed in arrival order by a bounded tee. Record-path
+    queues are unbounded (the no-drop rule); display DATA may drop under
+    overload — counted and shown as `display_drops` in the status line (the
+    project's Monitor exception). Control markers never drop.
+  - `TRootSniffer::SetScanGlobalDir(kFALSE)` is mandatory: the default scan
+    would expose the Writer's live run file over HTTP (cross-thread reads from
+    a browser click). Registered histograms are explicit, so nothing is lost.
+- **Built-event tree (`--built-tree`).** One row per trigger-anchored event
+  carrying BOTH ThGEM planes + LaBr3; a missing piece is `NaN` (times/derived)
+  or `0` (energies). Completeness is an offline cut, never a build condition —
+  partial and trigger-only rows are kept on purpose (they ARE the
+  arm-efficiency measurement). Branches: `trig1_t/D trig2_t/D labr_t/D`,
+  `x1 y1 x2 y2 /F` (raw ns; `x = t_XR − t_XL`, `y = t_YU − t_YD`),
+  per-arm `dt_* /F` + `e_* /s`, `dt_trig/F` (= `t(det2) − t(det1)`, the
+  plane-to-plane TOF), `tof1 tof2 /F` (raw `t(trig) − t(labr)`, no analysis
+  offset), `e_trig* e_labr /s`, `e_sum1 e_sum2 /i`, `n_arms1 n_arms2 /b`.
+  Matching is nearest-hit per arm (the offline ground-truth rule of
+  `macros/grid_resolution.C`), and cross-plane triggers within the window pair
+  into ONE row (greedy, anchored on the earlier trigger). Typical cuts:
+  4-fold plane 1 = `!TMath::IsNaN(x1) && !TMath::IsNaN(y1)`; both-plane track
+  = `!TMath::IsNaN(dt_trig)`.
 - **Reuses `TDelila.hpp`.** The MessagePack reader (`tdelila::mp::Reader`, typed
   fast-path decode) is shared by `#include`, not copied. `sink_core.hpp`'s event
   decoder must stay in sync with `TDelila`'s `Schema::build_default()` and with
@@ -391,9 +436,33 @@ g++ -std=c++17 -O0 -g test_sink_core.cpp -o /tmp/ts && /tmp/ts
 
 It prints `N passed, 0 failed` and exits non-zero on any failure.
 
-The `--operator` HTTP client and all the ROOT wiring in `root_sink.cxx` are not
-in the unit test (they need sockets / ROOT); they are covered by the live/E2E
-runs on gant and side3.
+The pipeline core (`eb_core.hpp`: Channel, SeqReorder, chunk splitter with the
+H10 boundary rules, Sorter, the integrated-event builder) has its own suite —
+also plain g++, but `-pthread` (the Channel tests spawn threads):
+
+```sh
+cd tools/root_sink
+g++ -std=c++17 -O0 -g -pthread test_eb_core.cpp -o /tmp/teb && /tmp/teb
+```
+
+For E2E work there is a committed replay feeder, `test_publisher.cxx`: it plays
+the merger's role, republishing a recorded hits tree over ZMQ in the wire
+format (stored order → real arrival disorder), with `--repeat K` (multi-run,
+per-run clock restart), `--no-eos` (mid-run SIGTERM tests) and `--rate`:
+
+```sh
+g++ -O2 -std=c++17 test_publisher.cxx $(root-config --cflags --libs) -lzmq -o test_publisher
+./test_publisher --file run0023_0000_X730_ThGEM_Test.root --run 23
+```
+
+`compare_hits.C` is the matching order-INDEPENDENT equality check between two
+hits trees (per-channel counts, energy sums, timestamp XOR + monotonicity) —
+the multithreaded sink writes the same hit SET as the old one but time-sorted,
+so entry-by-entry diffing is useless.
+
+The `--operator` HTTP client and the remaining ROOT wiring in `root_sink.cxx`
+are not unit-tested (they need sockets / ROOT); they are covered by the
+replay-based E2E gates and the live runs on gant and side3.
 
 The MaxTreeSize rollover path can be E2E-tested by compiling with a tiny
 threshold and running any emulator stack:

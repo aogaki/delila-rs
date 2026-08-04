@@ -1,13 +1,17 @@
 # root_sink 使用マニュアル
 
 `root_sink` は DELILA パイプラインに**並列接続する ROOT シンク**である。
-1 プロセスで 2 役をこなす:
+1 プロセスで 3 役をこなす(2026-08 マルチスレッド化で 3 役目が加わった):
 
 1. **スカラー ROOT Recorder** — 全イベントを 5 フィールド
    (module / channel / energy / energy_short / timestamp_ns)のフラット TTree に記録。
    `.delila` → `delila2root` の 2 段変換が不要になる。
-2. **簡易ライブモニタ** — コインシデンス Δt・エネルギー等のヒストグラムを
+   **2026-08 以降、この tree は全体時刻ソート済み。**
+2. **簡易ライブモニタ** — コインシデンス Δt・エネルギー・XY 等のヒストグラムを
    THttpServer(JSROOT)でブラウザ配信。フロントエンド実装ゼロ。
+3. **イベントビルダー**(`--built-tree`、TODO 66)— ThGEM 両面 + LaBr3 の
+   統合 built-event tree を同一ファイルに書く。オンラインとリプレイで
+   同一コード・同一結果(worker 数にも依存しない決定的出力)。
 
 既存の Recorder(`.delila` 主記録)には一切手を触れない。merger の PUB を
 追加購読するだけなので、途中で kill してもデータ保全に影響はない。
@@ -56,6 +60,11 @@ gamma_ch   = 3
 thgem1_ch  = 7
 thgem2_ch  = 11
 window_ns  = 10000
+# 2026-08 追加(省略時は既定値):
+# workers         = 3
+# chunk_span_ms   = 100
+# safe_horizon_ms = 50
+# built_tree      = "events"   # 要 xy1_ch(+任意で xy2_ch / gamma_ch)
 ```
 
 - セクションがあれば `start_daq.sh` が自動起動、無ければ従来どおり(手動起動)。
@@ -125,6 +134,17 @@ root_sink は `start_daq.sh` / `stop_daq.sh` の管理対象になった
 | `--http-port N` | 8090 | THttpServer ポート。0 で無効 |
 | `--dt-bins/--dt-min/--dt-max` | 2000 / −1000 / +1000 | ビルトイン Δt ヒストの軸(`--hists` 使用時は無視) |
 | `--autosave-sec N` | 30 | TTree AutoSave 間隔(書きかけファイルも ROOT で開ける) |
+| `--workers N` | 3 | イベントビルドのワーカースレッド数。**出力は N に依存せず決定的**(seq 順序復元) |
+| `--chunk-span-ms X` | 100 | Sorter のチャンク幅(**データ内時刻**基準。レートに依らず一定幅) |
+| `--safe-horizon-ms X` | 50 | Sorter の到着乱れ吸収幅。**ストリームの最大乱れより大きいこと**(side3 実測 ~8 ms) |
+| `--built-tree NAME` | (なし) | 統合 built-event TTree を同一ファイルに追加。**`--xy1-ch` 必須**(無ければ起動エラー)。`--xy2-ch` で第 2 面、`--gamma-ch` で LaBr3/TOF、窓は `--window-ns` 共用 |
+
+**2026-08 マルチスレッド化について**: root_sink は Receiver → Sorter →
+Workers×N → Writer + Display(main)の 5 役スレッド構成になった(TODO 66 §5)。
+記録経路のキューは全て unbounded(no-drop 原則)、表示 tee のみ bounded で
+ドロップは `display_drops` として 10 秒ステータス行に出る(Monitor 例外)。
+副産物として **hits tree(delila)は全体時刻ソート済み**になった — オフライン
+解析はチャンネル別 vector を作らずに線形スキャンで書ける。
 
 ---
 
@@ -172,6 +192,34 @@ root_sink は `start_daq.sh` / `stop_daq.sh` の管理対象になった
 TFile f("run0013_0000_X730_ThGEM_Test.root");
 TTree* tr = (TTree*)f.Get("delila");
 tr->Draw("energy", "channel==3");
+```
+
+### Built-event TTree(`--built-tree NAME`)
+
+同一ファイルに書かれる統合イベント tree。**1 行 = トリガーアンカー 1 イベント**で、
+両 ThGEM 面 + LaBr3 の全量を持つ。欠損は NaN(時間・派生量)/ 0(エネルギー)—
+**完全性はオフラインの cut** であり、partial・トリガー単独イベントも意図的に
+残す(`n_arms` の割合がそのまま腕の検出効率になる)。
+
+| branch | 型 | 内容 |
+|---|---|---|
+| `trig1_t`/`trig2_t`/`labr_t` | `D` | 各トリガー・LaBr3 の時刻 [ns](欠損 = NaN) |
+| `x1`,`y1`,`x2`,`y2` | `F` | 位置 [ns 生値]。`x = t_XR − t_XL`, `y = t_YU − t_YD`(両腕揃った時のみ)。mm 化はマクロ側(0.188696 mm/ns) |
+| `dt_xl1` … `dt_yd2` | `F` | 各腕の t(腕) − t(自面トリガー)。チェックサム解析用 |
+| `dt_trig` | `F` | t(面2) − t(面1)。**面間 TOF**。片面のみなら NaN |
+| `tof1`,`tof2` | `F` | t(トリガー) − t(LaBr3)、**生値**(−70 ns 等の解析オフセットは適用しない) |
+| `e_trig1`,`e_trig2`,`e_labr`,`e_xl1`…`e_yd2` | `s` | 各ヒットのエネルギー |
+| `e_sum1`,`e_sum2` | `i` | 存在する腕のみのエネルギー和(4×65535 > u16 のため u32) |
+| `n_arms1`,`n_arms2` | `b` | マッチした腕の数 0-4(LaBr は数えない) |
+
+腕マッチは各面**自分のトリガー時刻への最近接**(`macros/grid_resolution.C` と
+同一規則)、面間はウィンドウ内の異面トリガーを 1 行にペアリング(早い方が
+アンカー)。典型 cut:
+
+```cpp
+ev->Draw("y1:x1", "!TMath::IsNaN(x1) && !TMath::IsNaN(y1)", "colz");  // 4-fold XY
+ev->Draw("dt_trig", "!TMath::IsNaN(dt_trig)");                        // 両面飛跡
+ev->Draw("tof1", "!TMath::IsNaN(tof1)");                              // LaBr TOF
 ```
 
 ---
