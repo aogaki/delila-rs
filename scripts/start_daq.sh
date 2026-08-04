@@ -404,6 +404,8 @@ if grep -q "^\[network\.root_sink\]" "$CONFIG_FILE" 2>/dev/null; then
         rs_add_arg gamma_ch     --gamma-ch
         rs_add_arg thgem1_ch    --thgem1-ch
         rs_add_arg thgem2_ch    --thgem2-ch
+        rs_add_arg xy1_ch       --xy1-ch
+        rs_add_arg xy2_ch       --xy2-ch
         rs_add_arg window_ns    --window-ns
         rs_add_arg margin_ns    --margin-ns
         rs_add_arg http_port    --http-port

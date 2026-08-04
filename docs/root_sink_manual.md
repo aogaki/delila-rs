@@ -118,8 +118,10 @@ root_sink は `start_daq.sh` / `stop_daq.sh` の管理対象になった
 | `--gamma-ch N` | −1 | ガンマ線検出器チャンネル |
 | `--thgem1-ch N` | −1 | ThGEM1 チャンネル |
 | `--thgem2-ch N` | −1 | ThGEM2 チャンネル(3 つ全て指定でマッチャ有効。省略時は recorder 専用) |
-| `--window-ns X` | 1000 | コインシデンス半窓 ±W [ns] |
-| `--margin-ns X` | 10000 | 到着順の乱れ許容(熟成遅延)[ns] |
+| `--xy1-ch T,XL,XR,YU,YD` | (なし) | ディレイライン XY モニタ 1: トリガー + 4 腕のチャンネル(相異なる 5 整数のカンマ区切り)。**`--hists` 必須**(pos1 スコープのヒストにのみ表示) |
+| `--xy2-ch T,XL,XR,YU,YD` | (なし) | ディレイライン XY モニタ 2(pos2 スコープ) |
+| `--window-ns X` | 1000 | コインシデンス半窓 ±W [ns](Δt/XY マッチャ共通) |
+| `--margin-ns X` | 10000 | 到着順の乱れ許容(熟成遅延)[ns](Δt/XY マッチャ共通)。**ストリームはバッチ内ソートのみ**で、バッチ跨ぎの乱れは ms 級になり得る(side3 run0023 実測で最大 8.2 ms)→ 実運用では `20000000`(20 ms)推奨 |
 | `--http-port N` | 8090 | THttpServer ポート。0 で無効 |
 | `--dt-bins/--dt-min/--dt-max` | 2000 / −1000 / +1000 | ビルトイン Δt ヒストの軸(`--hists` 使用時は無視) |
 | `--autosave-sec N` | 30 | TTree AutoSave 間隔(書きかけファイルも ROOT で開ける) |
@@ -182,7 +184,7 @@ tr->Draw("energy", "channel==3");
 - **表示プリセットの URL ブックマーク**(4 分割+自動更新):
 
   ```
-  http://192.168.147.99:8090/?items=[dt1,dt2,dt2_vs_dt1,channels]&layout=grid2x2&monitoring=2000
+  http://192.168.144.102:8090/?items=[dt1,dt2,dt2_vs_dt1,channels]&layout=grid2x2&monitoring=2000
   ```
 
 - **/Reset** ボタン(または `curl 'http://<ホスト>:8090/Reset/cmd.json'`)で
@@ -222,13 +224,20 @@ tr->Draw("energy", "channel==3");
 |---|---|---|
 | **hit**(全イベント) | `energy` `energy_short` `channel` `module` | `"channel": N`、`"energy_range": [lo,hi]` |
 | **coinc**(熟成したガンマ毎) | `dt1` `dt2` `gamma_energy` `thgem1_energy` `thgem2_energy` | `"gamma_energy_range"` / `"thgem1_energy_range"` / `"thgem2_energy_range": [lo,hi]` |
+| **pos1**(XY モニタ 1 のトリガー毎) | `xy1_x` `xy1_y` | (なし) |
+| **pos2**(XY モニタ 2 のトリガー毎) | `xy2_x` `xy2_y` | (なし) |
 
-- 1 つのヒスト内で **hit と coinc の変数・カットを混ぜることはできない**
-  (起動/リロード時に検証エラーになる)。
+- 1 つのヒスト内で **異なるスコープの変数・カットを混ぜることはできない**
+  (起動/リロード時に検証エラーになる。pos1 と pos2 の混在も不可)。
 - `dt1`/`thgem1_energy` は ThGEM1 パートナーが見つかったガンマのみ、
   `dt2`/`thgem2_energy` は ThGEM2 側のみ Fill される。
 - coinc スコープを使うには `--gamma-ch/--thgem1-ch/--thgem2-ch` が必要
   (無いと起動時に警告が出て、該当ヒストは空のまま)。
+- `xy1_x = t(XR) − t(XL)` は **XL/XR 両方**がトリガーと ±window 内でマッチした
+  ときのみ、`xy1_y = t(YU) − t(YD)` は YU/YD 両方のときのみ Fill される
+  (2D の XY 像は実質 4 腕コインシデンス要求。1D 射影は自分の腕ペアだけで埋まる)。
+- pos1/pos2 スコープを使うには `--xy1-ch`/`--xy2-ch` が必要(無いと起動時警告+空のまま)。
+  XY モニタにはビルトインの代替ヒストが無いため、`--hists` なしでは動かない。
 
 ### 実用例
 
@@ -240,6 +249,17 @@ tr->Draw("energy", "channel==3");
 { "name": "dt1_gated", "type": "TH1D", "fill": "dt1",
   "bins": 400, "min": -200, "max": 200,
   "gamma_energy_range": [800, 1200] }
+```
+
+ディレイライン XY 像(`--xy1-ch 1,2,3,4,5` = trig,XL,XR,YU,YD の場合。
+軸レンジは検出器の物理的広がりに合わせる — ThGEM 実測は ±250 ns):
+
+```json
+{ "name": "xy1_pos", "type": "TH2D",
+  "title": "ThGEM1 XY;x = t_{XR} - t_{XL} [ns];y = t_{YU} - t_{YD} [ns]",
+  "x": "xy1_x", "y": "xy1_y",
+  "xbins": 500, "xmin": -250, "xmax": 250,
+  "ybins": 500, "ymin": -250, "ymax": 250 }
 ```
 
 ### ライブ再読込(/ReloadHists)
@@ -264,6 +284,8 @@ tr->Draw("energy", "channel==3");
 | ファイル名が `run%04u_0000_data.root` になる | exp_name 未解決。`--operator` を付ける(sink.log に `experiment_name = ...` と取得元が出る)|
 | `.delila` と `.root` で実験名が違う | curl 手打ちで Configure に UI と違う `exp_name` を送った場合に起きる。UI 運用なら一致する。強制したいなら `--exp-name` |
 | coinc ヒストが空 | `--gamma-ch/--thgem1-ch/--thgem2-ch` 未指定(起動ログに警告)、またはチャンネル割当違い |
+| XY ヒスト(pos1/pos2)が空 | `--xy1-ch/--xy2-ch` 未指定 or `--hists` 無し(どちらも起動ログに警告)、チャンネル割当違い、または片腕チャンネルが欠けている(2D は 4 腕全てのマッチ必須) |
+| Δt/XY のコインシデンス効率が低い | `--margin-ns` がストリームの乱れより小さい(遅れて届いた相方が熟成に間に合わない)。20 ms に上げる。**分布の形は正しいのに数だけ少ない**のが特徴 |
 | `/ReloadHists` しても変わらない | JSON にエラーがある。`sink.log` に全エラーが列挙され旧セット維持になっている |
 | イベント数が Recorder と合わない | ラン途中から購読した/途中で kill した場合は当然合わない。フルランで一致しないなら異常(gant/side3 検証では 3 ラン連続で完全一致) |
 | ssh 切断で sink が死ぬ | 旧バイナリ。`gROOT->SetBatch(kTRUE)`(`6f65ef1`)以降は起きない。`nohup` 併用を推奨 |

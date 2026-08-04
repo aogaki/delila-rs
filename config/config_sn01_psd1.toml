@@ -40,6 +40,38 @@ config_file = "config/digitizers/sn01_v1730_psd.json"
 pipeline_order = 1
 time_step_ns = 2.0
 
+# --- 2nd V1730SB, optical daisy chain off board #1 (conet_node 1) ---
+# DISABLED until the board is physically installed: with this block active,
+# start_daq.sh launches `reader --source-id 1`, which cannot open the device and
+# makes Configure fail for the whole run — i.e. it would break the working
+# single-board DAQ. Uncomment only after the board is in the chain.
+#
+# Before enabling, confirm the node number actually enumerated (do this with the
+# DAQ stopped — caen_info kills a live reader connection):
+#   LD_LIBRARY_PATH=/opt/delila-caen/lib ./target/release/caen_info \
+#     "dig1://caen.internal/optical_link?link_num=0&conet_node=1"
+# and copy the reported SerialNum into sn01_v1730_psd_1.json ("serial_number"),
+# which is bookkeeping only (Mongo/UI) — the firmware type is what gets verified.
+#
+# No other edit is needed: data/command ports auto-allocate to 7001/7101
+# (port_base + id) and [network.merger] has no explicit `subscribe`, so it is
+# derived from the source list and picks up both readers.
+#
+# Both boards run START_MODE_SW (independent software start). There is no S_IN
+# daisy chain, so their timestamps are NOT aligned — module 0 and module 1 are
+# two independent time bases. Do not attempt cross-board coincidence on this
+# setup without cabling TRG-OUT(#1) -> S-IN(#2) and switching #2 to
+# START_MODE_S_IN + OUT_PROPAGATION_SYNCIN (see config/digitizers/psd1_sn53.json).
+#
+# [[network.sources]]
+# id = 1
+# name = "PSD1-V1730-1"
+# type = "psd1"
+# digitizer_url = "dig1://caen.internal/optical_link?link_num=0&conet_node=1"
+# config_file = "config/digitizers/sn01_v1730_psd_1.json"
+# pipeline_order = 1
+# time_step_ns = 2.0
+
 # --- Pipeline components ---
 
 [network.merger]

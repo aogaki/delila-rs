@@ -66,6 +66,10 @@ root_sink [options]
   --thgem1-ch N       ThGEM1 channel
   --thgem2-ch N       ThGEM2 channel
                       all three required; if any is omitted -> recorder only
+  --xy1-ch T,XL,XR,YU,YD  delay-line XY monitor 1: trigger + 4 arm channels
+  --xy2-ch T,XL,XR,YU,YD  delay-line XY monitor 2
+                      5 distinct ints 0..255 each; fills pos1/pos2-scope
+                      histograms, so --hists is required (no built-ins)
   --window-ns X       coincidence half-window      (default 1000)
   --margin-ns X       out-of-order tolerance       (default 10000)
   --http-port N       THttpServer port, 0 disables (default 8090)
@@ -243,6 +247,20 @@ Coinc semantics: `gamma_energy` is always present for a ripe gamma; `dt1` /
 `thgem1_energy_range` cut therefore fails when that partner is absent. At most one
 cut key per histogram.
 
+**pos1 / pos2 scopes** — one row per *ripe trigger* of the corresponding
+delay-line XY monitor (pos1 needs `--xy1-ch`, pos2 needs `--xy2-ch`):
+
+| kind     | names |
+|----------|-------|
+| variable | pos1: `xy1_x`, `xy1_y` — pos2: `xy2_x`, `xy2_y` |
+| cut      | (none yet) |
+
+Pos semantics: `xy1_x = t(XR) − t(XL)` fills only when **both** X arms matched
+the trigger within ±window; `xy1_y = t(YU) − t(YD)` likewise needs both Y arms.
+A 2D `x:"xy1_x", y:"xy1_y"` image therefore requires the full 4-arm coincidence,
+while a 1D projection fills on its own arm pair. There are no built-in fallback
+histograms for these scopes — the XY monitors only display through `--hists`.
+
 ### Standard config (reproduces the built-ins)
 
 The repo ships `histograms.json` that reproduces the four built-in histograms
@@ -293,6 +311,18 @@ Gamma energy vs Δt₁ — both axes are coinc-scope, so this is allowed:
 { "name": "dt1_gated", "type": "TH1D", "fill": "dt1",
   "bins": 400, "min": -200, "max": 200,
   "gamma_energy_range": [800, 1200] }
+```
+
+Delay-line XY image (pos1 scope; needs `--xy1-ch T,XL,XR,YU,YD`). Axis ranges
+follow the delay line: ±window covers any arm, the physical spread is what
+matters (the ThGEM measured ±250 ns):
+
+```json
+{ "name": "xy1_pos", "type": "TH2D",
+  "title": "ThGEM1 XY;x = t_{XR} - t_{XL} [ns];y = t_{YU} - t_{YD} [ns]",
+  "x": "xy1_x", "y": "xy1_y",
+  "xbins": 500, "xmin": -250, "xmax": 250,
+  "ybins": 500, "ymin": -250, "ymax": 250 }
 ```
 
 ### Reloading live (`/ReloadHists`)

@@ -5,13 +5,35 @@
     "without the Delta-t coincidence matcher, which needs gamma/thgem channels",
     "that are not defined on this setup. Served live over THttpServer:8090",
     "(browse with JSROOT). After editing, reload without restarting the DAQ:",
-    "  curl http://localhost:8090/ReloadHists",
-    "A 'channel' key on a histogram is a cut: keep only hits on that channel."
+    "  curl http://localhost:8090/ReloadHists/cmd.json",
+    "(the /cmd.json suffix is required — plain /ReloadHists silently no-ops)",
+    "A 'channel' key on a histogram is a cut: keep only hits on that channel.",
+    "NOTE for the 2-board setup: 'module' is available as a fill/x/y variable",
+    "but NOT as a cut (hist_config.hpp cut keys are channel + the *_range set).",
+    "So every energy_chNN below sums module 0 and module 1 on that channel.",
+    "The module_vs_channel / energy_vs_module 2D plots are the way to separate",
+    "them here; per-module 1D spectra need a 'module' cut added in C++."
   ],
   "histograms": [
     { "name": "channels", "type": "TH1D",
-      "title": "channel occupancy;channel;counts",
+      "title": "channel occupancy (all modules);channel;counts",
       "fill": "channel", "bins": 16, "min": 0, "max": 16 },
+
+    { "name": "modules", "type": "TH1D",
+      "title": "module occupancy;module;counts",
+      "fill": "module", "bins": 4, "min": 0, "max": 4 },
+
+    { "name": "module_vs_channel", "type": "TH2D",
+      "title": "occupancy per board;module;channel",
+      "x": "module", "y": "channel",
+      "xbins": 4, "xmin": 0, "xmax": 4,
+      "ybins": 16, "ymin": 0, "ymax": 16 },
+
+    { "name": "energy_vs_module", "type": "TH2D",
+      "title": "energy per board;module;energy [LSB]",
+      "x": "module", "y": "energy",
+      "xbins": 4, "xmin": 0, "xmax": 4,
+      "ybins": 1024, "ymin": 0, "ymax": 32768 },
 
     { "name": "energy_long", "type": "TH1D",
       "title": "energy (long gate), all channels;energy [LSB];counts",

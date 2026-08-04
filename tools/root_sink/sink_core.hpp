@@ -10,6 +10,7 @@
 //   1. Envelope parser  — split a ZMQ message into Data / EndOfStream / Heartbeat.
 //   2. Batch decoder    — walk an EventDataBatch into flat ScalarHit records.
 //   3. CoincidenceMatcher — pure Δt logic (gamma vs ThGEM1/ThGEM2), no histograms.
+//   3b. PositionMatcher — delay-line XY (trigger + XL/XR/YU/YD arms), no histograms.
 //   4. RunState         — Idle→Writing state machine driven by Data/EOS.
 //
 // Wire format (empirically confirmed against rmp-serde 1.3.1, the repo's version):
@@ -30,6 +31,7 @@
 #define ROOTSINK_SINK_CORE_HPP
 
 #include <cstdint>
+#include <cstdlib>
 #include <deque>
 #include <limits>
 #include <set>
@@ -320,6 +322,182 @@ class CoincidenceMatcher {
   double max_ts_ = -std::numeric_limits<double>::infinity();
   std::deque<TimedHit> gamma_, t1_, t2_;
 };
+
+// ---------------------------------------------------------------------------
+// 3b. Position matcher (delay-line XY — pure logic, no ROOT)
+// ---------------------------------------------------------------------------
+
+// One emitted XY result for a ripe delay-line trigger. dt_* = t(arm) - t(trig),
+// signed, valid only when its has_* is set. x/y are NOT stored here: hist_config's
+// value_of derives x = dt_xr - dt_xl (needs BOTH X arms) and y = dt_yu - dt_yd
+// (needs BOTH Y arms), so a partial event can still fill 1D projections.
+struct PosResult {
+  double trig_t = 0.0;         // the trigger timestamp this result is about
+  uint16_t trig_energy = 0;    // always valid for the ripened trigger
+  bool has_xl = false; double dt_xl = 0.0;
+  bool has_xr = false; double dt_xr = 0.0;
+  bool has_yu = false; double dt_yu = 0.0;
+  bool has_yd = false; double dt_yd = 0.0;
+};
+
+// Streaming nearest-arm matcher for a delay-line detector: one trigger channel
+// plus four arm channels (XL/XR/YU/YD). Same watermark scheme as
+// CoincidenceMatcher above: hits arrive roughly in time order, `margin_ns` slack
+// absorbs the cross-batch disorder of the merged stream (measured up to ~8 ms on
+// side3 run0023 — the per-channel-pair aggregates flush independently), and a
+// trigger ripens once watermark = (max timestamp seen) - margin_ns passes it.
+// Each ripe trigger is matched against every buffered arm hit, picking the
+// CLOSEST within ±window_ns per arm.
+//
+// Two deliberate differences from CoincidenceMatcher:
+//   * find_closest drops the energy out-param — nothing consumes arm energies.
+//   * ripen runs on EVERY pushed hit, monitored or not. The XY channels can all
+//     be low-rate, so waiting for the next monitored hit to ripen would add
+//     seconds of display latency; the empty-queue ripen test is O(1) anyway.
+//
+// Channel identity is `channel` alone (module ignored) — same caveat as above.
+class PositionMatcher {
+ public:
+  struct Config {
+    int trig_ch = -1;  // -1 => never matches (a u8 channel can't be negative)
+    int xl_ch = -1;
+    int xr_ch = -1;
+    int yu_ch = -1;
+    int yd_ch = -1;
+    double window_ns = 1000.0;
+    double margin_ns = 10000.0;
+  };
+
+  explicit PositionMatcher(Config cfg) : cfg_(cfg) {}
+
+  // Feed one hit (call in ~arrival order). `on_result(const PosResult&)` is
+  // invoked for every trigger that ripens as a consequence.
+  template <class ResultF>
+  void push(const ScalarHit& h, ResultF on_result) {
+    double t = h.timestamp_ns;
+    if (t > max_ts_) max_ts_ = t;  // before the channel test: every hit advances
+    int ch = static_cast<int>(h.channel);
+    if (ch == cfg_.trig_ch) {
+      trig_.push_back({t, h.energy});
+    } else if (ch == cfg_.xl_ch) {
+      xl_.push_back({t, 0});
+    } else if (ch == cfg_.xr_ch) {
+      xr_.push_back({t, 0});
+    } else if (ch == cfg_.yu_ch) {
+      yu_.push_back({t, 0});
+    } else if (ch == cfg_.yd_ch) {
+      yd_.push_back({t, 0});
+    }
+    double watermark = max_ts_ - cfg_.margin_ns;
+    ripen(watermark, on_result);
+
+    // Safety prune (bounds memory if the trigger channel goes silent): an arm
+    // hit at or below (watermark - window) can never match a not-yet-ripe
+    // trigger, whose timestamp is > watermark.
+    double safe = watermark - cfg_.window_ns;
+    prune(xl_, safe);
+    prune(xr_, safe);
+    prune(yu_, safe);
+    prune(yd_, safe);
+  }
+
+  // Ripen every buffered trigger regardless of watermark. Call once at EOS so
+  // the final partial window is not lost.
+  template <class ResultF>
+  void flush(ResultF on_result) {
+    ripen(std::numeric_limits<double>::infinity(), on_result);
+  }
+
+  // Drop all buffered hits and forget the high-water timestamp. Call at a run
+  // boundary — the digitizer clock restarts between runs, and a stale (huge)
+  // max_ts_ would make the next run's triggers look instantly "ripe" and emit
+  // before their arm hits arrive.
+  void reset() {
+    trig_.clear();
+    xl_.clear();
+    xr_.clear();
+    yu_.clear();
+    yd_.clear();
+    max_ts_ = -std::numeric_limits<double>::infinity();
+  }
+
+ private:
+  template <class ResultF>
+  void ripen(double watermark, ResultF& on_result) {
+    while (!trig_.empty() && trig_.front().t <= watermark) {
+      TimedHit g = trig_.front();
+      trig_.pop_front();
+      PosResult res;
+      res.trig_t = g.t;
+      res.trig_energy = g.energy;
+      find_closest(xl_, g.t, res.has_xl, res.dt_xl);
+      find_closest(xr_, g.t, res.has_xr, res.dt_xr);
+      find_closest(yu_, g.t, res.has_yu, res.dt_yu);
+      find_closest(yd_, g.t, res.has_yd, res.dt_yd);
+      on_result(res);
+      // Arm hits older than (trig_t - window) can never match this-or-later
+      // triggers.
+      double below = g.t - cfg_.window_ns;
+      prune(xl_, below);
+      prune(xr_, below);
+      prune(yu_, below);
+      prune(yd_, below);
+    }
+  }
+
+  // Nearest arm hit to `tt` within ±window_ns; dt = arm - tt (signed).
+  void find_closest(const std::deque<TimedHit>& arm, double tt, bool& has,
+                    double& dt) const {
+    has = false;
+    dt = 0.0;
+    double best = 0.0;
+    for (const TimedHit& p : arm) {
+      double d = p.t - tt;
+      double ad = d < 0 ? -d : d;
+      if (ad <= cfg_.window_ns && (!has || ad < best)) {
+        has = true;
+        best = ad;
+        dt = d;
+      }
+    }
+  }
+
+  static void prune(std::deque<TimedHit>& dq, double below) {
+    while (!dq.empty() && dq.front().t < below) dq.pop_front();
+  }
+
+  Config cfg_;
+  double max_ts_ = -std::numeric_limits<double>::infinity();
+  std::deque<TimedHit> trig_, xl_, xr_, yu_, yd_;
+};
+
+// Parse a "T,XL,XR,YU,YD"-style list into exactly `expect` DISTINCT ints in
+// [0,255]. Backs the --xy1-ch/--xy2-ch flags. Returns false on wrong count,
+// junk, negatives, out-of-range, or duplicates — a duplicated channel would
+// otherwise be claimed silently by whichever deque tests first in push().
+inline bool parse_ch_list(const std::string& s, std::size_t expect,
+                          std::vector<int>& out) {
+  out.clear();
+  const char* p = s.c_str();
+  while (*p) {
+    char* end = nullptr;
+    long v = std::strtol(p, &end, 10);
+    if (end == p || v < 0 || v > 255) return false;
+    out.push_back(static_cast<int>(v));
+    p = end;
+    if (*p == ',') {
+      ++p;
+      if (!*p) return false;  // trailing comma
+      continue;
+    }
+    if (*p) return false;  // junk after a number
+  }
+  if (out.size() != expect) return false;
+  for (std::size_t i = 0; i < out.size(); ++i)
+    for (std::size_t j = i + 1; j < out.size(); ++j)
+      if (out[i] == out[j]) return false;
+  return true;
+}
 
 // ---------------------------------------------------------------------------
 // 4. Run / file state machine

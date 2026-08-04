@@ -336,6 +336,126 @@ static void test_matcher() {
 }
 
 // ---------------------------------------------------------------------------
+// Position matcher tests (delay-line XY)
+// ---------------------------------------------------------------------------
+static void test_pos_matcher() {
+  PositionMatcher::Config cfg;
+  cfg.trig_ch = 1;
+  cfg.xl_ch = 2;
+  cfg.xr_ch = 3;
+  cfg.yu_ch = 4;
+  cfg.yd_ch = 5;
+  cfg.window_ns = 100.0;
+  cfg.margin_ns = 1000.0;
+
+  // Full match: all four arms found, signed dt per arm, trigger energy kept.
+  {
+    PositionMatcher m(cfg);
+    std::vector<PosResult> res;
+    auto sink = [&](const PosResult& r) { res.push_back(r); };
+    m.push(hit(1, 1000.0, 321), sink);  // trigger
+    m.push(hit(2, 1010.0, 0), sink);    // XL d=+10
+    m.push(hit(3, 1030.0, 0), sink);    // XR d=+30
+    m.push(hit(4, 990.0, 0), sink);     // YU d=-10
+    m.push(hit(5, 1005.0, 0), sink);    // YD d=+5
+    m.flush(sink);
+    CHECK(res.size() == 1);
+    CHECK(near(res[0].trig_t, 1000.0));
+    CHECK(res[0].trig_energy == 321);
+    CHECK(res[0].has_xl && near(res[0].dt_xl, 10.0));
+    CHECK(res[0].has_xr && near(res[0].dt_xr, 30.0));
+    CHECK(res[0].has_yu && near(res[0].dt_yu, -10.0));
+    CHECK(res[0].has_yd && near(res[0].dt_yd, 5.0));
+  }
+  // Nearest-arm selection: of two XL hits the closer wins.
+  {
+    PositionMatcher m(cfg);
+    std::vector<PosResult> res;
+    auto sink = [&](const PosResult& r) { res.push_back(r); };
+    m.push(hit(1, 1000.0, 1), sink);
+    m.push(hit(2, 1050.0, 0), sink);  // XL d=+50
+    m.push(hit(2, 1010.0, 0), sink);  // XL d=+10 (closer)
+    m.flush(sink);
+    CHECK(res.size() == 1);
+    CHECK(res[0].has_xl && near(res[0].dt_xl, 10.0));
+  }
+  // Missing arm: no XR hit -> has_xr false, the others still match.
+  {
+    PositionMatcher m(cfg);
+    std::vector<PosResult> res;
+    auto sink = [&](const PosResult& r) { res.push_back(r); };
+    m.push(hit(1, 1000.0, 1), sink);
+    m.push(hit(2, 1010.0, 0), sink);
+    m.push(hit(4, 1020.0, 0), sink);
+    m.push(hit(5, 1030.0, 0), sink);
+    m.flush(sink);
+    CHECK(res.size() == 1);
+    CHECK(res[0].has_xl);
+    CHECK(!res[0].has_xr);
+    CHECK(res[0].has_yu && res[0].has_yd);
+  }
+  // Window edge: |d| == window passes, |d| == window+1 does not.
+  {
+    PositionMatcher m(cfg);
+    std::vector<PosResult> res;
+    auto sink = [&](const PosResult& r) { res.push_back(r); };
+    m.push(hit(1, 1000.0, 1), sink);
+    m.push(hit(2, 1100.0, 0), sink);  // d=+100 == window
+    m.push(hit(3, 1101.0, 0), sink);  // d=+101 > window
+    m.flush(sink);
+    CHECK(res.size() == 1);
+    CHECK(res[0].has_xl && near(res[0].dt_xl, 100.0));
+    CHECK(!res[0].has_xr);
+  }
+  // Arrival disorder + watermark: an arm buffered before its trigger matches;
+  // nothing ripens until the watermark passes the trigger timestamp. Unmonitored
+  // channels must also advance the watermark (max_ts before the channel test).
+  {
+    PositionMatcher m(cfg);
+    std::vector<PosResult> res;
+    auto sink = [&](const PosResult& r) { res.push_back(r); };
+    m.push(hit(2, 1050.0, 0), sink);   // XL arrives first
+    m.push(hit(1, 1000.0, 55), sink);  // trigger arrives later, earlier timestamp
+    CHECK(res.empty());                // watermark still below trig_t
+    m.push(hit(0, 5000.0, 0), sink);   // unmonitored ch0 advances watermark to 4000
+    CHECK(res.size() == 1);
+    CHECK(near(res[0].trig_t, 1000.0));
+    CHECK(res[0].trig_energy == 55);
+    CHECK(res[0].has_xl && near(res[0].dt_xl, 50.0));
+  }
+  // reset clears buffered state: flush after reset yields nothing.
+  {
+    PositionMatcher m(cfg);
+    std::vector<PosResult> res;
+    auto sink = [&](const PosResult& r) { res.push_back(r); };
+    m.push(hit(1, 1000.0, 1), sink);
+    m.push(hit(2, 1010.0, 0), sink);
+    m.reset();
+    m.flush(sink);
+    CHECK(res.empty());
+  }
+}
+
+// ---------------------------------------------------------------------------
+// parse_ch_list tests (backs --xy1-ch/--xy2-ch)
+// ---------------------------------------------------------------------------
+static void test_parse_ch_list() {
+  std::vector<int> out;
+  CHECK(parse_ch_list("1,2,3,4,5", 5, out));
+  CHECK(out.size() == 5 && out[0] == 1 && out[4] == 5);
+  CHECK(parse_ch_list("0,255,10,20,30", 5, out));   // bounds are inclusive
+  CHECK(!parse_ch_list("1,2,3,4", 5, out));         // too few
+  CHECK(!parse_ch_list("1,2,3,4,5,6", 5, out));     // too many
+  CHECK(!parse_ch_list("1,2,x,4,5", 5, out));       // junk token
+  CHECK(!parse_ch_list("1,2,-3,4,5", 5, out));      // negative
+  CHECK(!parse_ch_list("1,2,300,4,5", 5, out));     // > 255
+  CHECK(!parse_ch_list("1,1,3,4,5", 5, out));       // duplicate (trig would
+                                                    // silently shadow the arm)
+  CHECK(!parse_ch_list("", 5, out));                // empty
+  CHECK(!parse_ch_list("1,2,3,4,", 5, out));        // trailing comma
+}
+
+// ---------------------------------------------------------------------------
 // RunState tests
 // ---------------------------------------------------------------------------
 static void test_run_state() {
@@ -639,17 +759,109 @@ static void test_value_and_cut() {
   }
 }
 
+static void test_hist_config_pos() {
+  // Valid pos-scope defs: xy1 2D, xy2 2D, and a 1D projection.
+  {
+    const char* json = R"JSON({ "histograms": [
+      { "name": "xy1_pos", "type": "TH2D", "x": "xy1_x", "y": "xy1_y",
+        "xbins": 500, "xmin": -250, "xmax": 250,
+        "ybins": 500, "ymin": -250, "ymax": 250 },
+      { "name": "xy2_pos", "type": "TH2D", "x": "xy2_x", "y": "xy2_y",
+        "xbins": 500, "xmin": -250, "xmax": 250,
+        "ybins": 500, "ymin": -250, "ymax": 250 },
+      { "name": "x1_proj", "type": "TH1D", "fill": "xy1_x",
+        "bins": 500, "min": -250, "max": 250 }
+    ]})JSON";
+    ParseResult pr = parse_hist_config(json);
+    CHECK(pr.errors.empty());
+    CHECK(pr.defs.size() == 3);
+    const HistDef* d1 = find_def(pr, "xy1_pos");
+    CHECK(d1 != nullptr);
+    CHECK(d1->is2d);
+    CHECK(d1->x == Var::Xy1X);
+    CHECK(d1->y == Var::Xy1Y);
+    CHECK(d1->scope == Scope::Pos1);
+    const HistDef* d2 = find_def(pr, "xy2_pos");
+    CHECK(d2 != nullptr);
+    CHECK(d2->scope == Scope::Pos2);
+    const HistDef* d3 = find_def(pr, "x1_proj");
+    CHECK(d3 != nullptr);
+    CHECK(!d3->is2d);
+    CHECK(d3->scope == Scope::Pos1);
+  }
+  // Scope mixing: xy1 with xy2, pos with hit, pos with a coinc cut — all rejected.
+  {
+    const char* json = R"JSON({ "histograms": [
+      { "name": "mix12", "type": "TH2D", "x": "xy1_x", "y": "xy2_y",
+        "xbins": 10, "xmin": -1, "xmax": 1, "ybins": 10, "ymin": -1, "ymax": 1 },
+      { "name": "mixhit", "type": "TH2D", "x": "xy1_x", "y": "energy",
+        "xbins": 10, "xmin": -1, "xmax": 1, "ybins": 10, "ymin": 0, "ymax": 100 },
+      { "name": "mixcut", "type": "TH1D", "fill": "xy1_x",
+        "bins": 10, "min": -1, "max": 1, "gamma_energy_range": [0, 100] }
+    ]})JSON";
+    ParseResult pr = parse_hist_config(json);
+    CHECK(has_err(pr, "scope mixing"));
+    CHECK(pr.defs.empty());
+  }
+}
+
+static void test_pos_value_and_cut() {
+  // x needs BOTH X arms; y needs BOTH Y arms; the two are independent.
+  {
+    PosResult r;
+    r.has_xl = true;  r.dt_xl = 10.0;   // t_XL = trig + 10
+    r.has_xr = true;  r.dt_xr = 30.0;   // t_XR = trig + 30
+    r.has_yu = true;  r.dt_yu = -10.0;
+    r.has_yd = true;  r.dt_yd = 5.0;
+    double v;
+    CHECK(value_of(Var::Xy1X, r, v) && near(v, 20.0));   // t_XR - t_XL
+    CHECK(value_of(Var::Xy1Y, r, v) && near(v, -15.0));  // t_YU - t_YD
+    // Xy2X/Xy2Y compute the same thing — instance routing is the fill site's job.
+    CHECK(value_of(Var::Xy2X, r, v) && near(v, 20.0));
+    CHECK(value_of(Var::Xy2Y, r, v) && near(v, -15.0));
+  }
+  // One X arm missing -> no x, but y still fills.
+  {
+    PosResult r;
+    r.has_xl = true;  r.dt_xl = 10.0;
+    r.has_xr = false;
+    r.has_yu = true;  r.dt_yu = 4.0;
+    r.has_yd = true;  r.dt_yd = 1.0;
+    double v;
+    CHECK(!value_of(Var::Xy1X, r, v));
+    CHECK(value_of(Var::Xy1Y, r, v) && near(v, 3.0));
+  }
+  // A hit/coinc var against a PosResult is false (unreachable after validation).
+  {
+    PosResult r;
+    double v;
+    CHECK(!value_of(Var::Energy, r, v));
+    CHECK(!value_of(Var::Dt1, r, v));
+  }
+  // pass_cut: only None passes (no pos-scope cuts exist yet).
+  {
+    PosResult r;
+    CHECK(pass_cut(Cut{}, r));
+    CHECK(!pass_cut(Cut{CutKind::Channel, 1, 0, 0}, r));
+    CHECK(!pass_cut(Cut{CutKind::GammaEnergyRange, 0, 0, 100}, r));
+  }
+}
+
 // ---------------------------------------------------------------------------
 int main() {
   test_envelope();
   test_batch_decode();
   test_matcher();
+  test_pos_matcher();
+  test_parse_ch_list();
   test_run_state();
   test_http_helpers();
   test_hist_config_valid();
   test_hist_config_features();
   test_hist_config_errors();
   test_value_and_cut();
+  test_hist_config_pos();
+  test_pos_value_and_cut();
 
   std::printf("\n%d passed, %d failed\n", g_pass, g_fail);
   return g_fail == 0 ? 0 : 1;

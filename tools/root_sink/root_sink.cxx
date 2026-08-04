@@ -13,6 +13,9 @@
 //     digitizer, gamma + ThGEM1 + ThGEM2 on configurable channels). Three
 //     histograms (dt1, dt2, dt2-vs-dt1) plus channel occupancy, served live over
 //     THttpServer (browse with a JSROOT-capable browser — zero frontend code).
+//     With --hists, up to two delay-line XY monitors (--xy1-ch/--xy2-ch: a
+//     trigger plus XL/XR/YU/YD arms each) additionally fill pos1/pos2-scope
+//     histograms (x = t_XR - t_XL, y = t_YU - t_YD).
 //
 // All logic (envelope parse, decode, matcher, run state) is in sink_core.hpp and
 // is unit-tested without ROOT/ZMQ. This file is only the wiring.
@@ -113,6 +116,8 @@ struct Options {
   int gamma_ch = -1;
   int thgem1_ch = -1;
   int thgem2_ch = -1;
+  std::vector<int> xy1_ch;  // --xy1-ch T,XL,XR,YU,YD (empty = disabled)
+  std::vector<int> xy2_ch;  // --xy2-ch likewise
   double window_ns = 1000.0;
   double margin_ns = 10000.0;
   int http_port = 8090;
@@ -138,6 +143,10 @@ static void print_usage(const char* argv0) {
       "  --thgem1-ch N       ThGEM1 channel\n"
       "  --thgem2-ch N       ThGEM2 channel\n"
       "                      (all three required; if any omitted -> recorder only)\n"
+      "  --xy1-ch T,XL,XR,YU,YD  delay-line XY monitor 1: trigger + 4 arm channels\n"
+      "  --xy2-ch T,XL,XR,YU,YD  delay-line XY monitor 2\n"
+      "                      (5 distinct ints 0..255; fills pos1/pos2-scope\n"
+      "                       histograms, so --hists is required)\n"
       "  --window-ns X       coincidence half-window (default 1000)\n"
       "  --margin-ns X       out-of-order tolerance / ripen delay (default 10000)\n"
       "  --http-port N       THttpServer port, 0 disables (default 8090)\n"
@@ -193,6 +202,22 @@ static bool parse_args(int argc, char** argv, Options& opt, bool& help) {
     } else if (a == "--thgem2-ch") {
       if (!(v = need(i))) return false;
       opt.thgem2_ch = std::atoi(v);
+    } else if (a == "--xy1-ch") {
+      if (!(v = need(i))) return false;
+      if (!parse_ch_list(v, 5, opt.xy1_ch)) {
+        std::fprintf(stderr,
+                     "root_sink: --xy1-ch wants 5 distinct ints 'T,XL,XR,YU,YD' "
+                     "in 0..255 (got '%s')\n", v);
+        return false;
+      }
+    } else if (a == "--xy2-ch") {
+      if (!(v = need(i))) return false;
+      if (!parse_ch_list(v, 5, opt.xy2_ch)) {
+        std::fprintf(stderr,
+                     "root_sink: --xy2-ch wants 5 distinct ints 'T,XL,XR,YU,YD' "
+                     "in 0..255 (got '%s')\n", v);
+        return false;
+      }
     } else if (a == "--window-ns") {
       if (!(v = need(i))) return false;
       opt.window_ns = std::atof(v);
@@ -672,6 +697,28 @@ static void fill_coinc_hists(std::vector<LiveHist>& live, const CoincResult& r) 
   }
 }
 
+// Fill every pos-scope histogram of `scope` for one ripe XY result. The SAME
+// function serves both PositionMatcher instances: which detector `r` belongs to
+// is expressed ONLY by the scope passed here (Pos1 for the xy1 matcher, Pos2 for
+// xy2) — value_of computes identical math for xy1_*/xy2_* variables, so this
+// filter is what keeps xy1 results out of xy2 histograms. Don't "simplify" it.
+static void fill_pos_hists(std::vector<LiveHist>& live, const PosResult& r,
+                           Scope scope) {
+  for (auto& lh : live) {
+    if (lh.def.scope != scope) continue;
+    if (!pass_cut(lh.def.cut, r)) continue;
+    double x = 0.0;
+    if (!value_of(lh.def.x, r, x)) continue;
+    if (lh.def.is2d) {
+      double y = 0.0;
+      if (!value_of(lh.def.y, r, y)) continue;
+      static_cast<TH2*>(lh.h)->Fill(x, y);
+    } else {
+      lh.h->Fill(x);
+    }
+  }
+}
+
 // Snapshot the current --hists file next to the finalized ROOT file, named
 // "<root path minus .root>_hists.json". By deriving from the (possibly
 // collision-suffixed) final path, the copy stays paired with its run file.
@@ -710,6 +757,8 @@ int main(int argc, char** argv) {
   const bool http_enabled = opt.http_port != 0;
   const bool coinc_enabled =
       opt.gamma_ch >= 0 && opt.thgem1_ch >= 0 && opt.thgem2_ch >= 0;
+  const bool xy1_enabled = opt.xy1_ch.size() == 5;
+  const bool xy2_enabled = opt.xy2_ch.size() == 5;
 
   // --hists only defines monitor histograms, so it needs the HTTP server. Warn
   // and ignore it rather than silently drop it when the server is off.
@@ -719,6 +768,14 @@ int main(int argc, char** argv) {
                  "root_sink: WARNING --hists %s ignored because --http-port 0 "
                  "(no monitor server)\n",
                  opt.hists_file.c_str());
+
+  // The XY monitors have no built-in fallback histograms: their results land
+  // only in pos1/pos2-scope --hists entries. A channel list without --hists
+  // would run the matcher into a void — warn loudly and disable instead.
+  if ((xy1_enabled || xy2_enabled) && !use_hists)
+    std::fprintf(stderr,
+                 "root_sink: WARNING --xy1-ch/--xy2-ch given but XY histograms "
+                 "only exist via --hists (pos1/pos2 scope) — XY monitor DISABLED\n");
 
   // Parse the histogram definitions up front — ANY error is fatal at startup.
   std::vector<HistDef> hist_defs;
@@ -738,14 +795,25 @@ int main(int argc, char** argv) {
       return 2;
     }
     hist_defs = std::move(pr.defs);
-    bool has_coinc = false;
-    for (const auto& d : hist_defs)
+    bool has_coinc = false, has_pos1 = false, has_pos2 = false;
+    for (const auto& d : hist_defs) {
       if (d.scope == Scope::Coinc) has_coinc = true;
+      if (d.scope == Scope::Pos1) has_pos1 = true;
+      if (d.scope == Scope::Pos2) has_pos2 = true;
+    }
     if (has_coinc && !coinc_enabled)
       std::fprintf(stderr,
                    "root_sink: WARNING --hists has coincidence histograms but the "
                    "Δt matcher is DISABLED (need --gamma-ch/--thgem1-ch/--thgem2-ch) "
                    "— those histograms will stay empty\n");
+    if (has_pos1 && !xy1_enabled)
+      std::fprintf(stderr,
+                   "root_sink: WARNING --hists has pos1 (xy1_*) histograms but "
+                   "--xy1-ch is not set — those histograms will stay empty\n");
+    if (has_pos2 && !xy2_enabled)
+      std::fprintf(stderr,
+                   "root_sink: WARNING --hists has pos2 (xy2_*) histograms but "
+                   "--xy2-ch is not set — those histograms will stay empty\n");
   }
 
   std::printf("root_sink: sub=%s out-dir=%s tree=%s\n", opt.zmq.c_str(),
@@ -758,6 +826,14 @@ int main(int argc, char** argv) {
                 opt.gamma_ch, opt.thgem1_ch, opt.thgem2_ch, opt.window_ns, opt.margin_ns);
   else
     std::printf("root_sink: Δt monitor DISABLED (need --gamma-ch/--thgem1-ch/--thgem2-ch) — recorder only\n");
+  if (use_hists && xy1_enabled)
+    std::printf("root_sink: xy1 monitor trig=ch%d XL=ch%d XR=ch%d YU=ch%d YD=ch%d window=%.0fns margin=%.0fns\n",
+                opt.xy1_ch[0], opt.xy1_ch[1], opt.xy1_ch[2], opt.xy1_ch[3],
+                opt.xy1_ch[4], opt.window_ns, opt.margin_ns);
+  if (use_hists && xy2_enabled)
+    std::printf("root_sink: xy2 monitor trig=ch%d XL=ch%d XR=ch%d YU=ch%d YD=ch%d window=%.0fns margin=%.0fns\n",
+                opt.xy2_ch[0], opt.xy2_ch[1], opt.xy2_ch[2], opt.xy2_ch[3],
+                opt.xy2_ch[4], opt.window_ns, opt.margin_ns);
 
   std::signal(SIGINT, on_signal);
   std::signal(SIGTERM, on_signal);
@@ -851,6 +927,24 @@ int main(int argc, char** argv) {
     matcher.reset(new CoincidenceMatcher(cfg));
   }
 
+  // The two delay-line XY matchers share --window-ns/--margin-ns with the Δt
+  // matcher (one disorder tolerance per stream). --hists required: see the
+  // startup warning above.
+  auto make_xy = [&](const std::vector<int>& chs) {
+    PositionMatcher::Config cfg;
+    cfg.trig_ch = chs[0];
+    cfg.xl_ch = chs[1];
+    cfg.xr_ch = chs[2];
+    cfg.yu_ch = chs[3];
+    cfg.yd_ch = chs[4];
+    cfg.window_ns = opt.window_ns;
+    cfg.margin_ns = opt.margin_ns;
+    return std::unique_ptr<PositionMatcher>(new PositionMatcher(cfg));
+  };
+  std::unique_ptr<PositionMatcher> xy1, xy2;
+  if (use_hists && xy1_enabled) xy1 = make_xy(opt.xy1_ch);
+  if (use_hists && xy2_enabled) xy2 = make_xy(opt.xy2_ch);
+
   // --- ZMQ SUB (HWM=0 per the data-preservation rule) ---
   void* ctx = zmq_ctx_new();
   void* sub = zmq_socket(ctx, ZMQ_SUB);
@@ -868,6 +962,7 @@ int main(int argc, char** argv) {
   std::set<std::string> warned;
   long long events_written = 0;
   long long matcher_fills = 0;
+  long long xy_fills = 0;  // ripened XY triggers, both detectors combined
 
   // Emit any coincidence results a matcher produced into the histograms. In
   // --hists mode the declarative coinc-scope set decides what gets filled; the
@@ -881,6 +976,19 @@ int main(int argc, char** argv) {
       if (r.has_dt2) g_h_dt2->Fill(r.dt2);
       if (r.has_dt1 && r.has_dt2) g_h_dt2_vs_dt1->Fill(r.dt1, r.dt2);
     }
+  };
+
+  // XY results route by scope: the xy1 matcher fills pos1 histograms, xy2 fills
+  // pos2. `live_hists` is captured by reference and resolved per call, so a
+  // /ReloadHists rebuild is safe (nothing bakes a TH1*). xy matchers only exist
+  // in --hists mode, so no built-in branch here.
+  auto emit_xy1 = [&](const PosResult& r) {
+    ++xy_fills;
+    fill_pos_hists(live_hists, r, Scope::Pos1);
+  };
+  auto emit_xy2 = [&](const PosResult& r) {
+    ++xy_fills;
+    fill_pos_hists(live_hists, r, Scope::Pos2);
   };
 
   auto process = [&](const uint8_t* data, size_t size) {
@@ -899,6 +1007,8 @@ int main(int argc, char** argv) {
                   std::fprintf(stderr, "root_sink: run start FAILED — dropping this run's events\n");
                 }
                 if (matcher) matcher->reset();  // clock may restart between runs
+                if (xy1) xy1->reset();
+                if (xy2) xy2->reset();
                 std::printf("root_sink: run started (source %u) -> %s\n", sid,
                             recorder.provisional().c_str());
               });
@@ -912,6 +1022,8 @@ int main(int argc, char** argv) {
                 else if (h.channel < 64)
                   g_h_channels->Fill(h.channel);
                 if (matcher) matcher->push(h, emit);
+                if (xy1) xy1->push(h, emit_xy1);
+                if (xy2) xy2->push(h, emit_xy2);
               }
             });
         if (n < 0)
@@ -923,6 +1035,8 @@ int main(int argc, char** argv) {
             env.source_id, env.run_number,
             [&](uint32_t rn) {
               if (matcher) matcher->flush(emit);  // ripen the final partial window
+              if (xy1) xy1->flush(emit_xy1);
+              if (xy2) xy2->flush(emit_xy2);
               long long ev = recorder.entries();
               std::string fn = recorder.finalize(rn);
               std::printf("root_sink: run %u finalized -> %s (%lld events)\n", rn,
@@ -1043,9 +1157,9 @@ int main(int argc, char** argv) {
     if (duration_cast<seconds>(now - t_last_status).count() >= 10) {
       double dt = duration_cast<duration<double>>(now - t_last_status).count();
       double rate = dt > 0 ? (double)(events_written - last_events) / dt : 0.0;
-      std::printf("root_sink: %s | events=%lld | %.0f ev/s | matcher_fills=%lld\n",
+      std::printf("root_sink: %s | events=%lld | %.0f ev/s | matcher_fills=%lld | xy_fills=%lld\n",
                   run_state.is_writing() ? "WRITING" : "idle", events_written, rate,
-                  matcher_fills);
+                  matcher_fills, xy_fills);
       std::fflush(stdout);
       t_last_status = now;
       last_events = events_written;

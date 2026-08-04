@@ -7,12 +7,16 @@
 // parser + fill-time logic is unit-testable with a plain `g++ -std=c++17` build.
 // The ROOT wiring (creating TH1D/TH2D, Register, Fill) stays in root_sink.cxx.
 //
-// KISS: this is a FIXED vocabulary, not an expression engine. Two scopes:
+// KISS: this is a FIXED vocabulary, not an expression engine. Four scopes:
 //   * hit   — per-event scalars: variables energy, energy_short, channel, module;
 //             cuts `channel` (int equals) and `energy_range` [min,max].
 //   * coinc — per-ripe-gamma coincidence results: variables dt1, dt2,
 //             gamma_energy, thgem1_energy, thgem2_energy; cuts
 //             gamma/thgem1/thgem2_energy_range [min,max].
+//   * pos1 / pos2 — per-ripe-trigger delay-line XY results (the two
+//             PositionMatcher instances): variables xy1_x/xy1_y (pos1) and
+//             xy2_x/xy2_y (pos2). x = t_XR - t_XL fills only when BOTH X arms
+//             matched; y = t_YU - t_YD likewise. No pos cuts exist yet.
 // Every histogram lives entirely in one scope: its x, its y (2D), and its cut
 // must all belong to the same scope (no scope mixing). This is what makes the
 // headline use case — "gate Δt on gamma energy" (x=dt1, cut=gamma_energy_range)
@@ -32,7 +36,7 @@
 namespace rootsink {
 
 // Which family of records a def draws from — see the header comment.
-enum class Scope { Hit, Coinc };
+enum class Scope { Hit, Coinc, Pos1, Pos2 };
 
 // Plottable variables. `None` is the unset y of a 1D def.
 enum class Var {
@@ -47,7 +51,12 @@ enum class Var {
   Dt2,
   GammaEnergy,
   Thgem1Energy,
-  Thgem2Energy
+  Thgem2Energy,
+  // pos1 / pos2 scopes (delay-line XY)
+  Xy1X,
+  Xy1Y,
+  Xy2X,
+  Xy2Y
 };
 
 // A single optional cut. `channel` is an equality test (ivalue); every *_range is
@@ -107,6 +116,10 @@ inline bool var_lookup(const std::string& n, Var& v, Scope& sc) {
   if (n == "gamma_energy") { v = Var::GammaEnergy; sc = Scope::Coinc; return true; }
   if (n == "thgem1_energy") { v = Var::Thgem1Energy; sc = Scope::Coinc; return true; }
   if (n == "thgem2_energy") { v = Var::Thgem2Energy; sc = Scope::Coinc; return true; }
+  if (n == "xy1_x") { v = Var::Xy1X; sc = Scope::Pos1; return true; }
+  if (n == "xy1_y") { v = Var::Xy1Y; sc = Scope::Pos1; return true; }
+  if (n == "xy2_x") { v = Var::Xy2X; sc = Scope::Pos2; return true; }
+  if (n == "xy2_y") { v = Var::Xy2Y; sc = Scope::Pos2; return true; }
   return false;
 }
 
@@ -165,6 +178,28 @@ inline bool value_of(Var v, const CoincResult& r, double& out) {
   }
 }
 
+// Read a pos-scope variable. Xy1X and Xy2X (and the Ys likewise) intentionally
+// compute the SAME thing: which detector a result belongs to is decided by
+// fill_pos_hists' scope filter in root_sink.cxx, never here — a pos1 histogram
+// only ever sees xy1 matcher results. x/y each need BOTH of their arms.
+inline bool value_of(Var v, const PosResult& r, double& out) {
+  switch (v) {
+    case Var::Xy1X:
+    case Var::Xy2X:
+      if (!(r.has_xl && r.has_xr)) return false;
+      out = r.dt_xr - r.dt_xl;  // = t_XR - t_XL (trig_t cancels)
+      return true;
+    case Var::Xy1Y:
+    case Var::Xy2Y:
+      if (!(r.has_yu && r.has_yd)) return false;
+      out = r.dt_yu - r.dt_yd;  // = t_YU - t_YD
+      return true;
+    default:
+      return false;  // hit/coinc var on a pos result — unreachable after
+                     // scope validation
+  }
+}
+
 inline bool pass_cut(const Cut& c, const ScalarHit& h) {
   switch (c.kind) {
     case CutKind::None:
@@ -192,6 +227,13 @@ inline bool pass_cut(const Cut& c, const CoincResult& r) {
     default:
       return false;  // hit cut on a coinc — unreachable after scope validation
   }
+}
+
+// No pos-scope cuts exist yet, so only the no-cut case can pass. Every existing
+// cut key is Hit/Coinc scope and parse_one's scope check already rejects it on a
+// pos histogram; this overload just keeps fill dispatch total.
+inline bool pass_cut(const Cut& c, const PosResult&) {
+  return c.kind == CutKind::None;
 }
 
 // ---------------------------------------------------------------------------
