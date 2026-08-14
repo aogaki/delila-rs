@@ -1309,7 +1309,14 @@ int main(int argc, char** argv) {
     bool done = false;
     while (!done) {
       eb::WorkMsg m;
-      if (writer_q.pop_for(m, 200)) {
+      // Value → process; Timeout → fall through to the autosave tick below;
+      // Closed → exit. Orderly shutdown still arrives as in-band pills (the
+      // queue is never close()d today), but honoring Closed keeps this loop
+      // correct if a future caller terminates via close() — pop_for guarantees
+      // drain-then-Closed, so exiting here can never strand queued work.
+      const auto pr = writer_q.pop_for(m, 200);
+      if (pr == eb::PopResult::Closed) break;
+      if (pr == eb::PopResult::Value) {
         reorder.push(m.seq, std::move(m));
         eb::WorkMsg r;
         while (!done && reorder.pop_ready(r)) {
@@ -1455,11 +1462,15 @@ int main(int argc, char** argv) {
 
   while (!display_done) {
     eb::DisplayMsg d;
-    bool got = display_q.pop_for(d, 100);
-    while (got && !display_done) {
+    auto got = display_q.pop_for(d, 100);
+    while (got == eb::PopResult::Value && !display_done) {
       handle_display(d);
       got = display_q.pop_for(d, 0);  // drain whatever queued meanwhile
     }
+    // Shutdown normally arrives as an in-band pill (handled above); Closed is
+    // honored too so a close()-terminated tee cannot strand this loop. pop_for
+    // only reports Closed once drained, so no queued display work is lost.
+    if (got == eb::PopResult::Closed) display_done = true;
 
     // Service HTTP requests on this thread (the histograms' owner, so the
     // no-lock invariant of the single-threaded design carries over 1:1).

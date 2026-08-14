@@ -125,14 +125,77 @@ static void test_channel_pop_for_timeout() {
   Channel<int> ch;
   int out = 0;
   auto t0 = std::chrono::steady_clock::now();
-  CHECK(!ch.pop_for(out, 30));  // nothing arrives -> timeout -> false
+  CHECK(ch.pop_for(out, 30) == PopResult::Timeout);  // open + empty -> Timeout
   auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - t0)
                 .count();
   CHECK(ms >= 25);  // actually waited (allow scheduler slop)
   int v = 5;
   ch.push(std::move(v));
-  CHECK(ch.pop_for(out, 30) && out == 5);
+  CHECK(ch.pop_for(out, 30) == PopResult::Value && out == 5);
+}
+
+// Issue #26: pop_for must distinguish Timeout from Closed, and must only
+// report Closed once the queue is drained — otherwise a consumer that exits
+// on an external flag can race a producer's final push(msg); close() and
+// lose the last message.
+static void test_channel_pop_for_three_state() {
+  // Drain-then-Closed: pending items outlive close(), Closed comes last.
+  Channel<int> ch;
+  int a = 7, b = 8;
+  ch.push(std::move(a));
+  ch.push(std::move(b));
+  ch.close();
+  int out = 0;
+  CHECK(ch.pop_for(out, 30) == PopResult::Value && out == 7);
+  CHECK(ch.pop_for(out, 30) == PopResult::Value && out == 8);
+  CHECK(ch.pop_for(out, 30) == PopResult::Closed);
+  CHECK(ch.pop_for(out, 0) == PopResult::Closed);  // stays Closed, 0-timeout too
+
+  // A pop_for blocked on an empty channel must wake on close() -> Closed
+  // (not sit out its full timeout).
+  Channel<int> ch2;
+  std::atomic<bool> got_closed{false};
+  std::thread blocked([&] {
+    int v = 0;
+    if (ch2.pop_for(v, 10000) == PopResult::Closed) got_closed = true;
+  });
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  ch2.close();
+  blocked.join();
+  CHECK(got_closed);
+}
+
+// The issue #26 race shape, end to end: a consumer that exits ONLY on Closed
+// receives every message even when the producer's last push and close() land
+// mid-poll. With the old bool contract + external stop flag this
+// intermittently lost the final message.
+static void test_channel_pop_for_close_race() {
+  const int kRounds = 50;  // the original race was intermittent — hammer it
+  for (int round = 0; round < kRounds; ++round) {
+    Channel<int> ch;
+    const int kMsgs = 3;
+    std::thread producer([&] {
+      for (int i = 0; i < kMsgs; ++i) {
+        int v = i;
+        ch.push(std::move(v));
+      }
+      ch.close();  // close() IS the termination signal here — no pill
+    });
+    int received = 0;
+    for (;;) {
+      int v = 0;
+      PopResult r = ch.pop_for(v, 1);
+      if (r == PopResult::Closed) break;
+      if (r == PopResult::Value) ++received;
+    }
+    producer.join();
+    if (received != kMsgs) {
+      CHECK(received == kMsgs);  // report the losing round
+      return;
+    }
+  }
+  CHECK(true);  // all rounds delivered every message
 }
 
 static void test_channel_move_only() {
@@ -844,6 +907,8 @@ int main() {
   test_channel_close_drains_then_false();
   test_channel_bounded_try_push();
   test_channel_pop_for_timeout();
+  test_channel_pop_for_three_state();
+  test_channel_pop_for_close_race();
   test_channel_move_only();
   test_channel_multi_producer();
   test_seq_reorder_in_order();

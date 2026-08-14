@@ -54,6 +54,11 @@ namespace eb {
 //     path (a lost RunOpen would leave stale matcher clocks across runs).
 // Message granularity is a whole batch/chunk, so lock traffic is a few dozen
 // operations per second — a lock-free structure would buy nothing here (KISS).
+
+// Outcome of Channel::pop_for. Value/Timeout/Closed are distinct so that a
+// consumer can exit on closed-and-drained ONLY — see the comment on pop_for.
+enum class PopResult { Value, Timeout, Closed };
+
 template <class T>
 class Channel {
  public:
@@ -98,18 +103,25 @@ class Channel {
   }
 
   // Pop with a timeout, for loops that must wake periodically (the Display
-  // loop's ProcessEvents tick, the Writer's autosave timer). Returns false on
-  // timeout OR on closed-and-drained; callers treat false as "no work now"
-  // and check their own exit conditions.
-  bool pop_for(T& out, int timeout_ms) {
+  // loop's ProcessEvents tick, the Writer's autosave timer).
+  //
+  // Three-state result, decided under the channel lock (issue #26): a bool
+  // here would conflate Timeout with Closed, forcing callers onto an external
+  // exit flag — and "queue empty" + "flag set" are observed at different
+  // times, so a producer's final push(msg); close() can slip between them and
+  // the last message is silently lost. (Hit for real in tpcdaq-rs, whose
+  // Channel is a port of this one.) With Closed only ever returned when the
+  // queue is empty AND closed under one lock, drain-then-Closed is guaranteed:
+  // exit on Closed, never on Timeout.
+  PopResult pop_for(T& out, int timeout_ms) {
     std::unique_lock<std::mutex> lk(m_);
     cv_pop_.wait_for(lk, std::chrono::milliseconds(timeout_ms),
                      [&] { return !q_.empty() || closed_; });
-    if (q_.empty()) return false;
+    if (q_.empty()) return closed_ ? PopResult::Closed : PopResult::Timeout;
     out = std::move(q_.front());
     q_.pop_front();
     if (cap_ > 0) cv_push_.notify_one();
-    return true;
+    return PopResult::Value;
   }
 
   // Wake every blocked producer and consumer. Pending items remain poppable
