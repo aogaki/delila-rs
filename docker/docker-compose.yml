@@ -66,21 +66,33 @@ services:
     volumes:
       - ./data/influxdb:/var/lib/influxdb3
       - ./data/influxdb-plugins:/plugins
-    # Pre-clean step before exec'ing the daemon: delete any 0-byte WAL files
-    # left over from an unclean shutdown. InfluxDB v3 Core's WAL replay
-    # *skips* these files (logs `WARN Skipping corrupt WAL file`) but the
-    # *write path* re-uses the same numeric filenames, hitting EEXIST and
-    # invoking graceful shutdown (exit 0). Combined with `restart`, the
-    # container then loops forever. We saw this at 2026-05-05 after a
-    # power cut on daq@172.18.4.76 — 22 zero-byte WALs (1580283..1580304)
-    # blocked startup. The `find … -delete` is data-loss-free: those bytes
-    # never made it to disk, the replayer already declared them "skip".
-    # Upstream bug class: WAL skip path and write path don't share state.
+    # Pre-clean step before exec'ing the daemon: delete truncated files
+    # left over from an unclean shutdown. Two variants seen in production:
+    #
+    # 1. 0-byte WAL files. InfluxDB v3 Core's WAL replay *skips* these
+    #    (logs `WARN Skipping corrupt WAL file`) but the *write path*
+    #    re-uses the same numeric filenames, hitting EEXIST and invoking
+    #    graceful shutdown (exit 0). Combined with `restart`, the container
+    #    then loops forever. Seen 2026-05-05 after a power cut on
+    #    daq@172.18.4.76 — 22 zero-byte WALs (1580283..1580304).
+    #    Upstream bug class: WAL skip path and write path don't share state.
+    # 2. Truncated catalog log files (catalog/v2/logs/NNNN.catalog). Unlike
+    #    WAL, the catalog loader *hard-fails* startup: "file must contain
+    #    at least 10 bytes" → serve exits 1. Seen 2026-08-14 on the same
+    #    host after an unclean reboot — a single 0-byte .catalog blocked
+    #    startup until it was moved aside by hand. The `-size -10c` bound
+    #    mirrors the loader's own precondition: a sub-10-byte catalog log
+    #    can never be read, so deleting one is data-loss-free; the catalog
+    #    loads from the preceding log file.
+    #
+    # Both deletes are safe by construction: they only remove files the
+    # daemon itself already refuses to read.
     entrypoint:
       - /bin/sh
       - -c
       - |
         find /var/lib/influxdb3 -size 0 -name '*.wal' -print -delete 2>/dev/null
+        find /var/lib/influxdb3 -name '*.catalog' -size -10c -print -delete 2>/dev/null
         exec influxdb3 "$@"
       - --
     command: ["serve", "--node-id", "delila", "--object-store", "file", "--data-dir", "/var/lib/influxdb3", "--without-auth"]
