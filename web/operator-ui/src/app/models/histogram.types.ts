@@ -130,6 +130,25 @@ export const AXIS_SOURCE_OPTIONS: readonly AxisSource[] = [
   'psd',
 ];
 
+// FW-aware axis policy (issue #25). The AMax custom FW carries its per-event
+// extras in user_info[0..3] and has no energy_short, so psd (= (E-Es)/E)
+// degenerates to a constant. On an all-AMax system the 2D default the
+// operator wants is E vs UserInfo[0], and psd/energy_short only clutter the
+// menus. `allAMax` comes from DigitizerService.allAMax() (mixed or non-AMax
+// systems keep the historical psd behavior untouched).
+
+/** FW-aware default for a 2D plot's Y axis. */
+export function defaultYAxisSource(allAMax: boolean): AxisSource {
+  return allAMax ? 'user_info0' : 'psd';
+}
+
+/** FW-aware dropdown option list for 2D plot axes. */
+export function axisSourceOptions(allAMax: boolean): readonly AxisSource[] {
+  return allAMax
+    ? AXIS_SOURCE_OPTIONS.filter((a) => a !== 'psd' && a !== 'energy_short')
+    : AXIS_SOURCE_OPTIONS;
+}
+
 /**
  * Client-side fallback defaults per axis — used to seed Setup tab inputs
  * and as a fallback when a `ViewTab.xView` / `yView` field is missing **and**

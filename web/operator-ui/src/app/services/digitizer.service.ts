@@ -1,4 +1,4 @@
-import { Injectable, inject, signal } from '@angular/core';
+import { Injectable, computed, inject, signal } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
 import {
   DigitizerConfig,
@@ -176,6 +176,15 @@ export class DigitizerService {
 
   // Signal holding the list of digitizer configurations
   readonly digitizers = signal<DigitizerConfig[]>([]);
+
+  /** True when every configured digitizer runs the AMax custom FW — the
+   * histogram UI then defaults 2D plots to E vs UserInfo[0] and hides the
+   * psd/energy_short axes, which AMax cannot produce (issue #25). Empty
+   * list counts as false so the pre-load UI keeps the historical defaults. */
+  readonly allAMax = computed(() => {
+    const ds = this.digitizers();
+    return ds.length > 0 && ds.every((d) => d.firmware === 'AMax');
+  });
 
   // Selected digitizer ID — survives navigation between pages
   readonly selectedDigitizerId = signal<number | null>(null);

@@ -17,6 +17,7 @@ import { MatIconModule } from '@angular/material/icon';
 import { HistogramChartComponent, RangeChangeEvent } from '../histogram-chart/histogram-chart.component';
 import { HeatmapChartComponent } from '../heatmap-chart/heatmap-chart.component';
 import { HistogramService } from '../../services/histogram.service';
+import { DigitizerService } from '../../services/digitizer.service';
 import {
   AxisSource,
   AxisView,
@@ -25,6 +26,7 @@ import {
   Histogram2D,
   AXIS_SOURCE_LABEL,
   DEFAULT_AXIS_VIEW,
+  defaultYAxisSource,
 } from '../../models/histogram.types';
 
 @Component({
@@ -334,6 +336,7 @@ export class ViewTabComponent implements OnInit, OnDestroy {
   @ViewChildren('chartRef') chartRefs!: QueryList<HistogramChartComponent>;
 
   private readonly histogramService = inject(HistogramService);
+  private readonly digitizerService = inject(DigitizerService);
   private readonly destroy$ = new Subject<void>();
   private readonly refreshInterval = 1000;
 
@@ -341,10 +344,13 @@ export class ViewTabComponent implements OnInit, OnDestroy {
   readonly histograms2d = signal<(Histogram2D | null)[]>([]);
   readonly isSaving = signal(false);
   readonly histType = computed(() => this.tab.histogramType ?? 'energy');
-  /** Effective X / Y axis for 2D plots. Falls back to (energy, psd) so old
-   *  layout files written before Phase 2 still render something sensible. */
+  /** Effective X / Y axis for 2D plots. Falls back to (energy, FW default) so
+   *  old layout files written before Phase 2 still render something sensible —
+   *  UserInfo[0] on all-AMax systems, psd otherwise (issue #25). */
   readonly xAxis = computed<AxisSource>(() => this.tab.xAxis ?? 'energy');
-  readonly yAxis = computed<AxisSource>(() => this.tab.yAxis ?? 'psd');
+  readonly yAxis = computed<AxisSource>(
+    () => this.tab.yAxis ?? defaultYAxisSource(this.digitizerService.allAMax()),
+  );
 
   /**
    * Live view config — the chart components apply this client-side rebin.

@@ -8,7 +8,8 @@ import { HistogramChartComponent, RangeChangeEvent } from '../histogram-chart/hi
 import { HeatmapChartComponent } from '../heatmap-chart/heatmap-chart.component';
 import { HistogramService } from '../../services/histogram.service';
 import { FittingService } from '../../services/fitting.service';
-import { ViewCell, ViewCellFitResult, Histogram1D, Histogram2D, XAxisLabel, HistogramType, AxisSource, AxisView, AXIS_SOURCE_LABEL } from '../../models/histogram.types';
+import { DigitizerService } from '../../services/digitizer.service';
+import { ViewCell, ViewCellFitResult, Histogram1D, Histogram2D, XAxisLabel, HistogramType, AxisSource, AxisView, AXIS_SOURCE_LABEL, defaultYAxisSource } from '../../models/histogram.types';
 
 export interface ExpandDialogData {
   cell: ViewCell;
@@ -223,6 +224,7 @@ export interface ExpandDialogResult {
 export class HistogramExpandDialogComponent implements OnInit, OnDestroy {
   private readonly histogramService = inject(HistogramService);
   private readonly fittingService = inject(FittingService);
+  private readonly digitizerService = inject(DigitizerService);
   private readonly destroy$ = new Subject<void>();
   private readonly refreshInterval = 1000;
 
@@ -301,9 +303,10 @@ export class HistogramExpandDialogComponent implements OnInit, OnDestroy {
     return this.data.xAxis ?? 'energy';
   }
 
-  /** 2D Y axis source (defaults to `'psd'` for legacy data). */
+  /** 2D Y axis source (legacy data falls back to the FW default: UserInfo[0]
+   *  on all-AMax systems, psd otherwise — issue #25). */
   yAxis(): AxisSource {
-    return this.data.yAxis ?? 'psd';
+    return this.data.yAxis ?? defaultYAxisSource(this.digitizerService.allAMax());
   }
 
   /** Pretty label for an `AxisSource` used in chart titles + tooltips. */

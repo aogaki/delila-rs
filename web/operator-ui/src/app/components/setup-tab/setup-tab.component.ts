@@ -19,9 +19,10 @@ import {
   AxisSource,
   AxisView,
   AXIS_SOURCE_LABEL,
-  AXIS_SOURCE_OPTIONS,
   DEFAULT_AXIS_VIEW,
+  axisSourceOptions,
   createDefaultSetupCell,
+  defaultYAxisSource,
 } from '../../models/histogram.types';
 
 @Component({
@@ -120,7 +121,9 @@ import {
             (selectionChange)="onHistogramTypeChange($event.value)"
           >
             <mat-option value="energy">Energy</mat-option>
-            <mat-option value="psd">PSD</mat-option>
+            @if (!digitizerService.allAMax()) {
+              <mat-option value="psd">PSD</mat-option>
+            }
             <mat-option value="user_info0">UserInfo[0]</mat-option>
             <mat-option value="user_info1">UserInfo[1]</mat-option>
             <mat-option value="user_info2">UserInfo[2]</mat-option>
@@ -136,7 +139,7 @@ import {
               [value]="config.xAxis ?? 'energy'"
               (selectionChange)="onXAxisChange($event.value)"
             >
-              @for (opt of axisOptions; track opt) {
+              @for (opt of axisOptions(); track opt) {
                 <mat-option [value]="opt">{{ axisLabel(opt) }}</mat-option>
               }
             </mat-select>
@@ -144,10 +147,10 @@ import {
           <mat-form-field appearance="outline" class="axis-source-select">
             <mat-label>Y Axis</mat-label>
             <mat-select
-              [value]="config.yAxis ?? 'psd'"
+              [value]="yAxisOrDefault()"
               (selectionChange)="onYAxisChange($event.value)"
             >
-              @for (opt of axisOptions; track opt) {
+              @for (opt of axisOptions(); track opt) {
                 <mat-option [value]="opt">{{ axisLabel(opt) }}</mat-option>
               }
             </mat-select>
@@ -440,8 +443,16 @@ export class SetupTabComponent {
     this.updateGridSize(this.config.gridRows, cols);
   }
 
-  /** AxisSource options shown in the X / Y dropdowns when type === '2d'. */
-  readonly axisOptions = AXIS_SOURCE_OPTIONS;
+  /** AxisSource options shown in the X / Y dropdowns when type === '2d'.
+   *  FW-aware: all-AMax systems drop psd/energy_short (issue #25). */
+  axisOptions(): readonly AxisSource[] {
+    return axisSourceOptions(this.digitizerService.allAMax());
+  }
+
+  /** FW-aware Y-axis default: UserInfo[0] on all-AMax systems, else PSD. */
+  defaultYAxis(): AxisSource {
+    return defaultYAxisSource(this.digitizerService.allAMax());
+  }
 
   /** Pretty label for an `AxisSource` value (used in dropdown options). */
   axisLabel(src: AxisSource): string {
@@ -454,7 +465,7 @@ export class SetupTabComponent {
     const patch: Partial<SetupConfig> = { histogramType: value };
     if (value === '2d') {
       if (!this.config.xAxis) patch.xAxis = 'energy';
-      if (!this.config.yAxis) patch.yAxis = 'psd';
+      if (!this.config.yAxis) patch.yAxis = this.defaultYAxis();
     }
     this.emitConfigChange(patch);
   }
@@ -500,7 +511,7 @@ export class SetupTabComponent {
   }
 
   yAxisOrDefault(): AxisSource {
-    return this.config.yAxis ?? 'psd';
+    return this.config.yAxis ?? this.defaultYAxis();
   }
 
   /** Resolve a saved view (or undefined) against the axis defaults so the
