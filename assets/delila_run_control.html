@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DELILA — RUN CONTROL</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  background: #0B0B0B;
+  font-family: Helvetica, Arial, sans-serif;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+.sheet {
+  background: #F2F0EA;
+  width: 100%;
+  max-width: 920px;
+  overflow: hidden;
+}
+.topbar {
+  background: #111111;
+  padding: 16px 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.mark { display: flex; gap: 3px; }
+.mark div { width: 7px; height: 30px; background: #F2F0EA; }
+.mark div.sig { background: #E84E1B; }
+.mono { font-family: 'Courier New', monospace; }
+.metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  border-bottom: 2px solid #111111;
+}
+.metric { padding: 20px 24px; border-right: 1px solid #C9C6BC; }
+.metric:last-child { border-right: none; background: #E84E1B; }
+.mlabel { font-size: 11px; letter-spacing: 2px; color: #8C8A84; font-weight: 700; }
+.metric:last-child .mlabel { color: #5A1B08; }
+.mvalue { font-size: 32px; font-weight: 700; color: #111111; font-family: 'Courier New', monospace; }
+.mvalue .unit { font-size: 14px; }
+.section { padding: 18px 24px; }
+.shead {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 10px;
+}
+.slabel { font-size: 11px; letter-spacing: 2px; color: #111111; font-weight: 700; }
+.smeta { font-size: 11px; letter-spacing: 1px; color: #8C8A84; }
+#bars {
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  height: 80px;
+  border-bottom: 2px solid #111111;
+}
+#bars div { flex: 1; background: #111111; }
+#bars div.now { background: #E84E1B; }
+#chgrid {
+  display: grid;
+  grid-template-columns: repeat(8, minmax(0, 1fr));
+  gap: 8px;
+}
+.ch {
+  height: 48px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  font-family: 'Courier New', monospace;
+  font-size: 12px;
+  font-weight: 700;
+  background: #111111;
+  color: #F2F0EA;
+}
+.ch.idle { background: none; border: 2px solid #111111; color: #111111; }
+.ch .r { font-size: 11px; font-weight: 400; color: #E84E1B; }
+.ch.idle .r { color: #8C8A84; }
+.foot { background: #111111; padding: 16px 24px; }
+.flabel { font-size: 11px; letter-spacing: 2px; color: #8C8A96; font-weight: 700; margin-bottom: 8px; }
+#log { font-family: 'Courier New', monospace; font-size: 12px; line-height: 1.8; color: #9FE1CB; min-height: 88px; }
+.fbottom {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid #3A3A46;
+  font-size: 11px;
+  letter-spacing: 1.5px;
+}
+.fbottom .l { color: #8C8A96; }
+.fbottom .r { color: #E84E1B; font-weight: 700; }
+</style>
+</head>
+<body>
+<div class="sheet">
+
+<div class="topbar">
+  <div style="display:flex;align-items:center;gap:14px;">
+    <div class="mark"><div></div><div></div><div class="sig"></div><div></div></div>
+    <span style="color:#F2F0EA;font-size:17px;font-weight:700;letter-spacing:6px;">DELILA</span>
+    <span style="color:#8C8A96;font-size:11px;letter-spacing:2px;">デリラ / RUN CONTROL</span>
+  </div>
+  <div style="display:flex;align-items:center;gap:12px;">
+    <span class="mono" style="color:#8C8A96;font-size:12px;letter-spacing:1px;">RUN 004217</span>
+    <span id="stled" style="width:11px;height:11px;background:#E84E1B;display:inline-block;"></span>
+    <span style="color:#E84E1B;font-size:12px;font-weight:700;letter-spacing:2px;">ACQUIRING</span>
+  </div>
+</div>
+
+<div class="metrics">
+  <div class="metric">
+    <div class="mlabel">EVENT RATE</div>
+    <div class="mvalue"><span id="rate">48.2</span><span class="unit">M/s</span></div>
+  </div>
+  <div class="metric">
+    <div class="mlabel">THROUGHPUT</div>
+    <div class="mvalue"><span id="tput">1.93</span><span class="unit">GB/s</span></div>
+  </div>
+  <div class="metric">
+    <div class="mlabel">RUN TIME</div>
+    <div class="mvalue" id="clock">06:42:17</div>
+  </div>
+  <div class="metric">
+    <div class="mlabel">DEAD TIME</div>
+    <div class="mvalue">0.00<span class="unit">%</span></div>
+  </div>
+</div>
+
+<div class="section">
+  <div class="shead">
+    <span class="slabel">RATE HISTORY</span>
+    <span class="smeta mono">&Delta;t = 1 s</span>
+  </div>
+  <div id="bars"></div>
+</div>
+
+<div class="section" style="padding-top:4px;">
+  <div class="shead">
+    <span class="slabel">DIGITIZERS 00&mdash;15</span>
+    <span class="smeta">&#9632; LIVE&nbsp;&nbsp;&#9633; IDLE</span>
+  </div>
+  <div id="chgrid"></div>
+</div>
+
+<div class="foot">
+  <div class="flabel">EVENT LOG</div>
+  <div id="log"></div>
+  <div class="fbottom">
+    <span class="l">EXTREME LIGHT INFRASTRUCTURE&reg; / M&Abreve;GURELE, RO</span>
+    <span class="r">SYSTEM 01</span>
+  </div>
+</div>
+
+</div>
+<script>
+var bars = document.getElementById('bars'), hist = [];
+for (var i = 0; i < 72; i++) hist.push(44 + Math.random() * 10);
+
+function drawBars() {
+  bars.innerHTML = '';
+  for (var i = 0; i < hist.length; i++) {
+    var d = document.createElement('div');
+    if (i === hist.length - 1) d.className = 'now';
+    d.style.height = Math.round((hist[i] - 38) / 18 * 80) + 'px';
+    bars.appendChild(d);
+  }
+}
+
+var grid = document.getElementById('chgrid'), cells = [];
+for (var c = 0; c < 16; c++) {
+  var idle = (c === 9);
+  var el = document.createElement('div');
+  el.className = 'ch' + (idle ? ' idle' : '');
+  el.textContent = ('0' + c).slice(-2);
+  var r = document.createElement('div');
+  r.className = 'r';
+  r.textContent = idle ? '--' : '3.0M';
+  el.appendChild(r);
+  grid.appendChild(el);
+  cells.push({ r: r, idle: idle });
+}
+
+var t = 6 * 3600 + 42 * 60 + 17;
+function pad(n) { return ('0' + n).slice(-2); }
+
+var log = document.getElementById('log'), lines = [], evt = 831244902113;
+function addLog() {
+  var h = Math.floor(t / 3600), m = Math.floor(t % 3600 / 60), s = t % 60;
+  evt += Math.round(47000000 + Math.random() * 3000000);
+  lines.unshift(
+    pad(h) + ':' + pad(m) + ':' + pad(s) +
+    '  EVT ' + evt.toExponential(3).replace('+', '') +
+    '  SYNC OK  DRIFT ' + (Math.random() * 0.8).toFixed(2) + 'ns'
+  );
+  if (lines.length > 4) lines.pop();
+  log.innerHTML = lines.join('<br>');
+}
+addLog();
+drawBars();
+
+var led = document.getElementById('stled'), on = true;
+setInterval(function () {
+  t++;
+  var h = Math.floor(t / 3600), m = Math.floor(t % 3600 / 60), s = t % 60;
+  document.getElementById('clock').textContent = pad(h) + ':' + pad(m) + ':' + pad(s);
+  var r = 47 + Math.random() * 4;
+  document.getElementById('rate').textContent = r.toFixed(1);
+  document.getElementById('tput').textContent = (r * 0.0405).toFixed(2);
+  hist.push(r);
+  hist.shift();
+  drawBars();
+  for (var i = 0; i < cells.length; i++) {
+    if (!cells[i].idle) cells[i].r.textContent = (r / 15 + Math.random() * 0.4 - 0.2).toFixed(1) + 'M';
+  }
+  if (t % 3 === 0) addLog();
+  on = !on;
+  led.style.opacity = on ? '1' : '0.25';
+}, 1000);
+</script>
+</body>
+</html>
