@@ -59,6 +59,7 @@ fn load_config(
     Vec<(u32, PathBuf)>,
     Option<InfluxDbConfig>,
     Option<MongoConfig>,
+    Option<delila_rs::config::BacklogAutostopConfig>,
 ) {
     // Try to load from config file
     if let Ok(config) = Config::load(config_file) {
@@ -97,6 +98,7 @@ fn load_config(
                 .reset_timeout_ms
                 .unwrap_or(defaults.reset_timeout_ms),
             elog: config.operator.elog,
+            drain_stop_timeout_secs: config.operator.drain_stop_timeout_secs,
         };
         // Load emulator settings from config
         let emulator_settings = if let Ok(settings) = config.settings.get_settings() {
@@ -115,6 +117,7 @@ fn load_config(
             .collect();
         let influxdb_config = config.operator.influxdb;
         let mongodb_config = config.operator.mongodb;
+        let backlog_autostop_config = config.operator.backlog_autostop;
         return (
             components,
             operator_config,
@@ -122,6 +125,7 @@ fn load_config(
             config_files,
             influxdb_config,
             mongodb_config,
+            backlog_autostop_config,
         );
     }
 
@@ -189,6 +193,7 @@ fn load_config(
         OperatorConfig::default(),
         EmulatorSettings::default(),
         Vec::new(),
+        None,
         None,
         None,
     )
@@ -315,6 +320,7 @@ async fn main() -> anyhow::Result<()> {
         config_files,
         influxdb_config,
         mongodb_toml,
+        backlog_autostop_config,
     ) = load_config(&args.operator.common.config_file);
     // Resolve MongoDB settings: CLI flags win, fall back to TOML `[operator.mongodb]`.
     let resolved_mongo_uri: Option<String> = args
@@ -402,6 +408,14 @@ async fn main() -> anyhow::Result<()> {
         let state = app_state.clone();
         tokio::spawn(async move {
             delila_rs::operator::influxdb::run_writer(influxdb_config, state).await;
+        });
+    }
+
+    // Backlog autostop watcher (TODO 68) — opt-in via [operator.backlog_autostop]
+    if let Some(backlog_config) = backlog_autostop_config {
+        let state = app_state.clone();
+        tokio::spawn(async move {
+            delila_rs::operator::backlog_watch::run_watcher(backlog_config, state).await;
         });
     }
 

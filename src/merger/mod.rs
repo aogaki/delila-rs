@@ -33,6 +33,10 @@ pub struct MergerConfig {
     pub pub_address: String,
     /// ZMQ bind address for commands (e.g., "tcp://*:5570")
     pub command_address: String,
+    /// Soft backlog watermark in bytes (0 = disabled). See TODO 68.
+    pub backlog_soft_limit_bytes: u64,
+    /// Hard backlog watermark in bytes (0 = disabled). See TODO 68.
+    pub backlog_hard_limit_bytes: u64,
 }
 
 impl Default for MergerConfig {
@@ -41,6 +45,8 @@ impl Default for MergerConfig {
             sub_addresses: vec!["tcp://localhost:5555".to_string()],
             pub_address: "tcp://*:5556".to_string(),
             command_address: "tcp://*:5570".to_string(),
+            backlog_soft_limit_bytes: 4096 * 1024 * 1024,
+            backlog_hard_limit_bytes: 0,
         }
     }
 }
@@ -200,14 +206,37 @@ struct MergerExtState {
     source_stats: DashMap<u32, SourceStats>,
     // Hot-path counters (lock-free)
     atomic_stats: AtomicStats,
+    // Backlog gauge for the receiver→sender unbounded channel (TODO 68).
+    // Lifetime counters: NOT cleared by `clear()` — channel contents straddle
+    // run boundaries; only the peak is re-based per run (`reset_peak`).
+    queue: crate::common::queue_accounting::QueueAccounting,
+    /// Soft backlog watermark in bytes (0 = disabled), from config.
+    backlog_soft_limit_bytes: u64,
+    /// Hard backlog watermark in bytes (0 = disabled), from config.
+    backlog_hard_limit_bytes: u64,
+    /// Last `backlog_level` logged by the periodic tick (spam control).
+    last_logged_level: std::sync::atomic::AtomicU8,
 }
 
 impl MergerExtState {
-    fn new() -> Self {
+    fn new(backlog_soft_limit_bytes: u64, backlog_hard_limit_bytes: u64) -> Self {
         Self {
             source_stats: DashMap::new(),
             atomic_stats: AtomicStats::new(),
+            queue: crate::common::queue_accounting::QueueAccounting::new(),
+            backlog_soft_limit_bytes,
+            backlog_hard_limit_bytes,
+            last_logged_level: std::sync::atomic::AtomicU8::new(0),
         }
+    }
+
+    /// Current backlog severity (0/1/2) for the channel gauge.
+    fn backlog_level(&self) -> u8 {
+        crate::common::queue_accounting::backlog_level(
+            self.queue.depth_bytes(),
+            self.backlog_soft_limit_bytes,
+            self.backlog_hard_limit_bytes,
+        )
     }
 
     fn get_stats(&self) -> MergerStats {
@@ -245,12 +274,15 @@ impl CommandHandlerExt for MergerCommandExt {
     fn on_start(&mut self, _run_number: u32) -> Result<(), String> {
         self.ext_state.clear();
         self.ext_state.atomic_stats.clear();
+        // Per-run peak window; the cumulative gauge itself must survive.
+        self.ext_state.queue.reset_peak();
         Ok(())
     }
 
     fn on_reset(&mut self) -> Result<(), String> {
         self.ext_state.clear();
         self.ext_state.atomic_stats.clear();
+        self.ext_state.queue.reset_peak();
         Ok(())
     }
 
@@ -272,13 +304,16 @@ impl CommandHandlerExt for MergerCommandExt {
             // Merger forwards batches, so we report batch counts
             events_processed: stats.sent_batches,
             bytes_transferred: 0, // Merger doesn't track bytes
-            queue_size: 0,
+            queue_size: self.ext_state.queue.depth_items().min(u32::MAX as u64) as u32,
             queue_max: 0,
             event_rate: 0.0, // Will be calculated in Phase 2
             data_rate: 0.0,
             trigger_loss_count: 0,
             trigger_loss_rate: 0.0,
             channel_counts: None,
+            queue_bytes: self.ext_state.queue.depth_bytes(),
+            queue_bytes_peak: self.ext_state.queue.peak_bytes(),
+            backlog_level: self.ext_state.backlog_level(),
         })
     }
 }
@@ -296,10 +331,14 @@ impl Merger {
     /// Create a new merger with the given configuration
     pub fn new(config: MergerConfig) -> Self {
         let (state_tx, state_rx) = watch::channel(ComponentState::Idle);
+        let ext_state = Arc::new(MergerExtState::new(
+            config.backlog_soft_limit_bytes,
+            config.backlog_hard_limit_bytes,
+        ));
         Self {
             config,
             shared_state: Arc::new(tokio::sync::Mutex::new(ComponentSharedState::new())),
-            ext_state: Arc::new(MergerExtState::new()),
+            ext_state,
             state_rx,
             state_tx,
         }
@@ -399,8 +438,36 @@ impl Merger {
             .await
         });
 
-        // Wait for shutdown signal
-        let _ = shutdown.recv().await;
+        // Wait for shutdown, evaluating the backlog watermark every 10 s
+        // (TODO 68). Log only on level transitions: rise = warn, fall to 0 =
+        // info — at most one line per tick by construction.
+        let mut backlog_tick = tokio::time::interval(std::time::Duration::from_secs(10));
+        backlog_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                _ = shutdown.recv() => break,
+                _ = backlog_tick.tick() => {
+                    let ext = &self.ext_state;
+                    let level = ext.backlog_level();
+                    let last = ext.last_logged_level.swap(level, Ordering::Relaxed);
+                    if level > last {
+                        warn!(
+                            backlog_level = level,
+                            queue_bytes = ext.queue.depth_bytes(),
+                            queue_items = ext.queue.depth_items(),
+                            soft_limit_bytes = ext.backlog_soft_limit_bytes,
+                            hard_limit_bytes = ext.backlog_hard_limit_bytes,
+                            "Merger backlog watermark exceeded"
+                        );
+                    } else if level < last && level == 0 {
+                        info!(
+                            queue_bytes = ext.queue.depth_bytes(),
+                            "Merger backlog back below watermarks"
+                        );
+                    }
+                }
+            }
+        }
         info!("Merger received shutdown signal");
 
         // Wait for tasks to complete
@@ -542,8 +609,15 @@ impl Merger {
                                 continue;
                             }
 
-                            // Pass original Multipart directly — zero copy
+                            // Pass original Multipart directly — zero copy.
+                            // Gauge tracks physical channel occupancy (data,
+                            // EOS and heartbeats alike) — sum before the move,
+                            // undo if the send fails (TODO 68).
+                            let frame_bytes: u64 =
+                                multipart.0.iter().map(|m| m.len() as u64).sum();
+                            ext_state.queue.on_enqueue(frame_bytes);
                             if tx.send(multipart).is_err() {
+                                ext_state.queue.on_dequeue(frame_bytes);
                                 info!("Channel closed, receiver exiting");
                                 break;
                             }
@@ -602,7 +676,12 @@ impl Merger {
                     // On transition to Running, drain any stale data from channel
                     if current == ComponentState::Running {
                         let mut drained = 0u64;
-                        while rx.try_recv().is_ok() {
+                        while let Ok(stale) = rx.try_recv() {
+                            // Keep the backlog gauge honest: these items leave
+                            // the channel here, outside the normal recv path.
+                            ext_state
+                                .queue
+                                .on_dequeue(stale.0.iter().map(|m| m.len() as u64).sum());
                             drained += 1;
                         }
                         if drained > 0 {
@@ -615,6 +694,11 @@ impl Merger {
                 data = rx.recv() => {
                     match data {
                         Some(multipart) => {
+                            // Item left the channel — account regardless of
+                            // whether it is forwarded or Stop-tail discarded.
+                            ext_state
+                                .queue
+                                .on_dequeue(multipart.0.iter().map(|m| m.len() as u64).sum());
                             if !is_running {
                                 // EndOfStream is exempt from the Stop-tail
                                 // discard here too (same reasoning as the
@@ -714,6 +798,8 @@ mod tests {
             sub_addresses: vec!["tcp://localhost:7000".to_string()],
             pub_address: "tcp://*:7001".to_string(),
             command_address: "tcp://*:7002".to_string(),
+            backlog_soft_limit_bytes: 0,
+            backlog_hard_limit_bytes: 0,
         };
         assert_eq!(config.sub_addresses.len(), 1);
     }
@@ -814,7 +900,7 @@ mod tests {
 
     #[test]
     fn merger_ext_state_new() {
-        let state = MergerExtState::new();
+        let state = MergerExtState::new(0, 0);
         let stats = state.get_stats();
         assert_eq!(stats.received_batches, 0);
         assert_eq!(stats.sent_batches, 0);
@@ -823,7 +909,7 @@ mod tests {
 
     #[test]
     fn merger_ext_state_clear() {
-        let state = MergerExtState::new();
+        let state = MergerExtState::new(0, 0);
         state.source_stats.insert(0, SourceStats::default());
         state.source_stats.insert(1, SourceStats::default());
         assert_eq!(state.source_stats.len(), 2);
@@ -861,14 +947,14 @@ mod tests {
 
     #[test]
     fn merger_command_ext_component_name() {
-        let ext_state = Arc::new(MergerExtState::new());
+        let ext_state = Arc::new(MergerExtState::new(0, 0));
         let ext = MergerCommandExt { ext_state };
         assert_eq!(ext.component_name(), "Merger");
     }
 
     #[test]
     fn merger_command_ext_on_reset() {
-        let ext_state = Arc::new(MergerExtState::new());
+        let ext_state = Arc::new(MergerExtState::new(0, 0));
         ext_state.source_stats.insert(0, SourceStats::default());
 
         let mut ext = MergerCommandExt {
@@ -880,7 +966,7 @@ mod tests {
 
     #[test]
     fn merger_command_ext_status_details() {
-        let ext_state = Arc::new(MergerExtState::new());
+        let ext_state = Arc::new(MergerExtState::new(0, 0));
         ext_state.atomic_stats.record_received();
         ext_state.atomic_stats.record_sent();
 

@@ -1,0 +1,47 @@
+# DELILA DAQ Configuration - Backlog drain-first stop test (TODO 68)
+# Emulator source + artificially slowed Recorder writer:
+#   DELILA_TEST_WRITE_DELAY_MS grows a real backlog, the tiny watermarks
+#   below trip soft (1 MB) then hard (2 MB), and /api/stop_drain (or the
+#   autostop watcher) must save every queued byte to disk.
+# Driven by scripts/backlog_drain_test.sh — not for production.
+
+[operator]
+experiment_name = "BacklogTest"
+port = 9092
+drain_stop_timeout_secs = 60
+
+[network]
+[[network.sources]]
+id = 0
+name = "emu-0"
+type = "emulator"
+bind = "tcp://*:6555"
+command = "tcp://*:6560"
+pipeline_order = 1
+
+[network.merger]
+publish = "tcp://*:6557"
+command = "tcp://*:6570"
+pipeline_order = 2
+backlog_soft_limit_mb = 1
+backlog_hard_limit_mb = 0
+
+[network.recorder]
+subscribe = "tcp://localhost:6557"
+command = "tcp://*:6580"
+output_dir = "./data/backlog_test"
+pipeline_order = 3
+backlog_soft_limit_mb = 1
+backlog_hard_limit_mb = 2
+
+# Fast emulator so the slowed writer backs up in seconds:
+# 2000 events × 20 ms ≈ 100k ev/s, ~3.5 MB/s into a ~0.35 MB/s writer.
+[settings]
+source = "file"
+
+[settings.file]
+events_per_batch = 2000
+batch_interval_ms = 20
+num_modules = 2
+channels_per_module = 16
+enable_waveform = false

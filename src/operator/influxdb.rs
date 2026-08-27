@@ -39,12 +39,6 @@ pub async fn run_writer(config: InfluxDbConfig, state: Arc<AppState>) {
         let mut lines = Vec::new();
 
         for (comp, status) in state.components.iter().zip(statuses.iter()) {
-            // Only process source components (Readers) that have channel_counts
-            let source_id = match comp.source_id {
-                Some(id) => id,
-                None => continue,
-            };
-
             if !status.online {
                 continue;
             }
@@ -52,6 +46,25 @@ pub async fn run_writer(config: InfluxDbConfig, state: Arc<AppState>) {
             let metrics = match &status.metrics {
                 Some(m) => m,
                 None => continue,
+            };
+
+            // Non-source components (Merger/Recorder/...): export the backlog
+            // gauge (TODO 68) — before this, their metrics never reached
+            // Grafana at all.
+            let source_id = match comp.source_id {
+                Some(id) => id,
+                None => {
+                    lines.push(format!(
+                        "backlog,component={} queue_bytes={}u,queue_bytes_peak={}u,queue_items={}u,backlog_level={}u,events_processed={}u",
+                        comp.name.replace(' ', "\\ "),
+                        metrics.queue_bytes,
+                        metrics.queue_bytes_peak,
+                        metrics.queue_size,
+                        metrics.backlog_level,
+                        metrics.events_processed,
+                    ));
+                    continue;
+                }
             };
 
             // System-level metrics for this source

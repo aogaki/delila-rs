@@ -37,7 +37,7 @@ async fn main() -> anyhow::Result<()> {
     let config = Config::load(&args.recorder.common.config_file)?;
     info!(config_file = %args.recorder.common.config_file, "Loaded configuration");
 
-    let (subscribe_addr, command_addr, out_dir, max_size_mb, max_duration_sec) =
+    let (subscribe_addr, command_addr, out_dir, max_size_mb, max_duration_sec, soft_mb, hard_mb) =
         if let Some(ref recorder) = config.network.recorder {
             (
                 recorder.subscribe.clone(),
@@ -48,6 +48,8 @@ async fn main() -> anyhow::Result<()> {
                 recorder.output_dir.clone(),
                 recorder.max_file_size_mb,
                 recorder.max_file_duration_sec,
+                recorder.backlog_soft_limit_mb,
+                recorder.backlog_hard_limit_mb,
             )
         } else {
             (
@@ -56,6 +58,8 @@ async fn main() -> anyhow::Result<()> {
                 "./data".to_string(),
                 1024,
                 600,
+                4096,
+                0,
             )
         };
 
@@ -66,6 +70,9 @@ async fn main() -> anyhow::Result<()> {
         output_dir: PathBuf::from(args.recorder.output_dir.unwrap_or(out_dir)),
         max_file_size: max_size_mb * 1024 * 1024,
         max_file_duration_secs: max_duration_sec,
+        // MB → bytes at the bin boundary, like max_file_size (TODO 68).
+        backlog_soft_limit_bytes: soft_mb * 1024 * 1024,
+        backlog_hard_limit_bytes: hard_mb * 1024 * 1024,
     };
 
     // Setup shutdown handling

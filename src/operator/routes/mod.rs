@@ -5,7 +5,7 @@ mod emulator;
 mod event_builder;
 mod monitor_layout;
 mod run;
-mod status;
+pub(crate) mod status;
 mod tuneup;
 
 use serde::{Deserialize, Serialize};
@@ -64,7 +64,7 @@ use run::{
     add_run_note, export_runs, get_next_run_number, get_run, get_run_config_snapshot,
     get_run_history,
 };
-use status::{arm, configure, get_status, reset, run_start, start, stop};
+use status::{arm, configure, get_status, reset, run_start, start, stop, stop_drain};
 use tuneup::{tuneup_apply, tuneup_start, tuneup_stop};
 
 /// Tune Up runtime state, packing the previous `tuneup_mode: RwLock<bool>` +
@@ -313,6 +313,7 @@ impl AppState {
         status::arm,
         status::start,
         status::stop,
+        status::stop_drain,
         status::reset,
         status::run_start,
         digitizer::list_digitizers,
@@ -520,6 +521,7 @@ impl RouterBuilder {
             .route("/api/arm", post(arm))
             .route("/api/start", post(start))
             .route("/api/stop", post(stop))
+            .route("/api/stop_drain", post(stop_drain))
             .route("/api/reset", post(reset))
             // Two-phase synchronized run control
             .route("/api/run/start", post(run_start))

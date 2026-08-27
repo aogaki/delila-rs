@@ -33,6 +33,11 @@ export interface ComponentMetrics {
   event_rate: number;
   trigger_loss_count?: number;
   trigger_loss_rate?: number;
+  // Backlog gauge for Merger/Recorder unbounded channels (TODO 68)
+  queue_bytes?: number;
+  queue_bytes_peak?: number;
+  /** 0 = ok, 1 = soft watermark exceeded, 2 = hard (drain-first stop) */
+  backlog_level?: number;
 }
 
 // Status of a single component

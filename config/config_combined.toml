@@ -9,6 +9,15 @@
 #   Remote: ./target/release/node_agent -f config/agent_remote.toml --start-all
 
 [operator]
+# Drain-first stop (TODO 68): POST /api/stop_drain stops the sources first,
+# waits until Merger/Recorder have written their backlog (timeout below),
+# then stops them — a plain /api/stop discards the backlog as Stop tail.
+#drain_stop_timeout_secs = 60
+# Opt-in autostop: section present = the Operator polls status and answers
+# backlog_level == 2 with a drain-first stop. Needs backlog_hard_limit_mb > 0
+# on the component too.
+#[operator.backlog_autostop]
+#poll_interval_secs = 2
 experiment_name = "DELILA_Combined"
 port = 9090
 
@@ -42,6 +51,12 @@ pipeline_order = 1
 publish = "tcp://*:5557"
 command = "tcp://*:5570"
 pipeline_order = 2
+# Backlog watermarks for the unbounded receiver→sender channel (TODO 68).
+# soft: warn + backlog_level=1. hard: backlog_level=2 → drain-first stop if
+# [operator.backlog_autostop] is also set (double opt-in). 0 = disabled.
+# Guideline: host RAM ÷ number of co-located DELILA components.
+#backlog_soft_limit_mb = 4096
+#backlog_hard_limit_mb = 0
 
 # Recorder (local)
 [network.recorder]
@@ -49,6 +64,10 @@ subscribe = "tcp://localhost:5557"
 command = "tcp://*:5580"
 output_dir = "./data"
 pipeline_order = 3
+# Backlog watermarks for the receiver→writer channel (TODO 68). Same
+# semantics as [network.merger]. 0 = disabled; soft defaults to 4096 MB.
+#backlog_soft_limit_mb = 4096
+#backlog_hard_limit_mb = 0
 
 # Monitor (local)
 [network.monitor]

@@ -41,6 +41,9 @@ pub use shutdown::{setup_shutdown, setup_shutdown_with_message, ShutdownReceiver
 
 // ZMQ socket initialization helpers (HWM=0 policy)
 pub mod zmq_helper;
+
+/// Byte/item accounting for unbounded inter-task channels (TODO 68).
+pub mod queue_accounting;
 pub use zmq_helper::{pub_no_hwm, sub_no_hwm};
 
 pub mod delila_schema;
@@ -95,6 +98,18 @@ pub struct ComponentMetrics {
     /// Only populated by Reader components; None for others.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel_counts: Option<Vec<u64>>,
+    /// Current backlog in the component's unbounded channel, in bytes
+    /// (TODO 68). Non-zero only for Merger/Recorder today.
+    #[serde(default)]
+    pub queue_bytes: u64,
+    /// High-water mark of `queue_bytes` since the current run started.
+    #[serde(default)]
+    pub queue_bytes_peak: u64,
+    /// Backlog severity vs the configured watermarks:
+    /// 0 = OK, 1 = soft limit exceeded, 2 = hard limit exceeded
+    /// (drain-first stop material). See `queue_accounting::backlog_level`.
+    #[serde(default)]
+    pub backlog_level: u8,
 }
 
 /// Flag bit definitions for event status

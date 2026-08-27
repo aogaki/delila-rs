@@ -3,13 +3,14 @@
 //! Provides HTTP endpoints to control DAQ components via ZeroMQ.
 //! Includes Swagger UI for API documentation.
 
+pub mod backlog_watch;
 mod client;
 pub mod command_ext;
 mod digitizer_repository;
 pub mod elog;
 mod event_builder_repository;
 pub mod influxdb;
-mod routes;
+pub(crate) mod routes;
 mod run_repository;
 
 pub use client::ComponentClient;
@@ -262,6 +263,9 @@ pub struct OperatorConfig {
     pub monitor_http_port: Option<u16>,
     /// ELOG configuration for auto-posting on run stop
     pub elog: Option<crate::config::ElogConfig>,
+    /// Timeout for the drain-wait phase of a drain-first stop, in seconds
+    /// (TODO 68).
+    pub drain_stop_timeout_secs: u64,
 }
 
 impl Default for OperatorConfig {
@@ -276,6 +280,7 @@ impl Default for OperatorConfig {
             web_ui_dir: None,
             monitor_http_port: None,
             elog: None,
+            drain_stop_timeout_secs: 60,
         }
     }
 }

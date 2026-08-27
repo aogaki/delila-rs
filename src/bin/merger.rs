@@ -57,6 +57,9 @@ async fn main() -> Result<()> {
         command_address: merger_net
             .command
             .unwrap_or_else(|| "tcp://*:5570".to_string()),
+        // MB → bytes at the bin boundary, like the recorder's max_file_size.
+        backlog_soft_limit_bytes: merger_net.backlog_soft_limit_mb * 1024 * 1024,
+        backlog_hard_limit_bytes: merger_net.backlog_hard_limit_mb * 1024 * 1024,
     };
 
     info!(?merger_config, "Starting merger");

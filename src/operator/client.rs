@@ -14,6 +14,35 @@ use super::{CommandResult, ComponentConfig, ComponentStatus};
 /// Timeout for ZMQ operations
 const ZMQ_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// What was still sitting in the pipeline when a drain wait gave up (TODO 68).
+#[derive(Debug, Clone)]
+pub struct DrainResidual {
+    /// Set when the wait aborted on an offline/Error component (vs timeout).
+    pub error: Option<String>,
+    /// (component name, queue_bytes, queue_items) with residual data.
+    pub per_component: Vec<(String, u64, u64)>,
+}
+
+impl DrainResidual {
+    /// Human-readable summary for logs / API responses / ELOG.
+    pub fn summary(&self) -> String {
+        let residual: Vec<String> = self
+            .per_component
+            .iter()
+            .map(|(name, bytes, items)| format!("{}: {} bytes / {} batches", name, bytes, items))
+            .collect();
+        let residual = if residual.is_empty() {
+            "no residual backlog observed".to_string()
+        } else {
+            residual.join("; ")
+        };
+        match &self.error {
+            Some(e) => format!("{} ({})", e, residual),
+            None => format!("drain timeout — {}", residual),
+        }
+    }
+}
+
 /// Client for communicating with DAQ components via ZMQ REQ/REP
 pub struct ComponentClient {
     context: Context,
@@ -449,6 +478,101 @@ impl ComponentClient {
 
             tokio::time::sleep(poll_interval).await;
         }
+    }
+
+    /// Wait until every component's backlog channel is drained (TODO 68).
+    ///
+    /// Success requires `queue_bytes == 0` AND an unchanged
+    /// `events_processed` on every component for three consecutive polls
+    /// (~600 ms of quiescence). The stability window is load-bearing, not
+    /// polish: (i) a Reader acks Stop *before* its ordered decode pipeline
+    /// flushes the final EOS, so the merger queue can read 0 while data is
+    /// still arriving; (ii) bytes in flight on the merger→recorder ZMQ hop
+    /// are invisible to both gauges. Both windows close once nothing has
+    /// moved for the full stability window with the sources stopped.
+    ///
+    /// Fails fast (like `wait_for_state`) if a component goes offline or
+    /// reports Error. On timeout, returns the residual backlog observed on
+    /// the last poll so the caller can report exactly what was lost.
+    pub async fn wait_for_backlog_drained(
+        &self,
+        configs: &[ComponentConfig],
+        timeout_ms: u64,
+    ) -> Result<(), DrainResidual> {
+        const STABLE_POLLS: u32 = 3;
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
+        let poll_interval = Duration::from_millis(200);
+
+        let mut stable_count: u32 = 0;
+        let mut prev_events: Option<Vec<u64>> = None;
+
+        loop {
+            let statuses = self.get_all_status(configs).await;
+
+            // Fail fast on offline/Error, mirroring wait_for_state.
+            let errors: Vec<String> = statuses
+                .iter()
+                .filter(|s| !s.online || s.state == ComponentState::Error)
+                .map(|s| {
+                    if !s.online {
+                        format!("{}: offline", s.name)
+                    } else {
+                        format!("{}: {}", s.name, s.error.as_deref().unwrap_or("error"))
+                    }
+                })
+                .collect();
+            if !errors.is_empty() {
+                return Err(DrainResidual {
+                    error: Some(format!(
+                        "Component errors during drain: {}",
+                        errors.join(", ")
+                    )),
+                    per_component: Self::residual_snapshot(&statuses),
+                });
+            }
+
+            let events: Vec<u64> = statuses
+                .iter()
+                .map(|s| s.metrics.as_ref().map_or(0, |m| m.events_processed))
+                .collect();
+            let all_empty = statuses
+                .iter()
+                .all(|s| s.metrics.as_ref().is_none_or(|m| m.queue_bytes == 0));
+            let quiescent = prev_events.as_ref() == Some(&events);
+
+            if all_empty && quiescent {
+                stable_count += 1;
+                if stable_count >= STABLE_POLLS {
+                    return Ok(());
+                }
+            } else {
+                stable_count = 0;
+            }
+            prev_events = Some(events);
+
+            if tokio::time::Instant::now() >= deadline {
+                return Err(DrainResidual {
+                    error: None,
+                    per_component: Self::residual_snapshot(&statuses),
+                });
+            }
+            tokio::time::sleep(poll_interval).await;
+        }
+    }
+
+    /// (name, queue_bytes, queue_items) for every component still holding data.
+    fn residual_snapshot(statuses: &[super::ComponentStatus]) -> Vec<(String, u64, u64)> {
+        statuses
+            .iter()
+            .filter_map(|s| {
+                let m = s.metrics.as_ref()?;
+                if m.queue_bytes > 0 || m.queue_size > 0 {
+                    Some((s.name.clone(), m.queue_bytes, m.queue_size as u64))
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     /// Check results and wait for all components to reach target state.

@@ -1067,6 +1067,9 @@ impl CommandHandlerExt for MonitorCommandExt {
             bytes_transferred: 0, // Monitor doesn't track bytes
             queue_size: (recv.saturating_sub(proc)) as u32,
             queue_max: 0,
+            queue_bytes: 0,
+            queue_bytes_peak: 0,
+            backlog_level: 0,
             event_rate: 0.0, // Will be calculated in Phase 2
             data_rate: 0.0,
             trigger_loss_count: 0,

@@ -56,6 +56,10 @@ pub struct RecorderConfig {
     pub max_file_size: u64,
     /// Maximum file duration in seconds (default: 600 = 10min)
     pub max_file_duration_secs: u64,
+    /// Soft backlog watermark in bytes (0 = disabled). See TODO 68.
+    pub backlog_soft_limit_bytes: u64,
+    /// Hard backlog watermark in bytes (0 = disabled). See TODO 68.
+    pub backlog_hard_limit_bytes: u64,
 }
 
 impl Default for RecorderConfig {
@@ -66,6 +70,8 @@ impl Default for RecorderConfig {
             output_dir: PathBuf::from("./data"),
             max_file_size: 1024 * 1024 * 1024, // 1GB
             max_file_duration_secs: 600,       // 10 minutes
+            backlog_soft_limit_bytes: 4096 * 1024 * 1024,
+            backlog_hard_limit_bytes: 0,
         }
     }
 }
@@ -103,6 +109,11 @@ struct AtomicStats {
     /// the operator SEES the failure instead of the run silently discarding
     /// the rest of its data (TODO 58 H7). Cleared on Configure/Reset.
     write_failed: AtomicBool,
+    /// Backlog gauge for the receiver→writer channel (TODO 68). Lifetime
+    /// counters — deliberately NOT touched by `reset()`: channel contents can
+    /// straddle run boundaries, and clearing while items sit in the channel
+    /// corrupts the derived depth. Only `queue.reset_peak()` runs per-run.
+    queue: crate::common::queue_accounting::QueueAccounting,
 }
 
 impl AtomicStats {
@@ -115,6 +126,7 @@ impl AtomicStats {
             files_written: AtomicU64::new(0),
             dropped_batches: AtomicU64::new(0),
             write_failed: AtomicBool::new(false),
+            queue: crate::common::queue_accounting::QueueAccounting::new(),
         }
     }
 
@@ -125,6 +137,8 @@ impl AtomicStats {
         self.written_bytes.store(0, Ordering::Relaxed);
         self.files_written.store(0, Ordering::Relaxed);
         self.dropped_batches.store(0, Ordering::Relaxed);
+        // `queue` intentionally NOT reset — see the field doc. Per-run peak:
+        self.queue.reset_peak();
     }
 
     fn snapshot(&self) -> RecorderStats {
@@ -201,6 +215,11 @@ impl RateTracker {
 }
 
 /// Commands for writer task
+///
+/// Backlog accounting (TODO 68) covers `WriteRawBatch` only: the control
+/// variants carry no payload bytes and are transient, so accounting them
+/// would add touch points for zero information. The drain-wait condition is
+/// about data bytes.
 enum WriterCommand {
     /// Write a batch as pre-serialized MsgPack bytes (zero-copy hot path)
     WriteRawBatch {
@@ -500,6 +519,9 @@ struct RecorderCommandExt {
     stats: Arc<AtomicStats>,
     rate_tracker: Arc<RateTracker>,
     writer_tx: std::sync::mpsc::Sender<WriterCommand>,
+    /// Backlog watermarks in bytes (0 = disabled), from config (TODO 68).
+    backlog_soft_limit_bytes: u64,
+    backlog_hard_limit_bytes: u64,
 }
 
 impl CommandHandlerExt for RecorderCommandExt {
@@ -567,13 +589,20 @@ impl CommandHandlerExt for RecorderCommandExt {
         Some(crate::common::ComponentMetrics {
             events_processed: stats.written_events,
             bytes_transferred: stats.total_bytes_written,
-            queue_size: 0,
+            queue_size: self.stats.queue.depth_items().min(u32::MAX as u64) as u32,
             queue_max: 0,
             event_rate: self.rate_tracker.get_rate(),
             data_rate: 0.0,
             trigger_loss_count: 0,
             trigger_loss_rate: 0.0,
             channel_counts: None,
+            queue_bytes: self.stats.queue.depth_bytes(),
+            queue_bytes_peak: self.stats.queue.peak_bytes(),
+            backlog_level: crate::common::queue_accounting::backlog_level(
+                self.stats.queue.depth_bytes(),
+                self.backlog_soft_limit_bytes,
+                self.backlog_hard_limit_bytes,
+            ),
         })
     }
 }
@@ -680,6 +709,8 @@ impl Recorder {
         let cmd_stats = self.stats.clone();
         let cmd_rate_tracker = self.rate_tracker.clone();
         let cmd_writer_tx = writer_tx.clone();
+        let cmd_backlog_soft = self.config.backlog_soft_limit_bytes;
+        let cmd_backlog_hard = self.config.backlog_hard_limit_bytes;
 
         let cmd_handle = tokio::spawn(async move {
             run_command_task(
@@ -692,6 +723,8 @@ impl Recorder {
                         stats: cmd_stats.clone(),
                         rate_tracker: cmd_rate_tracker.clone(),
                         writer_tx: cmd_writer_tx.clone(),
+                        backlog_soft_limit_bytes: cmd_backlog_soft,
+                        backlog_hard_limit_bytes: cmd_backlog_hard,
                     };
                     handle_command(state, tx, cmd, Some(&mut ext))
                 },
@@ -704,6 +737,7 @@ impl Recorder {
 
         // === Stats reporting loop ===
         let mut stats_interval = tokio::time::interval(Duration::from_secs(10));
+        let mut last_logged_level: u8 = 0;
         loop {
             tokio::select! {
                 biased;
@@ -714,6 +748,31 @@ impl Recorder {
                 }
 
                 _ = stats_interval.tick() => {
+                    // Backlog watermark check runs regardless of state — a
+                    // backlog persists across Stop (TODO 68). Log only on
+                    // level transitions (rise = warn, fall to 0 = info).
+                    let level = crate::common::queue_accounting::backlog_level(
+                        self.stats.queue.depth_bytes(),
+                        self.config.backlog_soft_limit_bytes,
+                        self.config.backlog_hard_limit_bytes,
+                    );
+                    let last = last_logged_level;
+                    last_logged_level = level;
+                    if level > last {
+                        warn!(
+                            backlog_level = level,
+                            queue_bytes = self.stats.queue.depth_bytes(),
+                            queue_items = self.stats.queue.depth_items(),
+                            soft_limit_bytes = self.config.backlog_soft_limit_bytes,
+                            hard_limit_bytes = self.config.backlog_hard_limit_bytes,
+                            "Recorder backlog watermark exceeded"
+                        );
+                    } else if level < last && level == 0 {
+                        info!(
+                            queue_bytes = self.stats.queue.depth_bytes(),
+                            "Recorder backlog back below watermarks"
+                        );
+                    }
                     if *self.state_rx.borrow() == ComponentState::Running {
                         let stats = self.stats.snapshot();
                         info!(
@@ -722,6 +781,7 @@ impl Recorder {
                             bytes_mb = stats.total_bytes_written as f64 / 1_000_000.0,
                             files = stats.files_written,
                             dropped = stats.dropped_batches,
+                            queue_bytes = self.stats.queue.depth_bytes(),
                             "Recording progress"
                         );
                     }
@@ -865,11 +925,16 @@ impl Recorder {
                                         stats.received_batches.fetch_add(1, Ordering::Relaxed);
                                         stats.received_events.fetch_add(event_count, Ordering::Relaxed);
 
-                                        // Pass raw bytes to writer (no deserialize/reserialize)
+                                        // Pass raw bytes to writer (no deserialize/reserialize).
+                                        // Backlog gauge (TODO 68): account before
+                                        // the send, undo if the channel is gone.
+                                        let batch_len = batch_bytes.len() as u64;
+                                        stats.queue.on_enqueue(batch_len);
                                         if tx.send(WriterCommand::WriteRawBatch {
                                             data: batch_bytes.to_vec(),
                                             event_count,
                                         }).is_err() {
+                                            stats.queue.on_dequeue(batch_len);
                                             info!("Channel closed, receiver exiting");
                                             break;
                                         }
@@ -919,6 +984,17 @@ impl Recorder {
         // Kept for the write-failure latch: FileWriter takes ownership of the
         // shared stats Arc below.
         let stats_flag = Arc::clone(&stats);
+        // TODO 68 E2E test hook — never silent when active.
+        let test_write_delay_ms: Option<u64> = std::env::var("DELILA_TEST_WRITE_DELAY_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|&ms| ms > 0);
+        if let Some(ms) = test_write_delay_ms {
+            warn!(
+                delay_ms = ms,
+                "TEST HOOK ACTIVE: artificial write delay per batch"
+            );
+        }
         let mut writer = FileWriter::new(config, stats);
         let mut eos_received = false;
         let mut current_run_number: u32 = 0;
@@ -928,6 +1004,11 @@ impl Recorder {
             match rx.recv_timeout(Duration::from_millis(100)) {
                 Ok(cmd) => match cmd {
                     WriterCommand::WriteRawBatch { data, event_count } => {
+                        // Test hook (TODO 68 E2E): artificial write latency to
+                        // grow a real backlog. Env-gated; loud at startup.
+                        if let Some(delay_ms) = test_write_delay_ms {
+                            std::thread::sleep(Duration::from_millis(delay_ms));
+                        }
                         if let Err(e) = writer.write_raw_batch(&data, event_count) {
                             // Disk full / I/O error: latch Error so the operator
                             // sees it — otherwise the rest of the run is silently
@@ -935,6 +1016,11 @@ impl Recorder {
                             error!(error = %e, "Failed to write batch — latching Error state");
                             stats_flag.write_failed.store(true, Ordering::Relaxed);
                         }
+                        // Dequeue only after the write returned (success or
+                        // error): queue_bytes == 0 then means "handed to the
+                        // BufWriter", closing the one-batch race the drain
+                        // wait would otherwise have (TODO 68).
+                        stats_flag.queue.on_dequeue(data.len() as u64);
                     }
                     WriterCommand::EndOfStream {
                         source_id,

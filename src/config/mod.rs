@@ -82,6 +82,18 @@ pub struct OperatorFileConfig {
     /// InfluxDB configuration for Grafana monitoring
     #[serde(default)]
     pub influxdb: Option<InfluxDbConfig>,
+    /// Timeout for the drain-wait phase of a drain-first stop, in seconds
+    /// (TODO 68). Used by `POST /api/stop_drain` and the backlog watcher.
+    /// On timeout the residual backlog is counted, reported, and the stop is
+    /// forced anyway (run status = Error).
+    #[serde(default = "default_drain_stop_timeout_secs")]
+    pub drain_stop_timeout_secs: u64,
+    /// Opt-in backlog autostop watcher (TODO 68). Section present = the
+    /// Operator polls component status and answers `backlog_level == 2`
+    /// with a drain-first stop. Components must ALSO set
+    /// `backlog_hard_limit_mb > 0` (double opt-in).
+    #[serde(default)]
+    pub backlog_autostop: Option<BacklogAutostopConfig>,
     /// ELOG electronic logbook configuration
     #[serde(default)]
     pub elog: Option<ElogConfig>,
@@ -157,6 +169,8 @@ impl Default for OperatorFileConfig {
             start_timeout_ms: None,
             reset_timeout_ms: None,
             influxdb: None,
+            drain_stop_timeout_secs: default_drain_stop_timeout_secs(),
+            backlog_autostop: None,
             elog: None,
             mongodb: None,
         }
@@ -496,6 +510,22 @@ impl SourceNetworkConfig {
     }
 }
 
+/// Backlog autostop watcher configuration (TODO 68, opt-in).
+#[derive(Debug, Clone, Deserialize)]
+pub struct BacklogAutostopConfig {
+    /// Status poll interval in seconds (default: 2)
+    #[serde(default = "default_backlog_poll_interval_secs")]
+    pub poll_interval_secs: u64,
+}
+
+fn default_backlog_poll_interval_secs() -> u64 {
+    2
+}
+
+fn default_drain_stop_timeout_secs() -> u64 {
+    60
+}
+
 /// Merger network configuration
 #[derive(Debug, Clone, Deserialize)]
 pub struct MergerNetworkConfig {
@@ -514,6 +544,21 @@ pub struct MergerNetworkConfig {
     /// Pipeline order for Start/Stop sequencing (default: 2)
     #[serde(default = "default_merger_pipeline_order")]
     pub pipeline_order: u32,
+
+    /// Soft backlog watermark for this component's unbounded channel, in MB
+    /// (TODO 68). Crossing it logs a warning and sets `backlog_level = 1` in
+    /// the status metrics. `0` disables the threshold.
+    /// Guideline: host RAM ÷ number of co-located DELILA components.
+    #[serde(default = "default_backlog_soft_limit_mb")]
+    pub backlog_soft_limit_mb: u64,
+
+    /// Hard backlog watermark in MB (TODO 68). Crossing it sets
+    /// `backlog_level = 2`, which the Operator's opt-in backlog watcher
+    /// (`[operator.backlog_autostop]`) answers with a drain-first stop.
+    /// `0` (default) disables the threshold — autostop needs BOTH this and
+    /// the operator section (double opt-in).
+    #[serde(default)]
+    pub backlog_hard_limit_mb: u64,
 }
 
 fn default_merger_pipeline_order() -> u32 {
@@ -545,6 +590,25 @@ pub struct RecorderNetworkConfig {
     /// Pipeline order for Start/Stop sequencing (default: 3)
     #[serde(default = "default_sink_pipeline_order")]
     pub pipeline_order: u32,
+
+    /// Soft backlog watermark for this component's unbounded channel, in MB
+    /// (TODO 68). Crossing it logs a warning and sets `backlog_level = 1` in
+    /// the status metrics. `0` disables the threshold.
+    /// Guideline: host RAM ÷ number of co-located DELILA components.
+    #[serde(default = "default_backlog_soft_limit_mb")]
+    pub backlog_soft_limit_mb: u64,
+
+    /// Hard backlog watermark in MB (TODO 68). Crossing it sets
+    /// `backlog_level = 2`, which the Operator's opt-in backlog watcher
+    /// (`[operator.backlog_autostop]`) answers with a drain-first stop.
+    /// `0` (default) disables the threshold — autostop needs BOTH this and
+    /// the operator section (double opt-in).
+    #[serde(default)]
+    pub backlog_hard_limit_mb: u64,
+}
+
+fn default_backlog_soft_limit_mb() -> u64 {
+    4096 // 4 GiB — guideline: host RAM ÷ co-located DELILA components
 }
 
 fn default_output_dir() -> String {

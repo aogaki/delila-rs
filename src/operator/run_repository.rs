@@ -84,6 +84,10 @@ pub struct RunDocument {
     /// Append-only notes (logbook style)
     #[serde(default)]
     pub notes: Vec<RunNote>,
+    /// Why the run ended, when it ended abnormally (TODO 68 drain-first stop:
+    /// backlog autostop reason and/or drain residual). None for a plain stop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<String>,
 }
 
 /// Current run info (in-memory, for API responses)
@@ -191,6 +195,7 @@ impl RunRepository {
             config_snapshot,
             errors: Vec::new(),
             notes: Vec::new(),
+            stop_reason: None,
         };
 
         self.collection.insert_one(&doc).await?;
@@ -207,6 +212,7 @@ impl RunRepository {
         exp_name: &str,
         status: RunStatus,
         stats: RunStats,
+        stop_reason: Option<String>,
     ) -> Result<(), RepositoryError> {
         let now_ms = Utc::now().timestamp_millis();
 
@@ -223,17 +229,19 @@ impl RunRepository {
 
         let duration = ((now_ms - run_doc.start_time) / 1000) as i32;
 
+        let mut set_doc = doc! {
+            "end_time": now_ms,
+            "duration_secs": duration,
+            "status": mongodb::bson::to_bson(&status).expect("RunStatus serializes to BSON"),
+            "stats": mongodb::bson::to_bson(&stats).expect("RunStats serializes to BSON"),
+        };
+        if let Some(reason) = stop_reason {
+            set_doc.insert("stop_reason", reason);
+        }
         self.collection
             .update_one(
                 doc! { "run_number": run_number, "exp_name": exp_name, "status": "running" },
-                doc! {
-                    "$set": {
-                        "end_time": now_ms,
-                        "duration_secs": duration,
-                        "status": mongodb::bson::to_bson(&status).expect("RunStatus serializes to BSON"),
-                        "stats": mongodb::bson::to_bson(&stats).expect("RunStats serializes to BSON"),
-                    }
-                },
+                doc! { "$set": set_doc },
             )
             .await?;
 
@@ -532,6 +540,7 @@ mod tests {
             config_snapshot: None,
             errors: Vec::new(),
             notes: Vec::new(),
+            stop_reason: None,
         };
 
         let info = CurrentRunInfo::from_document(&doc);

@@ -499,16 +499,31 @@ pub(super) async fn stop(State(state): State<Arc<AppState>>) -> (StatusCode, Jso
             )),
         );
     }
-    // Get current run info before stopping
-    let current_run = state.current_run.read().await.clone();
-
     let results = state.client.stop_all(&state.components).await;
 
     let mut response = ApiResponse::success("Stop command sent").with_results(results);
+    finish_run_bookkeeping(&state, &mut response, None).await;
 
-    // Always record run end and clear current_run, even if some components
-    // failed to stop. Stop is best-effort — partial failure must not leave
-    // the UI thinking the run is still active.
+    let status = if response.success {
+        StatusCode::OK
+    } else {
+        StatusCode::BAD_REQUEST
+    };
+
+    (status, Json(response))
+}
+
+/// Run-end bookkeeping shared by `/api/stop` and the drain-first stop
+/// (TODO 68): Mongo run record, ELOG post, clearing `current_run`. Always
+/// runs to completion even after partial component failures — the UI must
+/// not think the run is still active.
+async fn finish_run_bookkeeping(
+    state: &Arc<AppState>,
+    response: &mut ApiResponse,
+    stop_reason: Option<&str>,
+) {
+    let current_run = state.current_run.read().await.clone();
+
     if let (Some(ref repo), Some(mut run_info)) = (&state.run_repo, current_run) {
         // Calculate final elapsed time
         let now_ms = chrono::Utc::now().timestamp_millis();
@@ -559,6 +574,7 @@ pub(super) async fn stop(State(state): State<Arc<AppState>>) -> (StatusCode, Jso
                 &run_info.exp_name,
                 final_status,
                 stats.clone(),
+                stop_reason.map(str::to_owned),
             )
             .await
         {
@@ -576,7 +592,10 @@ pub(super) async fn stop(State(state): State<Arc<AppState>>) -> (StatusCode, Jso
             let elog_config = elog_config.clone();
             let run_number = run_info.run_number;
             let exp_name = run_info.exp_name.clone();
-            let comment = run_info.comment.clone();
+            let comment = match stop_reason {
+                Some(reason) => format!("{} [stop: {}]", run_info.comment, reason),
+                None => run_info.comment.clone(),
+            };
             let elapsed = run_info.elapsed_secs;
             let stats = stats.clone();
             tokio::spawn(async move {
@@ -595,14 +614,117 @@ pub(super) async fn stop(State(state): State<Arc<AppState>>) -> (StatusCode, Jso
 
     // Always clear current run
     *state.current_run.write().await = None;
+}
+
+/// Drain-first stop (TODO 68): stop the sources, let the downstream
+/// components drain their backlog to disk while still Running, then stop
+/// them. A plain `/api/stop` would move Merger/Recorder out of Running with
+/// the backlog still queued — and both discard non-Running data as an
+/// accepted Stop tail, which is exactly the data this path exists to save.
+///
+/// Caller must hold `state.run_control_lock`.
+pub(crate) async fn drain_first_stop(
+    state: &Arc<AppState>,
+    reason: &str,
+    timeout_ms: u64,
+) -> (StatusCode, Json<ApiResponse>) {
+    // Same Tune Up guard as /api/stop (TODO 58 M15).
+    if state.tuneup.is_active() {
+        return (
+            StatusCode::CONFLICT,
+            Json(ApiResponse::error(
+                "Tune Up mode is active — use the Tune Up stop endpoint instead.",
+            )),
+        );
+    }
+
+    tracing::warn!(reason, timeout_ms, "Drain-first stop initiated");
+
+    let (sources, sinks): (Vec<_>, Vec<_>) = state
+        .components
+        .iter()
+        .cloned()
+        .partition(|c| c.source_id.is_some());
+
+    // 1. Close the tap: stop the readers (HW disarm), wait until they are
+    //    actually out of Running — a Reader acks Stop before its pipeline
+    //    flushes the final EOS, so this wait must precede the drain wait.
+    let mut results = state.client.stop_all(&sources).await;
+    let sources_stopped = results.iter().all(|r| r.success);
+    if let Err(e) = state
+        .client
+        .wait_for_state(&sources, crate::common::ComponentState::Configured, 10_000)
+        .await
+    {
+        tracing::error!(error = %e, "Sources did not reach Configured after stop — draining anyway");
+    }
+
+    // 2. Drain: Merger/Recorder stay Running, so the backlog flows to disk
+    //    through the normal path and the readers' EOS closes the file.
+    let drain_result = state
+        .client
+        .wait_for_backlog_drained(&sinks, timeout_ms)
+        .await;
+
+    // 3. Stop the downstream (ascending pipeline order preserved).
+    let sink_results = state.client.stop_all(&sinks).await;
+    let sinks_stopped = sink_results.iter().all(|r| r.success);
+    results.extend(sink_results);
+
+    let mut response = match &drain_result {
+        Ok(()) => ApiResponse::success(format!(
+            "Drain-first stop complete ({reason}) — backlog fully written"
+        )),
+        Err(residual) => {
+            tracing::error!(residual = %residual.summary(), "Drain-first stop lost residual backlog");
+            ApiResponse::error(format!(
+                "Drain-first stop ({reason}) — DRAIN INCOMPLETE: {}",
+                residual.summary()
+            ))
+        }
+    }
+    .with_results(results);
+    // with_results() recomputes `success` from the component stop results
+    // alone — an incomplete drain must stay a failure even when every Stop
+    // command itself succeeded.
+    if drain_result.is_err() || !(sources_stopped && sinks_stopped) {
+        response.success = false;
+    }
+
+    // 4. Bookkeeping with the reason (and residual, if any) — a timed-out
+    //    drain records the run as Error via response.success = false.
+    let stop_reason = match &drain_result {
+        Ok(()) => reason.to_string(),
+        Err(residual) => format!("{reason}; {}", residual.summary()),
+    };
+    finish_run_bookkeeping(state, &mut response, Some(&stop_reason)).await;
 
     let status = if response.success {
         StatusCode::OK
     } else {
-        StatusCode::BAD_REQUEST
+        StatusCode::BAD_GATEWAY
     };
-
     (status, Json(response))
+}
+
+/// Stop the run by draining the pipeline first (TODO 68)
+#[utoipa::path(
+    post,
+    path = "/api/stop_drain",
+    tag = "DAQ Control",
+    responses(
+        (status = 200, description = "Drain-first stop complete, backlog fully written", body = ApiResponse),
+        (status = 409, description = "Tune Up active", body = ApiResponse),
+        (status = 502, description = "Drain incomplete or component stop failed", body = ApiResponse)
+    )
+)]
+pub(super) async fn stop_drain(
+    State(state): State<Arc<AppState>>,
+) -> (StatusCode, Json<ApiResponse>) {
+    // Serialize run control (TODO 58 H14).
+    let _run_guard = state.run_control_lock.lock().await;
+    let timeout_ms = state.config.drain_stop_timeout_secs * 1000;
+    drain_first_stop(&state, "operator drain-stop request", timeout_ms).await
 }
 
 /// Reset all components to Idle state
@@ -632,6 +754,7 @@ pub(super) async fn reset(State(state): State<Arc<AppState>>) -> (StatusCode, Js
                 &run_info.exp_name,
                 RunStatus::Aborted,
                 run_info.stats.clone(),
+                None,
             )
             .await
         {
