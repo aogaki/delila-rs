@@ -636,6 +636,9 @@ pub(super) async fn apply_digitizer_config(
     };
 
     // 2. Update in-memory config
+    // Keep what the AMax clamp note needs; `config` itself is moved into the
+    // command below.
+    let (note_firmware, note_num_channels) = (config.firmware, config.num_channels);
     state.digitizer_configs.insert(id, config.clone());
 
     // 3. Save to disk (best-effort, sanitized).
@@ -663,13 +666,19 @@ pub(super) async fn apply_digitizer_config(
                 .and_then(|d| d.get("params_applied"))
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
-            (
-                StatusCode::OK,
-                Json(ApiResponse::success(format!(
-                    "Applied {} parameters to hardware",
-                    params_applied
-                ))),
-            )
+            // The Reader clamps an AMax sweep that is wider than the firmware's
+            // channel-page map. That protects the hardware, but on its own it
+            // only shows up as a smaller `params_applied` — say so here instead
+            // of leaving the operator to diff counts.
+            let mut message = format!("Applied {} parameters to hardware", params_applied);
+            if let Some(note) = crate::reader::caen::amax_registers::channel_clamp_note(
+                note_firmware,
+                note_num_channels,
+            ) {
+                message.push_str(" — ");
+                message.push_str(&note);
+            }
+            (StatusCode::OK, Json(ApiResponse::success(message)))
         }
         Ok(resp) => (
             StatusCode::INTERNAL_SERVER_ERROR,

@@ -388,6 +388,8 @@ pub(super) async fn tuneup_apply(
     };
 
     // 1. Update in-memory config
+    // Keep what the AMax clamp note needs before `config` is consumed below.
+    let (note_firmware, note_num_channels) = (config.firmware, config.num_channels);
     state.digitizer_configs.insert(id, config.clone());
 
     // 2. Save to disk (best-effort, sanitized)
@@ -491,13 +493,20 @@ pub(super) async fn tuneup_apply(
             // ReadLoop processes state changes asynchronously (loop interval ~100ms).
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
-            (
-                StatusCode::OK,
-                Json(ApiResponse::success(format!(
-                    "Configuration applied to digitizer {} (full pipeline Stop→Apply→Start)",
-                    id
-                ))),
-            )
+            // Same AMax clamp note as the plain Apply route — Tune Up is the
+            // path an operator actually watches while changing settings.
+            let mut message = format!(
+                "Configuration applied to digitizer {} (full pipeline Stop→Apply→Start)",
+                id
+            );
+            if let Some(note) = crate::reader::caen::amax_registers::channel_clamp_note(
+                note_firmware,
+                note_num_channels,
+            ) {
+                message.push_str(" — ");
+                message.push_str(&note);
+            }
+            (StatusCode::OK, Json(ApiResponse::success(message)))
         }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,

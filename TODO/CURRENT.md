@@ -1,6 +1,7 @@
 # Current Sprint - TODO Index
 
-**Updated:** 2026-08-04 — **TODO 66 Phase 1 実装完了**: root_sink を 5 スレッド構成(Receiver→Sorter→Workers×N→Writer + Display)に再構築し、統合 built-event tree(`--built-tree`)を追加。検証 V0-V8 全合格(run0023 replay で内容完全一致・workers 数非依存の決定的出力・**4-fold 15,644 がオフライン正解と完全一致**・hits tree 全体時刻ソート化)。**side3 配備は凍結中(ユーザー出張、2026-08-05〜。帰還後に実施)**。背景: EB の C++ 移行決定(SPEC v0.8、oxyroot 圧縮未実装 + root_sink 実証)、マルチスレッド設計は TODO 66 §5。
+**Updated:** 2026-08-25 — **TODO 67 実装完了**: AMax の書き込みチャンネル範囲を FW に追従化(`CHANNEL_PAGES` を codegen が導出 → `apply_amax_channel_config` がクランプ)。発端は gant のビルド赤(codegen 生成物 3 本が空 stub 化)と、12august FW が **2ch・`PAGE_BASE` 0x800000→0x80000** に変わっていたこと。`num_channels` だけが手書きで FW 追従していなかったため、32ch config × 2ch FW で **ch30 の書き込みが旧 32ch マップの ch0 ページに重なる**危険があった。**gant 配備済(CHANNEL_PAGES=2 を実 RegisterFile から自動導出、DAQ 無停止)。残件(FW 世代の Magic 照合・num_channels 整理)はレベッカへ移管**。
+**前回 (2026-08-04)**: **TODO 66 Phase 1 実装完了**: root_sink を 5 スレッド構成(Receiver→Sorter→Workers×N→Writer + Display)に再構築し、統合 built-event tree(`--built-tree`)を追加。検証 V0-V8 全合格(run0023 replay で内容完全一致・workers 数非依存の決定的出力・**4-fold 15,644 がオフライン正解と完全一致**・hits tree 全体時刻ソート化)。**side3 配備は凍結中(ユーザー出張、2026-08-05〜。帰還後に実施)**。背景: EB の C++ 移行決定(SPEC v0.8、oxyroot 圧縮未実装 + root_sink 実証)、マルチスレッド設計は TODO 66 §5。
 **前回 (2026-07-21)**: TODO 65 全面完了+アーカイブ、TODO 掃除(24/26/47/51/65 → archive、詳細記録退避 65KB→18KB)。
 
 このファイルは現在のスプリントの概要を示すインデックスです。
@@ -16,6 +17,7 @@ Claudeセッション開始時に必ず読み込まれます。
 
 | Priority | File | Status | Summary |
 |----------|------|--------|---------|
+| **1** | [67_amax_channel_pages_clamp.md](67_amax_channel_pages_clamp.md) | **✅ 実装完了 + gant 配備済 (2026-08-25) / 残件はレベッカ(FW 側)へ移管** | AMax レジスタ書き込み範囲の FW 追従化。codegen が RegisterFile から `CHANNEL_PAGES` を導出 → `apply_amax_channel_config` がループをクランプ + warn。テスト 8 本追加(lib 687 / codegen 27 全パス)。gant 破損復旧・12august 2ch FW のアドレス 16 倍シフト・FW 世代別 Magic 一覧も同ファイル |
 | **1** | [64_amax_opendpp_params.md](64_amax_opendpp_params.md) | **🚧 Phase 0+A ✅済 (2026-07-16) / 残 = FWHM 実測(FW 修正版待ち)** | AMax UI に OpenDPP 標準 DevTree パラメータ追加（FW 開発者要望）。**Phase 0 実装+実機検証済**: `dc_offset` + `vga_gain` を AMax Input タブへ splice、FW OFFSET → "Offset (Trapezoid)" リネーム。gant SN52622（13july FW）で Tune Up Apply → DevTree 直読みで反映確認。**Phase A 済**: `docs/devtree_examples/vx2730_dppopen_sn52622.json`、**DPP_OPEN の ch パラメータは 10 個のみ**（channelstriggermask 無し）と確定。**残** = ChGain × trapezoid FWHM 実測（0/6/12 dB、13july FW の波形空バグ修正版待ち）、FW 開発者への確認事項（ChGain データパス位置/内部ビット幅）。Phase B/D は FW 開発者の要望次第 |
 | **1** | [63_v1743_cfd_search_window.md](63_v1743_cfd_search_window.md) | **📋 OPEN (2026-07-09)** | 既存 x743 CFD テスト2件 fail (`cfd_valid=false`)。原因: `analyze()` の後方探索窓 `search_span=4·cfd_delay=16` が遅い立ち上がりパルスのゼロ交差を取り逃す (commit `e4ad305` から潜在)。修正前に実機パルスの rise/delay 比測定要。silent peak-fallback の可視化 (warn) も追加 |
 | **2** | [52_refactor_sprint_2026-q2.md](52_refactor_sprint_2026-q2.md) | **📋 Phase 3 待機** | Phase 1+2 完了済 (23 項目、累計 -3716 行)。残 = Phase 3 Component Hardening: R-D3 (X743 read_loop split) / R-D5 (connection extract) / R-D11/D12 / R-P6 / R-P8 (ComponentRunner) / R-X3-post (ZMQ 境界 cost 再計測) |

@@ -920,15 +920,35 @@ impl CaenHandle {
     ) -> Result<usize, CaenError> {
         use super::amax_registers as r;
         use crate::config::digitizer::AMaxChannelConfig;
-        use tracing::{debug, info};
+        use tracing::{debug, info, warn};
 
         let mut count: usize = 0;
         let defaults_amax: Option<&AMaxChannelConfig> = config.channel_defaults.amax.as_ref();
 
+        // Clamp the sweep to the channel pages the FW actually implements.
+        // Every other part of this address map (PAGE_BASE, PAGE_STRIDE,
+        // BROADCAST_BASE, the offsets) is auto-derived by `amax_codegen` and
+        // therefore tracks each FW rebuild; `num_channels` is hand-written in
+        // the digitizer JSON and does not. A 32-channel config left in place
+        // against the 2-channel 12august FW would send 30 channels' worth of
+        // writes to addresses that FW never defines, and writing outside the
+        // FW's own map is how AMax firmware gets corrupted.
+        let n_ch = r::amax_channel_span(config.num_channels, r::CHANNEL_PAGES);
+        if n_ch < config.num_channels {
+            warn!(
+                config_num_channels = config.num_channels,
+                fw_channel_pages = r::CHANNEL_PAGES,
+                first_skipped = n_ch,
+                "[AMax] config num_channels exceeds the channel pages this firmware \
+                 defines - clamping the register sweep; the remaining channels are \
+                 left unconfigured. Fix num_channels in the digitizer JSON."
+            );
+        }
+
         // Resolve override-or-default for every Optional field. Codegen
         // (`channel_writes`) drives the actual write list, so adding a new
         // FW register is one `cargo run --bin amax_codegen` away.
-        for ch in 0..config.num_channels {
+        for ch in 0..n_ch {
             let override_amax = config
                 .channel_overrides
                 .get(&ch)

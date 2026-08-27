@@ -177,6 +177,10 @@ pub(super) async fn configure(
         // rejection here used to be warn-only + HTTP 200 — completely silent
         // in the UI while the digitizer ran with the wrong settings.
         let mut apply_failures: Vec<String> = Vec::new();
+        // Non-fatal: the Reader clamps an AMax sweep wider than the firmware's
+        // channel-page map. Configure is the automatic path, so without this the
+        // skipped channels would only ever appear in the Reader's own log.
+        let mut amax_notes: Vec<String> = Vec::new();
         for comp in &state.components {
             if comp.is_digitizer {
                 if let Some(source_id) = comp.source_id {
@@ -205,6 +209,13 @@ pub(super) async fn configure(
                             "X743Std: skipping redundant Apply (configure_all already applied identical config)"
                         );
                         continue;
+                    }
+                    if let Some(note) = crate::reader::caen::amax_registers::channel_clamp_note(
+                        cfg.firmware,
+                        cfg.num_channels,
+                    ) {
+                        tracing::warn!(source_id, name = %comp.name, note = %note, "AMax clamp");
+                        amax_notes.push(format!("{}: {}", comp.name, note));
                     }
                     tracing::info!(
                         source_id,
@@ -238,6 +249,9 @@ pub(super) async fn configure(
             }
         }
         if apply_failures.is_empty() {
+            if !amax_notes.is_empty() {
+                response.message = format!("{} — {}", response.message, amax_notes.join("; "));
+            }
             StatusCode::OK
         } else {
             response.success = false;

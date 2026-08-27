@@ -19,6 +19,16 @@ pub const PAGE_STRIDE: u32 = 0x40000;
 /// `apply_amax_channel_config` mirrors the per-channel writes here.
 pub const BROADCAST_BASE: u32 = 0x800000;
 
+/// Number of per-channel pages this firmware defines (`ch0`..=
+/// `CHANNEL_PAGES - 1`); `0` when the FW has no per-channel pages.
+///
+/// Auto-derived from the same RegisterFile.json as the bases above, so
+/// it cannot drift from them. `apply_amax_channel_config` clamps its
+/// write loop to this: the digitizer JSON's `num_channels` is
+/// hand-maintained and does NOT track FW rebuilds, and writing outside
+/// the FW's own address map is how the AMax firmware gets corrupted.
+pub const CHANNEL_PAGES: u32 = 32;
+
 // ---- Per-channel register offsets (word, relative to the channel page base) ----
 
 /// 32-bit Pretrig Input

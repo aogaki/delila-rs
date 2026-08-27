@@ -284,6 +284,12 @@ struct DerivedLayout {
     page_stride: u32,
     /// Base of the broadcast page (`page_base` when no broadcast group exists).
     broadcast_base: u32,
+    /// Number of per-channel pages the FW defines: the span `0..=max index`
+    /// (`0` when the RegisterFile has no per-channel pages at all). Emitted as
+    /// `CHANNEL_PAGES` so `apply_amax_channel_config` can clamp its write loop
+    /// to the pages that actually exist — the digitizer JSON's `num_channels`
+    /// is hand-maintained and does not track FW rebuilds.
+    channel_pages: u32,
     /// True when the per-channel ch0 page is the canonical `REG_*` source.
     prefer_per_channel: bool,
 }
@@ -342,10 +348,16 @@ fn derive_layout(registers: &[Register], prefer_override: Option<bool>) -> Deriv
 
     let broadcast_base = broadcast_min.unwrap_or(page_base);
 
+    // Span rather than count: a sparse index set (ch0 + ch4 only) reports 5, so
+    // clamping to it can never hide a page that does exist. `main` warns when
+    // the set is sparse instead of deciding silently.
+    let channel_pages = min_by_idx.keys().next_back().map_or(0, |&max| max + 1);
+
     DerivedLayout {
         page_base,
         page_stride,
         broadcast_base,
+        channel_pages,
         prefer_per_channel,
     }
 }
@@ -526,6 +538,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let page_stride = cli.page_stride.unwrap_or(layout.page_stride);
     let broadcast_base = cli.broadcast_base.unwrap_or(layout.broadcast_base);
     let prefer = layout.prefer_per_channel;
+    let channel_pages = layout.channel_pages;
+
+    // A gap in the per-channel index set means some page inside the span does
+    // not exist, so the emitted `CHANNEL_PAGES` clamp is looser than the real
+    // map. Never observed in a real RegisterFile; report it rather than let it
+    // pass unnoticed (CLAUDE.md: no silent failures).
+    {
+        let present: std::collections::BTreeSet<u32> = register_file
+            .registers
+            .iter()
+            .filter(|r| r.is_per_channel())
+            .filter_map(|r| r.channel_index())
+            .collect();
+        if !present.is_empty() && present.len() as u32 != channel_pages {
+            eprintln!(
+                "amax_codegen WARN: per-channel page indices are sparse \
+                 ({} pages across the span 0..{}) — CHANNEL_PAGES reports the \
+                 span, so channels in the gaps would still be written",
+                present.len(),
+                channel_pages.saturating_sub(1),
+            );
+        }
+    }
 
     // FW-corruption guard before we emit anything (uses the effective bases).
     if let Err(msg) =
@@ -657,13 +692,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let src = |o: Option<u32>| if o.is_some() { "override" } else { "auto" };
     eprintln!(
         "amax_codegen layout: PAGE_BASE=0x{:X} ({}), PAGE_STRIDE=0x{:X} ({}), \
-         BROADCAST_BASE=0x{:X} ({}), canonical={}",
+         BROADCAST_BASE=0x{:X} ({}), CHANNEL_PAGES={}, canonical={}",
         page_base,
         src(cli.page_base),
         page_stride,
         src(cli.page_stride),
         broadcast_base,
         src(cli.broadcast_base),
+        channel_pages,
         if prefer {
             "per-channel ch0"
         } else {
@@ -741,6 +777,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             page_base,
             page_stride,
             broadcast_base,
+            channel_pages,
             &cli.register_file,
         ),
     )?;
@@ -844,6 +881,7 @@ fn emit_rust_registers(
     page_base: u32,
     page_stride: u32,
     broadcast_base: u32,
+    channel_pages: u32,
     register_file: &std::path::Path,
 ) -> String {
     let mut out = String::new();
@@ -869,8 +907,18 @@ fn emit_rust_registers(
          /// every channel in hardware. Auto-derived from RegisterFile.json;\n\
          /// `apply_amax_channel_config` mirrors the per-channel writes here.\n\
          pub const BROADCAST_BASE: u32 = 0x{:X};\n\
+         \n\
+         /// Number of per-channel pages this firmware defines (`ch0`..=\n\
+         /// `CHANNEL_PAGES - 1`); `0` when the FW has no per-channel pages.\n\
+         ///\n\
+         /// Auto-derived from the same RegisterFile.json as the bases above, so\n\
+         /// it cannot drift from them. `apply_amax_channel_config` clamps its\n\
+         /// write loop to this: the digitizer JSON's `num_channels` is\n\
+         /// hand-maintained and does NOT track FW rebuilds, and writing outside\n\
+         /// the FW's own address map is how the AMax firmware gets corrupted.\n\
+         pub const CHANNEL_PAGES: u32 = {};\n\
          \n",
-        page_base, page_stride, broadcast_base
+        page_base, page_stride, broadcast_base, channel_pages
     ));
     out.push_str(
         "// ---- Per-channel register offsets (word, relative to the channel page base) ----\n\n",
@@ -1622,6 +1670,7 @@ mod tests {
         assert_eq!(l.page_base, 0x8000, "ch0 page is canonical");
         assert_eq!(l.page_stride, 0x200);
         assert_eq!(l.broadcast_base, 0x200);
+        assert_eq!(l.channel_pages, 32);
         assert!(l.prefer_per_channel);
     }
 
@@ -1706,6 +1755,33 @@ mod tests {
             l.broadcast_base, 0x100000,
             "no broadcast page → falls back to page_base"
         );
+        assert_eq!(l.channel_pages, 4);
+    }
+
+    #[test]
+    fn derive_layout_channel_pages_tracks_the_fw_channel_count() {
+        // The 2026-08 regression: the same FW family rebuilt for 2 channels.
+        // `num_channels` in the digitizer JSON does not follow a FW rebuild, so
+        // `CHANNEL_PAGES` is what stops a stale 32-channel config from writing
+        // 30 channels' worth of registers into unmapped address space.
+        assert_eq!(derive_layout(&custom_width_shape(2), None).channel_pages, 2);
+        assert_eq!(
+            derive_layout(&custom_width_shape(32), None).channel_pages,
+            32
+        );
+    }
+
+    #[test]
+    fn derive_layout_channel_pages_reports_the_span_not_the_count() {
+        // A sparse index set (ch0, ch1, ch4) must report 5, never 3: clamping
+        // to a count would silently stop configuring a page that does exist.
+        // `main` warns separately when it sees a gap.
+        let mut regs = custom_width_shape(2);
+        regs.push(reg_at(
+            0x100000 + 4 * 0x40000,
+            "page_amax_energy_1_4_POLARITY",
+        ));
+        assert_eq!(derive_layout(&regs, None).channel_pages, 5);
     }
 
     #[test]
@@ -1740,6 +1816,9 @@ mod tests {
             reg_at(0x100004, "page_amax_energy_THRS"),
         ];
         let l = derive_layout(&regs, None);
+        // No per-channel page span at all. `apply_amax_channel_config` reads
+        // this 0 as "nothing to clamp against", NOT as "write nothing".
+        assert_eq!(l.channel_pages, 0);
         assert!(!l.prefer_per_channel, "no ch0 page → broadcast canonical");
         assert_eq!(l.page_base, 0x100002);
         assert_eq!(l.page_stride, 0, "no per-channel pages → stride 0");
