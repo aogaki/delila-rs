@@ -78,3 +78,6 @@ FW
 
 # Per-host MongoDB override (secrets / remote host) — never committed
 scripts/mongodb.local.env
+
+# Affinity lock files
+*~lock~
